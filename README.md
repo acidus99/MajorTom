@@ -1,0 +1,54 @@
+# Major Tom Native
+
+This directory contains the Swift/SwiftUI implementation of Major Tom. It is being developed alongside the existing C#/Avalonia application until native feature parity and product acceptance make the legacy implementation unnecessary.
+
+The product requirements are in [`docs/design/major-tom-specification.md`](docs/design/major-tom-specification.md). The proposed native architecture is in [`docs/design/architecture.md`](docs/design/architecture.md).
+
+## Current implementation
+
+- SwiftUI application and settings scenes with normal foreground activation.
+- Unified capsule-address and Kennedy search field.
+- Live Gemini navigation with redirects, input prompts, cancellation, and status pages.
+- Implicit trust on first use, with persistent public-key fingerprints and warnings for later identity changes.
+- macOS 26 SwiftUI WebKit streaming renderer with Gemini-link interception.
+- Gemini URL normalization and request serialization.
+- Network.framework Gemini transport with TLS 1.2+, cancellation, and incremental response events.
+- Strict incremental response-header decoder.
+- Chunk-safe UTF-8 decoder and Gemtext parser.
+- Safe streaming HTML presentation with a restrictive content security policy.
+- SHA-256 Subject Public Key Info fingerprint extraction.
+- Seed, first-use, changed-key, seed-mismatch, and certificate-date trust decisions.
+- Atomic persistent trusted-identity store.
+
+The current milestone is a usable single-window, single-tab browser. Multi-tab state, proxy configuration, source/save/download commands, automatic inline images, appearance settings, and production distribution remain to be implemented.
+
+## Build and test
+
+From this directory:
+
+```bash
+swift test
+```
+
+Run the development executable directly:
+
+```bash
+swift run MajorTomNative
+```
+
+Or build an ad-hoc signed development application bundle:
+
+```bash
+Scripts/build-app.sh
+open ".build/Major Tom.app"
+```
+
+The restricted Codex environment needs its Swift caches redirected to a writable location; normal local Terminal and Xcode use do not.
+
+The live transport test is opt-in:
+
+```bash
+MAJOR_TOM_LIVE_TEST=1 swift test --filter GeminiTransportIntegrationTests
+```
+
+The Swift package can also be opened directly in Xcode. Major Tom currently targets macOS 26 because its renderer uses the native SwiftUI WebKit streaming APIs introduced in that release. The application-bundle script is intended for local development; Developer ID signing, notarization, and distributable packaging remain release work.

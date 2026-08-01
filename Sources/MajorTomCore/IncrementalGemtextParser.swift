@@ -1,0 +1,112 @@
+import Foundation
+
+public enum GemtextEvent: Equatable, Sendable {
+    case text(String)
+    case heading(level: Int, text: String)
+    case link(destination: String, label: String?)
+    case listItem(String)
+    case quote(String)
+    case blank
+    case beginPreformatted(altText: String?)
+    case preformattedLine(String)
+    case endPreformatted
+}
+
+public struct IncrementalGemtextParser: Sendable {
+    private var lineBuffer = ""
+    private var isPreformatted = false
+    private var hasSeenFirstCharacter = false
+
+    public init() {}
+
+    public mutating func receive(_ text: String) -> [GemtextEvent] {
+        guard !text.isEmpty else { return [] }
+        lineBuffer.append(text)
+
+        var events: [GemtextEvent] = []
+        while let newline = lineBuffer.firstIndex(of: "\n") {
+            var line = String(lineBuffer[..<newline])
+            lineBuffer.removeSubrange(...newline)
+            if line.last == "\r" { line.removeLast() }
+            events.append(contentsOf: parseCompletedLine(line))
+        }
+        return events
+    }
+
+    public mutating func finish() -> [GemtextEvent] {
+        var events: [GemtextEvent] = []
+        if !lineBuffer.isEmpty {
+            var line = lineBuffer
+            if line.last == "\r" { line.removeLast() }
+            events.append(contentsOf: parseCompletedLine(line))
+            lineBuffer = ""
+        }
+        if isPreformatted {
+            isPreformatted = false
+            events.append(.endPreformatted)
+        }
+        return events
+    }
+
+    private mutating func parseCompletedLine(_ originalLine: String) -> [GemtextEvent] {
+        var line = originalLine
+        if !hasSeenFirstCharacter {
+            hasSeenFirstCharacter = true
+            if line.first == "\u{FEFF}" { line.removeFirst() }
+        }
+
+        if line.hasPrefix("```") {
+            if isPreformatted {
+                isPreformatted = false
+                return [.endPreformatted]
+            }
+
+            isPreformatted = true
+            let alt = String(line.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+            return [.beginPreformatted(altText: alt.isEmpty ? nil : alt)]
+        }
+
+        if isPreformatted {
+            return [.preformattedLine(line)]
+        }
+
+        if line.isEmpty { return [.blank] }
+
+        if let heading = parseHeading(line) { return [heading] }
+        if let link = parseLink(line) { return [link] }
+        if line.hasPrefix("* ") { return [.listItem(String(line.dropFirst(2)))] }
+        if line.first == ">" {
+            return [.quote(String(line.dropFirst()).dropLeadingSpace())]
+        }
+        return [.text(line)]
+    }
+
+    private func parseHeading(_ line: String) -> GemtextEvent? {
+        for level in stride(from: 3, through: 1, by: -1) {
+            let marker = String(repeating: "#", count: level) + " "
+            if line.hasPrefix(marker) {
+                return .heading(level: level, text: String(line.dropFirst(marker.count)))
+            }
+        }
+        return nil
+    }
+
+    private func parseLink(_ line: String) -> GemtextEvent? {
+        guard line.hasPrefix("=>") else { return nil }
+        let remainder = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        guard !remainder.isEmpty else { return .text(line) }
+
+        let pieces = remainder.split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+        let destination = String(pieces[0])
+        let label = pieces.count == 2
+            ? String(pieces[1]).trimmingCharacters(in: .whitespaces)
+            : nil
+        return .link(destination: destination, label: label?.isEmpty == true ? nil : label)
+    }
+}
+
+private extension String {
+    func dropLeadingSpace() -> String {
+        first == " " ? String(dropFirst()) : self
+    }
+}
