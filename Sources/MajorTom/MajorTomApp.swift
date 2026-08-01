@@ -493,7 +493,9 @@ private struct BrowserTabView: View {
         removeNavigationKeyMonitor()
         navigationKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard modifiers == .command else { return event }
+            guard modifiers.contains(.command),
+                  !modifiers.contains(.option),
+                  !modifiers.contains(.control) else { return event }
             switch event.charactersIgnoringModifiers {
             case "[":
                 browser.goBack()
@@ -502,7 +504,16 @@ private struct BrowserTabView: View {
                 browser.goForward()
                 return nil
             default:
-                return event
+                switch event.keyCode {
+                case 123: // Left Arrow
+                    browser.goBack()
+                    return nil
+                case 124: // Right Arrow
+                    browser.goForward()
+                    return nil
+                default:
+                    return event
+                }
             }
         }
     }
