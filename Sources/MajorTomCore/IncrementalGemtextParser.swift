@@ -24,13 +24,22 @@ public struct IncrementalGemtextParser: Sendable {
         lineBuffer.append(text)
 
         var events: [GemtextEvent] = []
-        while let newline = lineBuffer.firstIndex(of: "\n") {
-            var line = String(lineBuffer[..<newline])
+        while let newline = lineEnding(in: lineBuffer) {
+            let terminator = lineBuffer[newline]
+            // A trailing CR may be the first half of a CRLF sequence split across
+            // network chunks. Keep it until the next chunk makes that clear.
+            if terminator == "\r", newline == lineBuffer.index(before: lineBuffer.endIndex) {
+                break
+            }
+            let line = String(lineBuffer[..<newline])
             lineBuffer.removeSubrange(...newline)
-            if line.last == "\r" { line.removeLast() }
             events.append(contentsOf: parseCompletedLine(line))
         }
         return events
+    }
+
+    private func lineEnding(in value: String) -> String.Index? {
+        value.firstIndex(where: \.isNewline)
     }
 
     public mutating func finish() -> [GemtextEvent] {

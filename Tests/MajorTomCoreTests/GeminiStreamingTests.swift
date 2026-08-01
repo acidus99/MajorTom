@@ -57,6 +57,23 @@ final class GeminiStreamingTests: XCTestCase {
         ])
     }
 
+    func testGemtextParserAcceptsCRAndCRLFLineEndingsAcrossChunks() {
+        let variants = ["\r", "\r\n"]
+        for ending in variants {
+            let source = "=>/one One\(ending)=>/two Two\(ending)"
+            for split in source.indices {
+                var parser = IncrementalGemtextParser()
+                let events = parser.receive(String(source[..<split]))
+                    + parser.receive(String(source[split...]))
+                    + parser.finish()
+                XCTAssertEqual(events, [
+                    .link(destination: "/one", label: "One"),
+                    .link(destination: "/two", label: "Two")
+                ], "\(ending.debugDescription), split \(source.distance(from: source.startIndex, to: split))")
+            }
+        }
+    }
+
     func testHTMLRendererEscapesCapsuleContentAndDestinations() {
         let renderer = HTMLDocumentStreamRenderer()
         let paragraph = String(decoding: renderer.render(.text("<script>&")), as: UTF8.self)
