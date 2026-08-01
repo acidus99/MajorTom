@@ -110,8 +110,24 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         _ sender: NSApplication,
         hasVisibleWindows flag: Bool
     ) -> Bool {
-        if !flag { sender.windows.first?.makeKeyAndOrderFront(nil) }
+        if !flag {
+            DispatchQueue.main.async { [weak self] in
+                self?.openFreshBrowserWindow()
+            }
+        }
         return true
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    @MainActor
+    private func openFreshBrowserWindow() {
+        guard let fileMenu = NSApplication.shared.mainMenu?.item(withTitle: "File")?.submenu,
+              let newWindow = fileMenu.items.first(where: { $0.title == "New Window" }),
+              let action = newWindow.action else { return }
+        NSApplication.shared.sendAction(action, to: newWindow.target, from: newWindow)
     }
 }
 
@@ -190,12 +206,15 @@ private final class BrowserWindowSession: ObservableObject {
     private var observers: [UUID: AnyCancellable] = [:]
 
     init() {
-        if let restored = SessionRestorationStore.shared.load(), !restored.tabs.isEmpty {
+        if !BrowserSessionRestorationState.hasRestoredInitialWindow,
+           let restored = SessionRestorationStore.shared.load(), !restored.tabs.isEmpty {
+            BrowserSessionRestorationState.hasRestoredInitialWindow = true
             tabs = restored.tabs.map { Tab(restoredState: $0) }
             selectedID = tabs.indices.contains(restored.selectedIndex)
                 ? tabs[restored.selectedIndex].id
                 : tabs.first?.id
         } else {
+            BrowserSessionRestorationState.hasRestoredInitialWindow = true
             tabs = [Tab()]
             selectedID = tabs.first?.id
         }
@@ -240,6 +259,12 @@ private final class BrowserWindowSession: ObservableObject {
             selectedIndex: selectedIndex
         ))
     }
+}
+
+@available(macOS 26.0, *)
+@MainActor
+private enum BrowserSessionRestorationState {
+    static var hasRestoredInitialWindow = false
 }
 
 @available(macOS 26.0, *)
