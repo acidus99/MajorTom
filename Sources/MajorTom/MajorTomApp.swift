@@ -245,7 +245,7 @@ private struct BrowserTabStrip: View {
     @ObservedObject var session: BrowserWindowSession
 
     var body: some View {
-        HStack(spacing: 1) {
+        HStack(spacing: 6) {
             ForEach(session.tabs) { tab in
                 BrowserTabButton(
                     browser: tab.browser,
@@ -266,7 +266,8 @@ private struct BrowserTabStrip: View {
                 .padding(.horizontal, 9)
                 .help("New Tab")
         }
-        .frame(height: 34)
+        .padding(.horizontal, 8)
+        .frame(height: 42)
         .background(.bar)
     }
 }
@@ -277,23 +278,36 @@ private struct BrowserTabButton: View {
     let isSelected: Bool
     let select: () -> Void
     let close: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 7) {
+            if isHovered {
+                Button("Close Tab", systemImage: "xmark") { close() }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.plain)
+                    .controlSize(.small)
+                    .frame(width: 18, height: 18)
+                    .accessibilityLabel("Close \(browser.title)")
+            }
             if browser.isLoading { ProgressView().controlSize(.mini) }
             Text(browser.title)
                 .lineLimit(1)
-            Button("Close Tab", systemImage: "xmark") { close() }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.plain)
-                .controlSize(.mini)
         }
-        .padding(.horizontal, 10)
-        .frame(minWidth: 150, maxWidth: 240, minHeight: 28)
-        .background(isSelected ? AnyShapeStyle(.background) : AnyShapeStyle(.clear), in: RoundedRectangle(cornerRadius: 7))
+        .padding(.horizontal, 12)
+        .frame(minWidth: 150, maxWidth: 240, minHeight: 30)
+        .background(tabBackground, in: Capsule())
         .contentShape(Rectangle())
         .onTapGesture(perform: select)
+        .onHover { isHovered = $0 }
         .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private var tabBackground: AnyShapeStyle {
+        if isSelected {
+            return AnyShapeStyle(Color(nsColor: .windowBackgroundColor).opacity(0.92))
+        }
+        return AnyShapeStyle(Color(nsColor: .controlBackgroundColor).opacity(0.58))
     }
 }
 
