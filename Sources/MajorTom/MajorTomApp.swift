@@ -149,12 +149,12 @@ private struct BrowserWindowView: View {
     @Environment(\.controlActiveState) private var controlActiveState
 
     var body: some View {
-        VStack(spacing: 0) {
-            BrowserTabStrip(session: session)
+        ZStack(alignment: .top) {
             if let selectedTab = session.selectedTab {
-                BrowserTabView(browser: selectedTab.browser)
+                BrowserTabView(browser: selectedTab.browser, chromeTopInset: 42)
                     .id(selectedTab.id)
             }
+            BrowserTabStrip(session: session)
         }
         .navigationTitle(session.selectedTab?.browser.title ?? "Major Tom")
         .onReceive(NotificationCenter.default.publisher(for: .majorTomNewTab)) { _ in
@@ -270,7 +270,7 @@ private struct BrowserTabStrip: View {
         }
         .padding(.horizontal, 8)
         .frame(height: 42)
-        .background(.bar)
+        .background(.ultraThinMaterial)
     }
 }
 
@@ -322,6 +322,7 @@ private struct BrowserTabButton: View {
 @available(macOS 26.0, *)
 private struct BrowserTabView: View {
     @ObservedObject var browser: BrowserModel
+    let chromeTopInset: CGFloat
     @FocusState private var locationIsFocused: Bool
     @FocusState private var findIsFocused: Bool
     @State private var showsFind = false
@@ -451,6 +452,7 @@ private struct BrowserTabView: View {
                 Divider()
             }
             .background(.ultraThinMaterial)
+            .padding(.top, chromeTopInset)
         }
         .task { browser.start() }
         .onAppear { installNavigationKeyMonitor() }
