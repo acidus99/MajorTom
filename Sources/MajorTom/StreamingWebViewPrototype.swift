@@ -289,10 +289,15 @@ final class BrowserModel: ObservableObject {
         menu.popUp(positioning: nil, at: location, in: view)
     }
 
-    func showContextMenu(at location: NSPoint, contentHeight: CGFloat, in view: NSView?) {
+    func showContextMenu(at location: NSPoint, contentSize: CGSize, in view: NSView?) {
         Task {
             let script = """
-            (() => document.elementFromPoint(\(location.x), \(contentHeight - location.y))?.closest('a')?.href ?? null)()
+            (() => {
+                const x = \(location.x) * window.innerWidth / \(contentSize.width);
+                const y = (\(contentSize.height) - \(location.y)) * window.innerHeight / \(contentSize.height);
+                const element = document.elementsFromPoint(x, y).find((node) => node.closest?.('a'));
+                return element?.closest('a')?.href ?? null;
+            })()
             """
             let href = try? await page.callJavaScript(script) as? String
             guard let href, let url = URL(string: href) else {
