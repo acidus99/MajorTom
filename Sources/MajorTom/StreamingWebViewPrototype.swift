@@ -32,6 +32,7 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var statusText = "Ready"
     @Published private(set) var title = "New Tab"
+    @Published private(set) var documentTitle: String?
     @Published private(set) var canSavePage = false
     @Published private(set) var canShowSource = false
     @Published var validationMessage: String?
@@ -631,7 +632,8 @@ final class BrowserModel: ObservableObject {
                         body: sourceBytes,
                         completion: .complete,
                         receivedAt: Date(),
-                        title: title
+                        title: title,
+                        documentTitle: documentTitle
                     )
                     statusText = "Loaded \(sourceBytes.count) bytes"
                     navigationTask = nil
@@ -803,7 +805,9 @@ final class BrowserModel: ObservableObject {
 
     private func suggestedFilename(for url: URL, mimeType: String) -> String {
         var name = url.lastPathComponent
-        if name.isEmpty { name = "untitled" }
+        if name.isEmpty {
+            name = documentTitle.map(sanitizeFilename) ?? "untitled"
+        }
         guard !name.contains(".") else { return name }
         switch mimeType {
         case "text/gemini": return name + ".gmi"
@@ -815,9 +819,17 @@ final class BrowserModel: ObservableObject {
         }
     }
 
+    private func sanitizeFilename(_ value: String) -> String {
+        let invalid = CharacterSet(charactersIn: "/:\\")
+        let sanitized = value.components(separatedBy: invalid).joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return sanitized.isEmpty ? "untitled" : sanitized
+    }
+
     private func commit(_ url: URL, disposition: HistoryDisposition) {
         committedURL = url
         title = displayTitle(for: url)
+        documentTitle = nil
         locationText = url.absoluteString
         switch disposition {
         case .new:
@@ -842,6 +854,7 @@ final class BrowserModel: ObservableObject {
         currentSourceBytes = cached.body
         currentMIMEType = cached.mimeType
         title = cached.title ?? displayTitle(for: cached.url)
+        documentTitle = cached.documentTitle
         canSavePage = !cached.body.isEmpty
         canShowSource = cached.mimeType.hasPrefix("text/") && cached.url.scheme?.lowercased() != "view-source"
         if cached.url.scheme?.lowercased() == "view-source" {
@@ -982,7 +995,10 @@ final class BrowserModel: ObservableObject {
         if case .heading(level: 1, text: let heading) = event,
            title == displayTitle(for: baseURL) {
             let candidate = heading.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !candidate.isEmpty { title = candidate }
+            if !candidate.isEmpty {
+                title = candidate
+                documentTitle = candidate
+            }
         }
         documentContinuation?.yield(renderer.render(
             event,

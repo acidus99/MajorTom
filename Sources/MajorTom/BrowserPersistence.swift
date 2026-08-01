@@ -15,6 +15,7 @@ struct CachedPage: Codable {
     var completion: PageCompletionState
     var receivedAt: Date
     var title: String? = nil
+    var documentTitle: String? = nil
 }
 
 struct RestoredTabState: Codable {
