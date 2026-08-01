@@ -323,7 +323,26 @@ private struct BrowserTabView: View {
     @State private var navigationKeyMonitor: Any?
 
     var body: some View {
-        VStack(spacing: 0) {
+        ZStack(alignment: .top) {
+            StreamingWebViewPrototype(browser: browser)
+                .overlay(alignment: .bottomLeading) {
+                    HStack(spacing: 7) {
+                        if browser.isLoading {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(browser.statusText)
+                            .lineLimit(1)
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
+                    .padding(8)
+                }
+
+            VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Button("Back", systemImage: "chevron.left") {
                     browser.goBack()
@@ -394,56 +413,38 @@ private struct BrowserTabView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .background(.regularMaterial)
-
-            if let validationMessage = browser.validationMessage {
-                HStack {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(validationMessage)
-                    Spacer()
-                }
-                .font(.callout)
-                .padding(.horizontal, 12)
-                .padding(.bottom, 7)
-                .accessibilityElement(children: .combine)
-            }
-
-            if showsFind {
-                HStack {
-                    TextField("Find on Page", text: $findQuery)
-                        .textFieldStyle(.roundedBorder)
-                        .focused($findIsFocused)
-                        .onSubmit { browser.find(findQuery) }
-                    Button("Previous", systemImage: "chevron.up") { browser.find(findQuery, backwards: true) }
-                        .labelStyle(.iconOnly)
-                    Button("Next", systemImage: "chevron.down") { browser.find(findQuery) }
-                        .labelStyle(.iconOnly)
-                    Button("Done") { showsFind = false }
-                }
-                .padding(.horizontal, 12)
-                .padding(.bottom, 8)
-            }
-
-            Divider()
-
-            StreamingWebViewPrototype(browser: browser)
-                .overlay(alignment: .bottomLeading) {
-                    HStack(spacing: 7) {
-                        if browser.isLoading {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-                        Text(browser.statusText)
-                            .lineLimit(1)
+                if let validationMessage = browser.validationMessage {
+                    HStack {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                        Text(validationMessage)
+                        Spacer()
                     }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
-                    .padding(8)
+                    .font(.callout)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 7)
+                    .accessibilityElement(children: .combine)
                 }
+
+                if showsFind {
+                    HStack {
+                        TextField("Find on Page", text: $findQuery)
+                            .textFieldStyle(.roundedBorder)
+                            .focused($findIsFocused)
+                            .onSubmit { browser.find(findQuery) }
+                        Button("Previous", systemImage: "chevron.up") { browser.find(findQuery, backwards: true) }
+                            .labelStyle(.iconOnly)
+                        Button("Next", systemImage: "chevron.down") { browser.find(findQuery) }
+                            .labelStyle(.iconOnly)
+                        Button("Done") { showsFind = false }
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+                }
+
+                Divider()
+            }
+            .background(.ultraThinMaterial)
         }
         .task { browser.start() }
         .onAppear { installNavigationKeyMonitor() }
