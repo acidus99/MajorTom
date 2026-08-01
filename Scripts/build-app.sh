@@ -26,11 +26,11 @@ swift "${swift_arguments[@]}"
 
 app="$project_root/.build/Major Tom.app"
 contents="$app/Contents"
-executable="$project_root/.build/$swift_configuration/MajorTomNative"
+executable="$project_root/.build/$swift_configuration/MajorTom"
 
 rm -rf "$app"
 mkdir -p "$contents/MacOS" "$contents/Resources"
-cp "$executable" "$contents/MacOS/MajorTomNative"
+cp "$executable" "$contents/MacOS/MajorTom"
 cp "$project_root/Resources/Info.plist" "$contents/Info.plist"
 codesign --force --sign - "$app"
 

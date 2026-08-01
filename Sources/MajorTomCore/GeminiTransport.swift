@@ -16,6 +16,24 @@ public enum GeminiTransportError: Error, Sendable {
     case trustDeclined
     case connectionFailed(String)
     case responseFailed(GeminiProtocolError)
+    case timedOut
+    case responseTooLarge(limit: Int)
+}
+
+public struct GeminiTransportConfiguration: Equatable, Sendable {
+    public var proxy: GeminiProxyConfiguration?
+    public var idleTimeout: Duration
+    public var maximumResponseByteCount: Int
+
+    public init(
+        proxy: GeminiProxyConfiguration? = nil,
+        idleTimeout: Duration = .seconds(30),
+        maximumResponseByteCount: Int = 64 * 1_024 * 1_024
+    ) {
+        self.proxy = proxy
+        self.idleTimeout = idleTimeout
+        self.maximumResponseByteCount = maximumResponseByteCount
+    }
 }
 
 public final class GeminiTransport: @unchecked Sendable {
@@ -28,11 +46,13 @@ public final class GeminiTransport: @unchecked Sendable {
 
     public func events(
         for target: GeminiRequestTarget,
+        configuration: GeminiTransportConfiguration = GeminiTransportConfiguration(),
         authorizeTrust: @escaping TrustAuthorization
     ) -> AsyncThrowingStream<GeminiTransportEvent, any Error> {
         AsyncThrowingStream { continuation in
             let session = GeminiConnectionSession(
                 target: target,
+                configuration: configuration,
                 continuation: continuation,
                 authorizeTrust: authorizeTrust
             )
@@ -48,6 +68,7 @@ public final class GeminiTransport: @unchecked Sendable {
 
 private final class GeminiConnectionSession: @unchecked Sendable {
     private let target: GeminiRequestTarget
+    private let configuration: GeminiTransportConfiguration
     private let continuation: AsyncThrowingStream<GeminiTransportEvent, any Error>.Continuation
     private let authorizeTrust: GeminiTransport.TrustAuthorization
     private let queue = DispatchQueue(label: "dev.gemi.major-tom.gemini-transport")
@@ -55,18 +76,23 @@ private final class GeminiConnectionSession: @unchecked Sendable {
     private var connection: NWConnection?
     private var responseDecoder = GeminiResponseStreamDecoder()
     private var hasFinished = false
+    private var receivedByteCount = 0
+    private var timeoutTask: Task<Void, Never>?
 
     init(
         target: GeminiRequestTarget,
+        configuration: GeminiTransportConfiguration,
         continuation: AsyncThrowingStream<GeminiTransportEvent, any Error>.Continuation,
         authorizeTrust: @escaping GeminiTransport.TrustAuthorization
     ) {
         self.target = target
+        self.configuration = configuration
         self.continuation = continuation
         self.authorizeTrust = authorizeTrust
     }
 
     func start() {
+        resetTimeout()
         let tlsOptions = NWProtocolTLS.Options()
         sec_protocol_options_set_min_tls_protocol_version(
             tlsOptions.securityProtocolOptions,
@@ -113,6 +139,17 @@ private final class GeminiConnectionSession: @unchecked Sendable {
         )
 
         let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
+        if let proxy = configuration.proxy,
+           let port = NWEndpoint.Port(rawValue: proxy.port) {
+            let privacy = NWParameters.PrivacyContext(description: "Major Tom Gemini proxy")
+            privacy.proxyConfigurations = [
+                ProxyConfiguration(httpCONNECTProxy: .hostPort(
+                    host: NWEndpoint.Host(proxy.host),
+                    port: port
+                ))
+            ]
+            parameters.setPrivacyContext(privacy)
+        }
         let connection = NWConnection(
             host: NWEndpoint.Host(target.endpoint.host),
             port: NWEndpoint.Port(rawValue: target.endpoint.port)!,
@@ -135,6 +172,7 @@ private final class GeminiConnectionSession: @unchecked Sendable {
         guard let connection else { return }
         switch state {
         case .ready:
+            resetTimeout()
             connection.send(content: target.requestData, completion: .contentProcessed { [weak self] error in
                 guard let self else { return }
                 if let error {
@@ -159,6 +197,14 @@ private final class GeminiConnectionSession: @unchecked Sendable {
             guard let self else { return }
 
             if let data, !data.isEmpty {
+                resetTimeout()
+                receivedByteCount += data.count
+                guard receivedByteCount <= configuration.maximumResponseByteCount else {
+                    finish(throwing: GeminiTransportError.responseTooLarge(
+                        limit: configuration.maximumResponseByteCount
+                    ))
+                    return
+                }
                 do {
                     for event in try responseDecoder.receive(data) {
                         switch event {
@@ -196,6 +242,8 @@ private final class GeminiConnectionSession: @unchecked Sendable {
     private func finish(throwing error: (any Error)? = nil) {
         guard !hasFinished else { return }
         hasFinished = true
+        timeoutTask?.cancel()
+        timeoutTask = nil
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
@@ -203,6 +251,18 @@ private final class GeminiConnectionSession: @unchecked Sendable {
             continuation.finish(throwing: error)
         } else {
             continuation.finish()
+        }
+    }
+
+    private func resetTimeout() {
+        timeoutTask?.cancel()
+        let timeout = configuration.idleTimeout
+        timeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            self?.queue.async { [weak self] in
+                self?.finish(throwing: GeminiTransportError.timedOut)
+            }
         }
     }
 

@@ -1,4 +1,4 @@
-# Major Tom Native Architecture
+# Major Tom Architecture
 
 Status: Proposed engineering design for the native MVP
 

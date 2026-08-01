@@ -68,6 +68,45 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertTrue(link.contains("&quot;"))
     }
 
+    func testInlineEnhancementsAreConservativeAndEscaped() {
+        let rendered = HTMLDocumentStreamRenderer.renderInline(
+            "Use **strong**, *emphasis*, and `code <here>`; leave *unmatched visible"
+        )
+        XCTAssertEqual(
+            rendered,
+            "Use <strong>strong</strong>, <em>emphasis</em>, and <code>code &lt;here&gt;</code>; leave *unmatched visible"
+        )
+    }
+
+    func testInlineEnhancementsCanBeDisabledIndependently() {
+        let options = HTMLRenderingOptions(
+            recognizesEmphasis: false,
+            recognizesStrongEmphasis: true,
+            recognizesInlineCode: false
+        )
+        XCTAssertEqual(
+            HTMLDocumentStreamRenderer.renderInline("**yes** *no* `no`", options: options),
+            "<strong>yes</strong> *no* `no`"
+        )
+    }
+
+    func testBrowserPreferencesRoundTrip() throws {
+        let original = BrowserPreferences(
+            homepage: "gemini://example.com/",
+            searchProvider: .custom,
+            customSearchEndpoint: "gemini://search.example/query",
+            applicationAppearance: .dark,
+            contentTheme: .draculaLight,
+            proxy: GeminiProxyConfiguration(host: "proxy.example", port: 8080),
+            automaticallyLoadsSameCapsuleImages: false
+        )
+        let decoded = try JSONDecoder().decode(
+            BrowserPreferences.self,
+            from: JSONEncoder().encode(original)
+        )
+        XCTAssertEqual(decoded, original)
+    }
+
     func testGeminiRequestTargetNormalizesAndRemovesFragment() throws {
         let target = try GeminiRequestTarget("GEMINI://Example.COM/path?q=hello#section")
         XCTAssertEqual(target.endpoint, CapsuleEndpoint(host: "example.com", port: 1_965))

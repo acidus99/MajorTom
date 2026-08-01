@@ -31,71 +31,124 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var committedURL: URL?
     @Published private(set) var isLoading = false
     @Published private(set) var statusText = "Ready"
+    @Published private(set) var title = "New Tab"
     @Published private(set) var canSavePage = false
     @Published private(set) var canShowSource = false
     @Published var validationMessage: String?
     @Published var trustPrompt: TrustPrompt?
     @Published var inputPrompt: InputPrompt?
+    @Published var inputValidationMessage: String?
+    @Published private(set) var pageZoom = 1.0
+    @Published private(set) var retryNotBefore: Date?
 
     let page: WebPage
 
     private let documentStore: BrowserDocumentStore
+    private let resourceStore: BrowserResourceStore
     private let router: BrowserNavigationRouter
     private let transport = GeminiTransport()
+    private let settings = BrowserSettingsStore.shared
     private let trustPolicy = ServerTrustPolicy()
     private let trustStore: TrustedIdentityStore?
     private let renderer = HTMLDocumentStreamRenderer()
-    private let addressInterpreter = AddressInputInterpreter()
+    private var cancellables = Set<AnyCancellable>()
 
     private var navigationTask: Task<Void, Never>?
     private var documentContinuation: AsyncThrowingStream<Data, any Error>.Continuation?
     private var trustContinuation: CheckedContinuation<Bool, Never>?
     private var history: [URL] = []
     private var historyIndex = -1
+    private var cachedPages: [URL: CachedPage] = [:]
     private var hasStarted = false
     private var trustWasDeclined = false
     private var currentSourceBytes = Data()
     private var currentMIMEType = ""
+    private var imageTasks: [Task<Void, Never>] = []
+    private let imageLimiter = AsyncSemaphore(limit: 4)
+    private var slowDownTask: Task<Void, Never>?
 
-    init() {
+    init(restoredState: RestoredTabState? = nil) {
         let documentStore = BrowserDocumentStore()
+        let resourceStore = BrowserResourceStore()
         let router = BrowserNavigationRouter()
         var configuration = WebPage.Configuration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.suppressesIncrementalRendering = false
-        configuration.loadsSubresources = false
+        configuration.loadsSubresources = true
         configuration.defaultNavigationPreferences.allowsContentJavaScript = false
         configuration.urlSchemeHandlers = [
             URLScheme(BrowserDocumentSchemeHandler.scheme)!:
-                BrowserDocumentSchemeHandler(store: documentStore)
+                BrowserDocumentSchemeHandler(store: documentStore),
+            URLScheme(BrowserResourceSchemeHandler.scheme)!:
+                BrowserResourceSchemeHandler(store: resourceStore)
         ]
 
         self.documentStore = documentStore
+        self.resourceStore = resourceStore
         self.router = router
         self.page = WebPage(
             configuration: configuration,
             navigationDecider: BrowserNavigationDecider(router: router)
         )
         self.trustStore = Self.makeTrustStore()
+        if let restoredState {
+            self.history = restoredState.history
+            self.historyIndex = min(restoredState.historyIndex, restoredState.history.count - 1)
+            self.cachedPages = Dictionary(uniqueKeysWithValues: restoredState.cachedPages.map { ($0.url, $0) })
+            self.pageZoom = restoredState.zoom
+            self.committedURL = self.history.indices.contains(self.historyIndex)
+                ? self.history[self.historyIndex]
+                : nil
+            self.locationText = self.committedURL?.absoluteString ?? settings.preferences.homepage
+        } else {
+            self.locationText = settings.preferences.homepage
+        }
 
         router.openURL = { [weak self] url in
             self?.openLink(url)
         }
+        router.downloadURL = { [weak self] url in
+            self?.download(url)
+        }
+        settings.$preferences
+            .dropFirst()
+            .sink { [weak self] _ in self?.preferencesChanged() }
+            .store(in: &cancellables)
     }
 
     var canGoBack: Bool { historyIndex > 0 }
     var canGoForward: Bool { historyIndex >= 0 && historyIndex + 1 < history.count }
+    var canReload: Bool {
+        !isLoading && committedURL != nil && (retryNotBefore.map { Date() >= $0 } ?? true)
+    }
 
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
-        submitLocation()
+        if let committedURL, let cached = cachedPages[committedURL] {
+            displayCachedPage(cached)
+        } else {
+            submitLocation()
+        }
+    }
+
+    var restorationState: RestoredTabState {
+        RestoredTabState(
+            history: history,
+            historyIndex: historyIndex,
+            cachedPages: Array(cachedPages.values),
+            zoom: pageZoom
+        )
     }
 
     func submitLocation() {
         validationMessage = nil
         do {
-            switch try addressInterpreter.interpret(locationText) {
+            let preferences = settings.preferences
+            let interpreter = AddressInputInterpreter(searchEndpoint:
+                preferences.searchProvider.endpoint(customEndpoint: preferences.customSearchEndpoint)
+            )
+            switch try interpreter.interpret(locationText) {
             case .gemini(let target):
                 navigate(to: target, disposition: .new)
             case .external(let url):
@@ -123,6 +176,15 @@ final class BrowserModel: ObservableObject {
         trustContinuation = nil
         trustPrompt = nil
         finishCurrentDocument(message: "Loading was stopped.")
+        if let committedURL, !currentSourceBytes.isEmpty {
+            cachedPages[committedURL] = CachedPage(
+                url: committedURL,
+                mimeType: currentMIMEType,
+                body: currentSourceBytes,
+                completion: .stopped,
+                receivedAt: Date()
+            )
+        }
         isLoading = false
         statusText = "Stopped"
         if let committedURL { locationText = committedURL.absoluteString }
@@ -138,6 +200,60 @@ final class BrowserModel: ObservableObject {
         guard canGoForward else { return }
         historyIndex += 1
         navigateHistory(to: history[historyIndex])
+    }
+
+    func goHome() {
+        locationText = settings.preferences.homepage
+        submitLocation()
+    }
+
+    func goToCapsuleRoot() {
+        guard let committedURL,
+              var components = URLComponents(url: committedURL, resolvingAgainstBaseURL: false) else { return }
+        components.path = "/"
+        components.query = nil
+        components.fragment = nil
+        guard let url = components.url,
+              let target = try? GeminiRequestTarget(url.absoluteString) else { return }
+        navigate(to: target, disposition: .new)
+    }
+
+    func goUpOneLevel() {
+        guard let committedURL,
+              var components = URLComponents(url: committedURL, resolvingAgainstBaseURL: false) else { return }
+        var parts = components.path.split(separator: "/")
+        if !parts.isEmpty { parts.removeLast() }
+        components.path = "/" + parts.joined(separator: "/") + (parts.isEmpty ? "" : "/")
+        components.query = nil
+        components.fragment = nil
+        guard let url = components.url,
+              let target = try? GeminiRequestTarget(url.absoluteString) else { return }
+        navigate(to: target, disposition: .new)
+    }
+
+    func zoomIn() {
+        pageZoom = min(3, pageZoom + 0.1)
+        applyZoom()
+    }
+
+    func zoomOut() {
+        pageZoom = max(0.5, pageZoom - 0.1)
+        applyZoom()
+    }
+
+    func actualSize() {
+        pageZoom = 1
+        applyZoom()
+    }
+
+    func find(_ query: String, backwards: Bool = false) {
+        guard !query.isEmpty else { return }
+        Task {
+            _ = try? await page.callJavaScript(
+                "window.find(query, false, backwards, true, false, true, false)",
+                arguments: ["query": query, "backwards": backwards]
+            )
+        }
     }
 
     func showPageSource() {
@@ -170,6 +286,35 @@ final class BrowserModel: ObservableObject {
         }
     }
 
+    func download(_ url: URL) {
+        statusText = "Downloading \(url.lastPathComponent)…"
+        Task {
+            do {
+                let result: (Data, String)
+                if url.scheme?.lowercased() == "gemini" {
+                    result = try await retrieveGeminiResource(url)
+                } else if ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                    let (data, response) = try await URLSession.shared.data(from: url)
+                    result = (data, response.mimeType ?? "application/octet-stream")
+                } else {
+                    throw URLError(.unsupportedURL)
+                }
+                let panel = NSSavePanel()
+                panel.nameFieldStringValue = suggestedFilename(for: url, mimeType: result.1)
+                panel.canCreateDirectories = true
+                guard await panel.begin() == .OK, let destination = panel.url else {
+                    statusText = "Download cancelled"
+                    return
+                }
+                try result.0.write(to: destination, options: .atomic)
+                statusText = "Downloaded \(destination.lastPathComponent)"
+            } catch {
+                validationMessage = "Download failed: \(friendly(error))"
+                statusText = "Download failed"
+            }
+        }
+    }
+
     func respondToTrust(allow: Bool) {
         trustPrompt = nil
         trustContinuation?.resume(returning: allow)
@@ -178,6 +323,7 @@ final class BrowserModel: ObservableObject {
 
     func cancelInput() {
         inputPrompt = nil
+        inputValidationMessage = nil
         isLoading = false
         statusText = "Input cancelled"
         if let committedURL { locationText = committedURL.absoluteString }
@@ -185,28 +331,39 @@ final class BrowserModel: ObservableObject {
 
     func submitInput(_ value: String) {
         guard let prompt = inputPrompt else { return }
-        inputPrompt = nil
         var components = URLComponents(url: prompt.target.url, resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: value, value: nil)]
         guard let url = components?.url,
               let target = try? GeminiRequestTarget(url.absoluteString) else {
-            validationMessage = "That input would exceed the Gemini request limit."
+            inputValidationMessage = "This response is too large for a Gemini request. Shorten it and try again."
             return
         }
+        inputValidationMessage = nil
+        inputPrompt = nil
         navigate(to: target, disposition: .new)
     }
 
     private func navigateHistory(to url: URL) {
+        if let cached = cachedPages[url] {
+            displayCachedPage(cached)
+            return
+        }
         guard let target = try? GeminiRequestTarget(url.absoluteString) else { return }
         navigate(to: target, disposition: .traversal)
     }
 
     private func navigate(to target: GeminiRequestTarget, disposition: HistoryDisposition) {
         navigationTask?.cancel()
+        slowDownTask?.cancel()
+        slowDownTask = nil
+        retryNotBefore = nil
+        imageTasks.forEach { $0.cancel() }
+        imageTasks.removeAll()
         trustContinuation?.resume(returning: false)
         trustContinuation = nil
         trustPrompt = nil
         inputPrompt = nil
+        inputValidationMessage = nil
         trustWasDeclined = false
         isLoading = true
         statusText = "Connecting to \(target.endpoint.host)…"
@@ -251,7 +408,10 @@ final class BrowserModel: ObservableObject {
         var contentStarted = false
 
         do {
-            let events = transport.events(for: target) { [weak self] identity, _ in
+            let events = transport.events(
+                for: target,
+                configuration: GeminiTransportConfiguration(proxy: settings.preferences.proxy)
+            ) { [weak self] identity, _ in
                 guard let self else { return false }
                 return await self.authorize(identity)
             }
@@ -306,9 +466,20 @@ final class BrowserModel: ObservableObject {
                             : header.isPermanentFailure
                                 ? "Permanent Capsule Failure"
                                 : "Client Identity Required"
-                        let message = header.requiresClientCertificate
+                        var message = header.requiresClientCertificate
                             ? "This capsule requires a client certificate. Major Tom does not support client identities yet."
                             : header.meta
+                        if header.status == 44 {
+                            let seconds = max(0, Int(header.meta.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
+                            retryNotBefore = Date().addingTimeInterval(TimeInterval(seconds))
+                            message = "The capsule asked Major Tom to wait \(seconds) seconds before trying again."
+                            slowDownTask?.cancel()
+                            slowDownTask = Task { [weak self] in
+                                try? await Task.sleep(for: .seconds(seconds))
+                                guard !Task.isCancelled else { return }
+                                self?.retryNotBefore = nil
+                            }
+                        }
                         showGeneratedPage(
                             title: title,
                             message: message,
@@ -339,7 +510,10 @@ final class BrowserModel: ObservableObject {
                         canShowSource = false
                         let continuation = beginDocument(at: target.url)
                         documentContinuation = continuation
-                        continuation.yield(renderer.documentStart(baseURL: target.url))
+                        continuation.yield(renderer.documentStart(
+                            themeCSS: themeCSS,
+                            baseURL: target.url
+                        ))
                         if mimeType != "text/gemini" {
                             continuation.yield(Data("<pre><code>".utf8))
                         }
@@ -355,7 +529,7 @@ final class BrowserModel: ObservableObject {
                     if mimeType == "text/gemini" {
                         let decoded = utf8Decoder.decode(data)
                         for parsedEvent in gemtextParser.receive(decoded) {
-                            documentContinuation?.yield(renderer.render(parsedEvent))
+                            emit(parsedEvent, baseURL: target.url)
                         }
                     } else if mimeType.hasPrefix("text/") {
                         let decoded = utf8Decoder.decode(data)
@@ -368,7 +542,7 @@ final class BrowserModel: ObservableObject {
                         let tail = utf8Decoder.finish()
                         let finalEvents = gemtextParser.receive(tail) + gemtextParser.finish()
                         for parsedEvent in finalEvents {
-                            documentContinuation?.yield(renderer.render(parsedEvent))
+                            emit(parsedEvent, baseURL: target.url)
                         }
                         finishCurrentDocument()
                     } else if mimeType.hasPrefix("text/") {
@@ -391,6 +565,14 @@ final class BrowserModel: ObservableObject {
                     currentMIMEType = mimeType
                     canSavePage = true
                     canShowSource = mimeType.hasPrefix("text/")
+                    cachedPages[target.url] = CachedPage(
+                        url: target.url,
+                        mimeType: mimeType,
+                        body: sourceBytes,
+                        completion: .complete,
+                        receivedAt: Date(),
+                        title: title
+                    )
                     statusText = "Loaded \(sourceBytes.count) bytes"
                     navigationTask = nil
                     return
@@ -407,13 +589,22 @@ final class BrowserModel: ObservableObject {
             }
             if contentStarted {
                 for parsedEvent in gemtextParser.receive(utf8Decoder.finish()) + gemtextParser.finish() {
-                    documentContinuation?.yield(renderer.render(parsedEvent))
+                    emit(parsedEvent, baseURL: target.url)
                 }
                 finishCurrentDocument(message: "The connection ended before the response completed: \(friendly(error))")
                 currentSourceBytes = sourceBytes
                 currentMIMEType = mimeType
                 canSavePage = !sourceBytes.isEmpty
                 canShowSource = mimeType.hasPrefix("text/") && !sourceBytes.isEmpty
+                if let committedURL {
+                    cachedPages[committedURL] = CachedPage(
+                        url: committedURL,
+                        mimeType: mimeType,
+                        body: sourceBytes,
+                        completion: .incomplete,
+                        receivedAt: Date()
+                    )
+                }
                 isLoading = false
                 statusText = "Incomplete response"
             } else {
@@ -511,7 +702,11 @@ final class BrowserModel: ObservableObject {
         disposition: HistoryDisposition
     ) {
         let continuation = beginDocument(at: url)
-        continuation.yield(renderer.documentStart(baseURL: url, browserGenerated: true))
+        continuation.yield(renderer.documentStart(
+            themeCSS: themeCSS,
+            baseURL: url,
+            browserGenerated: true
+        ))
         let html = """
         <p class="eyebrow">Major Tom</p>
         <h1>\(HTMLDocumentStreamRenderer.escape(title))</h1>
@@ -538,7 +733,7 @@ final class BrowserModel: ObservableObject {
         disposition: HistoryDisposition
     ) {
         let continuation = beginDocument(at: url)
-        continuation.yield(renderer.documentStart(baseURL: url))
+        continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: url))
         let source = "data:\(HTMLDocumentStreamRenderer.escapeAttribute(mimeType));base64,\(data.base64EncodedString())"
         continuation.yield(Data("<img alt=\"\" src=\"\(source)\" style=\"max-width:100%;height:auto\">".utf8))
         continuation.yield(renderer.documentEnd())
@@ -562,6 +757,7 @@ final class BrowserModel: ObservableObject {
 
     private func commit(_ url: URL, disposition: HistoryDisposition) {
         committedURL = url
+        title = displayTitle(for: url)
         locationText = url.absoluteString
         switch disposition {
         case .new:
@@ -572,9 +768,27 @@ final class BrowserModel: ObservableObject {
                 history.append(url)
                 historyIndex = history.count - 1
             }
+            BrowsingHistoryStore.shared.record(url)
         case .reload, .traversal:
             break
         }
+    }
+
+    private func displayCachedPage(_ cached: CachedPage) {
+        navigationTask?.cancel()
+        isLoading = false
+        committedURL = cached.url
+        locationText = cached.url.absoluteString
+        currentSourceBytes = cached.body
+        currentMIMEType = cached.mimeType
+        title = cached.title ?? displayTitle(for: cached.url)
+        canSavePage = !cached.body.isEmpty
+        canShowSource = cached.mimeType.hasPrefix("text/")
+        renderCurrentContent()
+        applyZoom()
+        statusText = cached.completion == .complete
+            ? "Cached • \(cached.body.count) bytes"
+            : "Cached \(cached.completion.rawValue) response"
     }
 
     private func friendly(_ error: any Error) -> String {
@@ -590,9 +804,59 @@ final class BrowserModel: ObservableObject {
                 return "The secure connection failed. \(detail)"
             case .responseFailed(let protocolError):
                 return "The capsule returned an invalid Gemini response: \(protocolError)."
+            case .timedOut:
+                return "The capsule did not respond within 30 seconds."
+            case .responseTooLarge(let limit):
+                return "The response exceeded Major Tom's \(limit / 1_024 / 1_024) MB safety limit."
             }
         }
         return error.localizedDescription
+    }
+
+    private var themeCSS: String {
+        let dark = NSApplication.shared.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return settings.preferences.contentTheme.css(effectiveDarkAppearance: dark)
+    }
+
+    private func preferencesChanged() {
+        guard !isLoading, committedURL != nil, canSavePage else { return }
+        renderCurrentContent()
+    }
+
+    private func applyZoom() {
+        let zoom = pageZoom
+        Task {
+            _ = try? await page.callJavaScript(
+                "document.documentElement.style.zoom = String(zoom)",
+                arguments: ["zoom": zoom]
+            )
+        }
+    }
+
+    private func renderCurrentContent() {
+        guard let committedURL else { return }
+        if currentMIMEType == "text/gemini" {
+            var decoder = IncrementalUTF8Decoder()
+            var parser = IncrementalGemtextParser()
+            let events = parser.receive(decoder.decode(currentSourceBytes) + decoder.finish()) + parser.finish()
+            let continuation = beginDocument(at: committedURL)
+            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: committedURL))
+            for event in events {
+                documentContinuation = continuation
+                emit(event, baseURL: committedURL)
+            }
+            documentContinuation = nil
+            continuation.yield(renderer.documentEnd())
+            continuation.finish()
+        } else if currentMIMEType.hasPrefix("text/") {
+            let continuation = beginDocument(at: committedURL)
+            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: committedURL))
+            continuation.yield(Data("<pre><code>\(HTMLDocumentStreamRenderer.escape(String(decoding: currentSourceBytes, as: UTF8.self)))</code></pre>".utf8))
+            continuation.yield(renderer.documentEnd())
+            continuation.finish()
+        } else if currentMIMEType.hasPrefix("image/") {
+            showImagePage(data: currentSourceBytes, mimeType: currentMIMEType, url: committedURL, disposition: .reload)
+        }
     }
 
     private static func makeTrustStore() -> TrustedIdentityStore? {
@@ -645,6 +909,171 @@ final class BrowserModel: ObservableObject {
             )
         }
     }
+
+    private func emit(_ event: GemtextEvent, baseURL: URL) {
+        if case .heading(level: 1, text: let heading) = event,
+           title == displayTitle(for: baseURL) {
+            let candidate = heading.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !candidate.isEmpty { title = candidate }
+        }
+        documentContinuation?.yield(renderer.render(
+            event,
+            options: settings.preferences.renderingOptions
+        ))
+        guard case .link(let destination, let label) = event else { return }
+
+        if destination.lowercased().hasPrefix("data:image/"),
+           settings.preferences.automaticallyLoadsDataImages,
+           let dataURL = URL(string: destination) {
+            documentContinuation?.yield(renderer.renderInlineImage(
+                resourceURL: dataURL,
+                altText: label ?? "Inline image"
+            ))
+            return
+        }
+
+        guard settings.preferences.automaticallyLoadsSameCapsuleImages,
+              let url = URL(string: destination, relativeTo: baseURL)?.absoluteURL,
+              isProbableImage(url),
+              isSameCapsule(url, baseURL) else { return }
+
+        let resource = resourceStore.createResource()
+        documentContinuation?.yield(renderer.renderInlineImage(
+            resourceURL: resource.url,
+            altText: label ?? url.lastPathComponent
+        ))
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.imageLimiter.acquire()
+            await self.loadInlineImage(url, continuation: resource.continuation, redirects: 0)
+            await self.imageLimiter.release()
+        }
+        imageTasks.append(task)
+    }
+
+    private func loadInlineImage(
+        _ url: URL,
+        continuation: AsyncThrowingStream<URLSchemeTaskResult, any Error>.Continuation,
+        redirects: Int
+    ) async {
+        guard redirects <= 5,
+              let target = try? GeminiRequestTarget(url.absoluteString) else {
+            continuation.finish(throwing: URLError(.badURL))
+            return
+        }
+        do {
+            let events = transport.events(
+                for: target,
+                configuration: GeminiTransportConfiguration(
+                    proxy: settings.preferences.proxy,
+                    maximumResponseByteCount: 16 * 1_024 * 1_024
+                )
+            ) { [weak self] identity, _ in
+                guard let self else { return false }
+                return await self.authorize(identity)
+            }
+            var accepted = false
+            for try await event in events {
+                switch event {
+                case .responseHeader(let header):
+                    if header.isRedirect,
+                       let redirected = URL(string: header.meta, relativeTo: url)?.absoluteURL,
+                       isSameCapsule(redirected, url) {
+                        await loadInlineImage(redirected, continuation: continuation, redirects: redirects + 1)
+                        return
+                    }
+                    let mime = header.meta.split(separator: ";", maxSplits: 1).first
+                        .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+                    guard header.isSuccess, mime.hasPrefix("image/") else {
+                        continuation.finish(throwing: URLError(.cannotDecodeContentData))
+                        return
+                    }
+                    accepted = true
+                    continuation.yield(.response(URLResponse(
+                        url: url,
+                        mimeType: mime,
+                        expectedContentLength: -1,
+                        textEncodingName: nil
+                    )))
+                case .body(let data) where accepted:
+                    continuation.yield(.data(data))
+                case .completed:
+                    continuation.finish()
+                default:
+                    break
+                }
+            }
+        } catch {
+            continuation.finish(throwing: error)
+        }
+    }
+
+    private func retrieveGeminiResource(_ url: URL) async throws -> (Data, String) {
+        guard let target = try? GeminiRequestTarget(url.absoluteString) else {
+            throw URLError(.badURL)
+        }
+        var body = Data()
+        var mimeType = "application/octet-stream"
+        let events = transport.events(
+            for: target,
+            configuration: GeminiTransportConfiguration(proxy: settings.preferences.proxy)
+        ) { [weak self] identity, _ in
+            guard let self else { return false }
+            return await self.authorize(identity)
+        }
+        for try await event in events {
+            switch event {
+            case .responseHeader(let header):
+                guard header.isSuccess else {
+                    throw GeminiTransportError.connectionFailed("Gemini status \(header.status): \(header.meta)")
+                }
+                mimeType = header.meta.split(separator: ";", maxSplits: 1).first.map(String.init) ?? mimeType
+            case .body(let data):
+                body.append(data)
+            default:
+                break
+            }
+        }
+        return (body, mimeType)
+    }
+
+    private func isProbableImage(_ url: URL) -> Bool {
+        ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif"]
+            .contains(url.pathExtension.lowercased())
+    }
+
+    private func isSameCapsule(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.host?.lowercased() == rhs.host?.lowercased()
+            && (lhs.port ?? Int(GeminiRequestTarget.defaultPort))
+                == (rhs.port ?? Int(GeminiRequestTarget.defaultPort))
+    }
+
+    private func displayTitle(for url: URL) -> String {
+        let filename = url.deletingPathExtension().lastPathComponent
+        if !filename.isEmpty { return filename }
+        return url.host ?? "Major Tom"
+    }
+}
+
+private actor AsyncSemaphore {
+    private let limit: Int
+    private var active = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    init(limit: Int) { self.limit = max(1, limit) }
+
+    func acquire() async {
+        if active < limit {
+            active += 1
+            return
+        }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        if waiters.isEmpty { active = max(0, active - 1) }
+        else { waiters.removeFirst().resume() }
+    }
 }
 
 @available(macOS 26.0, *)
@@ -662,6 +1091,7 @@ struct StreamingWebViewPrototype: View {
 @MainActor
 private final class BrowserNavigationRouter {
     var openURL: ((URL) -> Void)?
+    var downloadURL: ((URL) -> Void)?
 }
 
 @available(macOS 26.0, *)
@@ -676,6 +1106,10 @@ private struct BrowserNavigationDecider: WebPage.NavigationDeciding {
         guard let url = action.request.url else { return .cancel }
         preferences.allowsContentJavaScript = false
         if url.scheme == BrowserDocumentSchemeHandler.scheme { return .allow }
+        if action.shouldPerformDownload {
+            router.downloadURL?(url)
+            return .cancel
+        }
         router.openURL?(url)
         return .cancel
     }
@@ -733,5 +1167,45 @@ private struct BrowserDocumentSchemeHandler: URLSchemeHandler, Sendable {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
+    }
+}
+
+@available(macOS 26.0, *)
+private final class BrowserResourceStore: @unchecked Sendable {
+    struct Resource {
+        let url: URL
+        let continuation: AsyncThrowingStream<URLSchemeTaskResult, any Error>.Continuation
+    }
+
+    private let lock = NSLock()
+    private var streams: [String: AsyncThrowingStream<URLSchemeTaskResult, any Error>] = [:]
+
+    func createResource() -> Resource {
+        let id = UUID().uuidString
+        var captured: AsyncThrowingStream<URLSchemeTaskResult, any Error>.Continuation!
+        let stream = AsyncThrowingStream<URLSchemeTaskResult, any Error> { captured = $0 }
+        lock.withLock { streams[id] = stream }
+        return Resource(
+            url: URL(string: "\(BrowserResourceSchemeHandler.scheme)://resource/\(id)")!,
+            continuation: captured
+        )
+    }
+
+    func takeResource(id: String) -> AsyncThrowingStream<URLSchemeTaskResult, any Error>? {
+        lock.withLock { streams.removeValue(forKey: id) }
+    }
+}
+
+@available(macOS 26.0, *)
+private struct BrowserResourceSchemeHandler: URLSchemeHandler, Sendable {
+    static let scheme = "majortom-resource"
+    let store: BrowserResourceStore
+
+    func reply(for request: URLRequest) -> AsyncThrowingStream<URLSchemeTaskResult, any Error> {
+        guard let id = request.url?.lastPathComponent,
+              let stream = store.takeResource(id: id) else {
+            return AsyncThrowingStream { $0.finish(throwing: URLError(.resourceUnavailable)) }
+        }
+        return stream
     }
 }

@@ -1,4 +1,4 @@
-# Major Tom Native
+# Major Tom
 
 This directory contains the Swift/SwiftUI implementation of Major Tom. It is being developed alongside the existing C#/Avalonia application until native feature parity and product acceptance make the legacy implementation unnecessary.
 
@@ -6,11 +6,11 @@ The product requirements are in [`docs/design/major-tom-specification.md`](docs/
 
 ## Current implementation
 
-- SwiftUI application and settings scenes with normal foreground activation.
-- Unified capsule-address and Kennedy search field.
+- Native multiwindow SwiftUI application with independent tabs and durable session restoration.
+- Unified capsule-address and configurable Kennedy, TLGS, or custom search.
 - Live Gemini navigation with redirects, input prompts, cancellation, and status pages.
 - Implicit trust on first use, with persistent public-key fingerprints and warnings for later identity changes.
-- macOS 26 SwiftUI WebKit streaming renderer with Gemini-link interception.
+- macOS 26 SwiftUI WebKit streaming renderer with Gemini-link interception and controlled resources.
 - Gemini URL normalization and request serialization.
 - Network.framework Gemini transport with TLS 1.2+, cancellation, and incremental response events.
 - Strict incremental response-header decoder.
@@ -19,8 +19,9 @@ The product requirements are in [`docs/design/major-tom-specification.md`](docs/
 - SHA-256 Subject Public Key Info fingerprint extraction.
 - Seed, first-use, changed-key, seed-mismatch, and certificate-date trust decisions.
 - Atomic persistent trusted-identity store.
-
-The current milestone is a usable single-window, single-tab browser. Multi-tab state, proxy configuration, source/save/download commands, automatic inline images, appearance settings, and production distribution remain to be implemented.
+- Per-tab history/cache/zoom, persistent browsing history, source viewing, saving, and downloads.
+- Application/content themes, inline formatting controls, and bounded same-capsule image loading.
+- HTTP CONNECT proxy, idle timeout, response-size limits, find, native commands, and browsing-data controls.
 
 ## Build and test
 
@@ -33,7 +34,7 @@ swift test
 Run the development executable directly:
 
 ```bash
-swift run MajorTomNative
+swift run MajorTom
 ```
 
 Or build an ad-hoc signed development application bundle:

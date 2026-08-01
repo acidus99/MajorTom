@@ -1,5 +1,21 @@
 import Foundation
 
+public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
+    public var recognizesEmphasis: Bool
+    public var recognizesStrongEmphasis: Bool
+    public var recognizesInlineCode: Bool
+
+    public init(
+        recognizesEmphasis: Bool = true,
+        recognizesStrongEmphasis: Bool = true,
+        recognizesInlineCode: Bool = true
+    ) {
+        self.recognizesEmphasis = recognizesEmphasis
+        self.recognizesStrongEmphasis = recognizesStrongEmphasis
+        self.recognizesInlineCode = recognizesInlineCode
+    }
+}
+
 public struct HTMLDocumentStreamRenderer: Sendable {
     public init() {}
 
@@ -21,20 +37,23 @@ public struct HTMLDocumentStreamRenderer: Sendable {
         return Data(html.utf8)
     }
 
-    public func render(_ event: GemtextEvent) -> Data {
+    public func render(
+        _ event: GemtextEvent,
+        options: HTMLRenderingOptions = HTMLRenderingOptions()
+    ) -> Data {
         let html: String
         switch event {
         case .text(let text):
-            html = "<p>\(Self.escape(text))</p>"
+            html = "<p>\(Self.renderInline(text, options: options))</p>"
         case .heading(let level, let text):
-            html = "<h\(level)>\(Self.escape(text))</h\(level)>"
+            html = "<h\(level)>\(Self.renderInline(text, options: options))</h\(level)>"
         case .link(let destination, let label):
             let visibleText = label ?? destination
-            html = "<p class=\"link-line\"><a href=\"\(Self.escapeAttribute(destination))\">\(Self.escape(visibleText))</a></p>"
+            html = "<p class=\"link-line\"><a href=\"\(Self.escapeAttribute(destination))\">\(Self.renderInline(visibleText, options: options))</a></p>"
         case .listItem(let text):
-            html = "<div class=\"list-item\"><span aria-hidden=\"true\">•</span><span>\(Self.escape(text))</span></div>"
+            html = "<div class=\"list-item\"><span aria-hidden=\"true\">•</span><span>\(Self.renderInline(text, options: options))</span></div>"
         case .quote(let text):
-            html = "<blockquote>\(Self.escape(text))</blockquote>"
+            html = "<blockquote>\(Self.renderInline(text, options: options))</blockquote>"
         case .blank:
             html = "<div class=\"blank\" aria-hidden=\"true\"></div>"
         case .beginPreformatted(let altText):
@@ -55,6 +74,10 @@ public struct HTMLDocumentStreamRenderer: Sendable {
         return Data("\(notice)</main></body></html>".utf8)
     }
 
+    public func renderInlineImage(resourceURL: URL, altText: String) -> Data {
+        Data("<figure><img src=\"\(Self.escapeAttribute(resourceURL.absoluteString))\" alt=\"\(Self.escapeAttribute(altText))\" loading=\"eager\"><figcaption>\(Self.escape(altText))</figcaption></figure>".utf8)
+    }
+
     public static func escape(_ value: String) -> String {
         value
             .replacingOccurrences(of: "&", with: "&amp;")
@@ -66,6 +89,67 @@ public struct HTMLDocumentStreamRenderer: Sendable {
         escape(value)
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&#39;")
+    }
+
+    public static func renderInline(
+        _ value: String,
+        options: HTMLRenderingOptions = HTMLRenderingOptions()
+    ) -> String {
+        var output = ""
+        var remainder = value[...]
+
+        while !remainder.isEmpty {
+            let candidates: [(range: Range<Substring.Index>, marker: String, tag: String)] = [
+                options.recognizesStrongEmphasis ? paired("**", in: remainder).map { ($0, "**", "strong") } : nil,
+                options.recognizesEmphasis ? paired("*", in: remainder, excludingDouble: true).map { ($0, "*", "em") } : nil,
+                options.recognizesInlineCode ? paired("`", in: remainder).map { ($0, "`", "code") } : nil
+            ].compactMap { $0 }
+
+            guard let candidate = candidates.min(by: { $0.range.lowerBound < $1.range.lowerBound }) else {
+                output += escape(String(remainder))
+                break
+            }
+
+            output += escape(String(remainder[..<candidate.range.lowerBound]))
+            let contentStart = remainder.index(candidate.range.lowerBound, offsetBy: candidate.marker.count)
+            let contentEnd = remainder.index(candidate.range.upperBound, offsetBy: -candidate.marker.count)
+            output += "<\(candidate.tag)>\(escape(String(remainder[contentStart..<contentEnd])))</\(candidate.tag)>"
+            remainder = remainder[candidate.range.upperBound...]
+        }
+        return output
+    }
+
+    private static func paired(
+        _ marker: String,
+        in value: Substring,
+        excludingDouble: Bool = false
+    ) -> Range<Substring.Index>? {
+        var searchStart = value.startIndex
+        while let opening = value.range(of: marker, range: searchStart..<value.endIndex) {
+            if excludingDouble {
+                let beforeIsStar = opening.lowerBound > value.startIndex
+                    && value[value.index(before: opening.lowerBound)] == "*"
+                let afterIsStar = opening.upperBound < value.endIndex
+                    && value[opening.upperBound] == "*"
+                if beforeIsStar || afterIsStar {
+                    searchStart = opening.upperBound
+                    continue
+                }
+            }
+            guard let closing = value.range(of: marker, range: opening.upperBound..<value.endIndex),
+                  closing.lowerBound != opening.upperBound else {
+                searchStart = opening.upperBound
+                continue
+            }
+            if excludingDouble,
+               closing.upperBound < value.endIndex,
+               value[closing.upperBound] == "*" {
+                searchStart = opening.upperBound
+                continue
+            }
+            return opening.lowerBound..<closing.upperBound
+        }
+        return nil
     }
 
     public static let defaultThemeCSS = """
@@ -80,6 +164,10 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     .list-item { display: grid; grid-template-columns: 1.25rem 1fr; margin: .25rem 0; }
     blockquote { margin: 1rem 0; padding: .6rem 1rem; border-inline-start: .25rem solid AccentColor; }
     pre { overflow-x: auto; padding: 1rem; border-radius: .65rem; background: color-mix(in srgb, CanvasText 8%, Canvas); }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; background: color-mix(in srgb, CanvasText 8%, Canvas); border-radius: .25rem; padding: .08em .28em; }
+    pre code { font-size: inherit; background: transparent; padding: 0; }
+    img { display: block; max-width: 100%; height: auto; margin: 1rem 0; border-radius: .5rem; }
+    figure { margin: 1rem 0; } figure img { margin-bottom: .35rem; } figcaption { color: SecondaryLabelColor; font-size: .82rem; }
     .blank { height: .7rem; }
     .incomplete { margin-top: 2rem; padding: .8rem 1rem; border: 1px solid #d08a00; border-radius: .6rem; }
     .browser-generated main { max-width: 44rem; }

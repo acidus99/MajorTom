@@ -3,18 +3,18 @@
 import PackageDescription
 
 let package = Package(
-    name: "MajorTomNative",
+    name: "MajorTom",
     platforms: [
         .macOS(.v26)
     ],
     products: [
         .library(name: "MajorTomCore", targets: ["MajorTomCore"]),
-        .executable(name: "MajorTomNative", targets: ["MajorTomNative"])
+        .executable(name: "MajorTom", targets: ["MajorTom"])
     ],
     targets: [
         .target(name: "MajorTomCore"),
         .executableTarget(
-            name: "MajorTomNative",
+            name: "MajorTom",
             dependencies: ["MajorTomCore"]
         ),
         .testTarget(

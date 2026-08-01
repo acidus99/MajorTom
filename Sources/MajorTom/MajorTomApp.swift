@@ -1,9 +1,10 @@
 import AppKit
+import Combine
 import MajorTomCore
 import SwiftUI
 
 @main
-struct MajorTomNativeApp: App {
+struct MajorTomApp: App {
     @NSApplicationDelegateAdaptor(MajorTomApplicationDelegate.self) private var appDelegate
 
     var body: some Scene {
@@ -53,23 +54,43 @@ struct MajorTomNativeApp: App {
                     NotificationCenter.default.post(name: .majorTomShowSource, object: nil)
                 }
                 .keyboardShortcut("u", modifiers: [.command, .option])
+
+                Button("Find…") {
+                    NotificationCenter.default.post(name: .majorTomFind, object: nil)
+                }
+                .keyboardShortcut("f", modifiers: .command)
+
+                Divider()
+
+                Button("Zoom In") {
+                    NotificationCenter.default.post(name: .majorTomZoomIn, object: nil)
+                }
+                .keyboardShortcut("+", modifiers: .command)
+                Button("Zoom Out") {
+                    NotificationCenter.default.post(name: .majorTomZoomOut, object: nil)
+                }
+                .keyboardShortcut("-", modifiers: .command)
+                Button("Actual Size") {
+                    NotificationCenter.default.post(name: .majorTomActualSize, object: nil)
+                }
+                .keyboardShortcut("0", modifiers: .command)
+            }
+
+            CommandMenu("History") {
+                Button("Back") { NotificationCenter.default.post(name: .majorTomBack, object: nil) }
+                    .keyboardShortcut("[", modifiers: .command)
+                Button("Forward") { NotificationCenter.default.post(name: .majorTomForward, object: nil) }
+                    .keyboardShortcut("]", modifiers: .command)
+                Divider()
+                Button("Home") { NotificationCenter.default.post(name: .majorTomHome, object: nil) }
+                    .keyboardShortcut("h", modifiers: [.command, .shift])
+                Button("Up One Level") { NotificationCenter.default.post(name: .majorTomUp, object: nil) }
+                Button("Capsule Root") { NotificationCenter.default.post(name: .majorTomRoot, object: nil) }
             }
         }
 
         Settings {
-            Form {
-                Section("General") {
-                    LabeledContent("Homepage", value: "gemini://gemi.dev/")
-                    LabeledContent("Search provider", value: "Kennedy")
-                }
-                Section("Privacy & Security") {
-                    Text("Capsule identities are trusted on first use and stored in Application Support.")
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .formStyle(.grouped)
-            .padding()
-            .frame(width: 520, height: 260)
+            BrowserSettingsView()
         }
     }
 }
@@ -93,16 +114,29 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
 }
 
 private struct NativeFoundationView: View {
+    @ObservedObject private var settings = BrowserSettingsStore.shared
+
     var body: some View {
-        if #available(macOS 26.0, *) {
-            BrowserWindowView()
-        } else {
-            ContentUnavailableView {
-                Label("Major Tom requires macOS 26", systemImage: "sparkles")
-            } description: {
-                Text("The current native streaming renderer uses WebKit APIs introduced in macOS 26.")
+        Group {
+            if #available(macOS 26.0, *) {
+                BrowserWindowView()
+            } else {
+                ContentUnavailableView {
+                    Label("Major Tom requires macOS 26", systemImage: "sparkles")
+                } description: {
+                    Text("The current native streaming renderer uses WebKit APIs introduced in macOS 26.")
+                }
+                .frame(minWidth: 720, minHeight: 480)
             }
-            .frame(minWidth: 720, minHeight: 480)
+        }
+        .preferredColorScheme(preferredColorScheme)
+    }
+
+    private var preferredColorScheme: ColorScheme? {
+        switch settings.preferences.applicationAppearance {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
         }
     }
 }
@@ -120,7 +154,7 @@ private struct BrowserWindowView: View {
                     .id(selectedTab.id)
             }
         }
-        .navigationTitle(session.selectedTab?.browser.committedURL?.host ?? "Major Tom")
+        .navigationTitle(session.selectedTab?.browser.title ?? "Major Tom")
         .onReceive(NotificationCenter.default.publisher(for: .majorTomNewTab)) { _ in
             guard controlActiveState == .key else { return }
             session.newTab()
@@ -140,14 +174,30 @@ private final class BrowserWindowSession: ObservableObject {
     @MainActor
     final class Tab: Identifiable {
         let id = UUID()
-        let browser = BrowserModel()
+        let browser: BrowserModel
+
+        init(restoredState: RestoredTabState? = nil) {
+            browser = BrowserModel(restoredState: restoredState)
+        }
     }
 
-    @Published private(set) var tabs: [Tab] = [Tab()]
-    @Published var selectedID: UUID?
+    @Published private(set) var tabs: [Tab]
+    @Published var selectedID: UUID? {
+        didSet { scheduleSave() }
+    }
+    private var observers: [UUID: AnyCancellable] = [:]
 
     init() {
-        selectedID = tabs.first?.id
+        if let restored = SessionRestorationStore.shared.load(), !restored.tabs.isEmpty {
+            tabs = restored.tabs.map { Tab(restoredState: $0) }
+            selectedID = tabs.indices.contains(restored.selectedIndex)
+                ? tabs[restored.selectedIndex].id
+                : tabs.first?.id
+        } else {
+            tabs = [Tab()]
+            selectedID = tabs.first?.id
+        }
+        for tab in tabs { observe(tab) }
     }
 
     var selectedTab: Tab? {
@@ -157,7 +207,9 @@ private final class BrowserWindowSession: ObservableObject {
     func newTab() {
         let tab = Tab()
         tabs.append(tab)
+        observe(tab)
         selectedID = tab.id
+        scheduleSave()
     }
 
     @discardableResult
@@ -166,9 +218,25 @@ private final class BrowserWindowSession: ObservableObject {
               let index = tabs.firstIndex(where: { $0.id == selectedID }) else { return false }
         tabs[index].browser.stop()
         tabs.remove(at: index)
+        observers.removeValue(forKey: selectedID)
         guard !tabs.isEmpty else { return true }
         self.selectedID = tabs[min(index, tabs.count - 1)].id
+        scheduleSave()
         return false
+    }
+
+    private func observe(_ tab: Tab) {
+        observers[tab.id] = tab.browser.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { self?.scheduleSave() }
+        }
+    }
+
+    private func scheduleSave() {
+        let selectedIndex = tabs.firstIndex { $0.id == selectedID } ?? 0
+        SessionRestorationStore.shared.save(RestoredWindowState(
+            tabs: tabs.map { $0.browser.restorationState },
+            selectedIndex: selectedIndex
+        ))
     }
 }
 
@@ -213,7 +281,7 @@ private struct BrowserTabButton: View {
     var body: some View {
         HStack(spacing: 7) {
             if browser.isLoading { ProgressView().controlSize(.mini) }
-            Text(browser.committedURL?.host ?? "New Tab")
+            Text(browser.title)
                 .lineLimit(1)
             Button("Close Tab", systemImage: "xmark") { close() }
                 .labelStyle(.iconOnly)
@@ -233,6 +301,9 @@ private struct BrowserTabButton: View {
 private struct BrowserTabView: View {
     @ObservedObject var browser: BrowserModel
     @FocusState private var locationIsFocused: Bool
+    @FocusState private var findIsFocused: Bool
+    @State private var showsFind = false
+    @State private var findQuery = ""
 
     var body: some View {
         VStack(spacing: 0) {
@@ -250,6 +321,10 @@ private struct BrowserTabView: View {
                 .labelStyle(.iconOnly)
                 .disabled(!browser.canGoForward)
                 .help("Forward")
+
+                Button("Home", systemImage: "house") { browser.goHome() }
+                    .labelStyle(.iconOnly)
+                    .help("Home")
 
                 TextField("Search or enter capsule address", text: $browser.locationText)
                     .textFieldStyle(.roundedBorder)
@@ -276,7 +351,7 @@ private struct BrowserTabView: View {
                         browser.reload()
                     }
                     .labelStyle(.iconOnly)
-                    .disabled(browser.committedURL == nil)
+                    .disabled(!browser.canReload)
                     .help("Reload Page")
                 }
             }
@@ -294,6 +369,22 @@ private struct BrowserTabView: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 7)
                 .accessibilityElement(children: .combine)
+            }
+
+            if showsFind {
+                HStack {
+                    TextField("Find on Page", text: $findQuery)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($findIsFocused)
+                        .onSubmit { browser.find(findQuery) }
+                    Button("Previous", systemImage: "chevron.up") { browser.find(findQuery, backwards: true) }
+                        .labelStyle(.iconOnly)
+                    Button("Next", systemImage: "chevron.down") { browser.find(findQuery) }
+                        .labelStyle(.iconOnly)
+                    Button("Done") { showsFind = false }
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
             }
 
             Divider()
@@ -332,13 +423,25 @@ private struct BrowserTabView: View {
         .onReceive(NotificationCenter.default.publisher(for: .majorTomSavePage)) { _ in
             Task { await browser.savePage() }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomFind)) { _ in
+            showsFind = true
+            findIsFocused = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomZoomIn)) { _ in browser.zoomIn() }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomZoomOut)) { _ in browser.zoomOut() }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomActualSize)) { _ in browser.actualSize() }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomBack)) { _ in browser.goBack() }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomForward)) { _ in browser.goForward() }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomHome)) { _ in browser.goHome() }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomUp)) { _ in browser.goUpOneLevel() }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomRoot)) { _ in browser.goToCapsuleRoot() }
         .sheet(item: $browser.trustPrompt) { prompt in
             TrustPromptView(prompt: prompt) { approved in
                 browser.respondToTrust(allow: approved)
             }
         }
         .sheet(item: $browser.inputPrompt) { prompt in
-            CapsuleInputView(prompt: prompt) { value in
+            CapsuleInputView(prompt: prompt, validationMessage: browser.inputValidationMessage) { value in
                 if let value { browser.submitInput(value) }
                 else { browser.cancelInput() }
             }
@@ -394,6 +497,7 @@ private struct TrustPromptView: View {
 @available(macOS 26.0, *)
 private struct CapsuleInputView: View {
     let prompt: BrowserModel.InputPrompt
+    let validationMessage: String?
     let completion: (String?) -> Void
     @State private var value = ""
     @FocusState private var isFocused: Bool
@@ -406,12 +510,19 @@ private struct CapsuleInputView: View {
                 if prompt.isSensitive {
                     SecureField("Response", text: $value)
                 } else {
-                    TextField("Response", text: $value)
+                    TextField("Response", text: $value, axis: .vertical)
+                        .lineLimit(1...6)
                 }
             }
             .textFieldStyle(.roundedBorder)
             .focused($isFocused)
             .onSubmit { completion(value) }
+            if let validationMessage {
+                Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.callout)
+                    .foregroundStyle(.orange)
+                    .accessibilityLabel("Input error: \(validationMessage)")
+            }
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { completion(nil) }
@@ -435,4 +546,13 @@ private extension Notification.Name {
     static let majorTomStop = Notification.Name("MajorTomStop")
     static let majorTomShowSource = Notification.Name("MajorTomShowSource")
     static let majorTomSavePage = Notification.Name("MajorTomSavePage")
+    static let majorTomFind = Notification.Name("MajorTomFind")
+    static let majorTomZoomIn = Notification.Name("MajorTomZoomIn")
+    static let majorTomZoomOut = Notification.Name("MajorTomZoomOut")
+    static let majorTomActualSize = Notification.Name("MajorTomActualSize")
+    static let majorTomBack = Notification.Name("MajorTomBack")
+    static let majorTomForward = Notification.Name("MajorTomForward")
+    static let majorTomHome = Notification.Name("MajorTomHome")
+    static let majorTomUp = Notification.Name("MajorTomUp")
+    static let majorTomRoot = Notification.Name("MajorTomRoot")
 }
