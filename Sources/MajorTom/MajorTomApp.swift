@@ -327,6 +327,10 @@ private struct BrowserTabView: View {
                     browser.goBack()
                 }
                 .labelStyle(.iconOnly)
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 42)
                 .disabled(!browser.canGoBack)
                 .help("Back")
 
@@ -334,11 +338,19 @@ private struct BrowserTabView: View {
                     browser.goForward()
                 }
                 .labelStyle(.iconOnly)
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 42)
                 .disabled(!browser.canGoForward)
                 .help("Forward")
 
                 Button("Home", systemImage: "house") { browser.goHome() }
                     .labelStyle(.iconOnly)
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 42)
                     .help("Home")
 
                 TextField("Search or enter capsule address", text: $browser.locationText)
@@ -360,18 +372,27 @@ private struct BrowserTabView: View {
                         browser.stop()
                     }
                     .labelStyle(.iconOnly)
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 42)
                     .help("Stop Loading")
                 } else {
                     Button("Reload", systemImage: "arrow.clockwise") {
                         browser.reload()
                     }
                     .labelStyle(.iconOnly)
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+                    .foregroundStyle(.secondary)
+                    .frame(minWidth: 42)
                     .disabled(!browser.canReload)
                     .help("Reload Page")
                 }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
+            .background(.regularMaterial)
 
             if let validationMessage = browser.validationMessage {
                 HStack {
