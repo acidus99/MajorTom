@@ -32,6 +32,7 @@ rm -rf "$app"
 mkdir -p "$contents/MacOS" "$contents/Resources"
 cp "$executable" "$contents/MacOS/MajorTom"
 cp "$project_root/Resources/Info.plist" "$contents/Info.plist"
+cp "$project_root/Resources/AppIcon.icns" "$contents/Resources/AppIcon.icns"
 codesign --force --sign - "$app"
 
 echo "$app"

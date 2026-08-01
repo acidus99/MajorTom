@@ -6,8 +6,10 @@
     <string>en</string>
     <key>CFBundleDisplayName</key>
     <string>Major Tom</string>
-    <key>CFBundleExecutable</key>
-    <string>MajorTom</string>
+	<key>CFBundleExecutable</key>
+	<string>MajorTom</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>dev.gemi.major-tom</string>
     <key>CFBundleInfoDictionaryVersion</key>
