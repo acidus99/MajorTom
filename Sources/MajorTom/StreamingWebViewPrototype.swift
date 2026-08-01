@@ -164,6 +164,12 @@ final class BrowserModel: ObservableObject {
     }
 
     func reload() {
+        if let committedURL,
+           committedURL.scheme?.lowercased() == "view-source",
+           let cached = cachedPages[committedURL] {
+            displayCachedPage(cached)
+            return
+        }
         guard let committedURL,
               let target = try? GeminiRequestTarget(committedURL.absoluteString) else { return }
         navigate(to: target, disposition: .reload)
@@ -257,19 +263,38 @@ final class BrowserModel: ObservableObject {
     }
 
     func showPageSource() {
-        guard canShowSource else { return }
-        let source = String(decoding: currentSourceBytes, as: UTF8.self)
-        let continuation = beginDocument(at: committedURL ?? URL(string: "gemini://source.invalid/")!)
+        guard canShowSource,
+              let resourceURL = committedURL,
+              resourceURL.scheme?.lowercased() != "view-source",
+              let sourceURL = URL(string: "view-source:\(resourceURL.absoluteString)") else { return }
+        renderSourceDocument(currentSourceBytes, at: sourceURL)
+        commit(sourceURL, disposition: .new)
+        cachedPages[sourceURL] = CachedPage(
+            url: sourceURL,
+            mimeType: "text/plain",
+            body: currentSourceBytes,
+            completion: .complete,
+            receivedAt: Date(),
+            title: "Source: \(displayTitle(for: resourceURL))"
+        )
+        canSavePage = !currentSourceBytes.isEmpty
+        canShowSource = false
+        title = "Source: \(displayTitle(for: resourceURL))"
+        statusText = "Page source"
+    }
+
+    private func renderSourceDocument(_ bytes: Data, at sourceURL: URL) {
+        let source = String(decoding: bytes, as: UTF8.self)
+        let continuation = beginDocument(at: sourceURL)
         continuation.yield(renderer.documentStart(browserGenerated: true))
         continuation.yield(Data("<p class=\"eyebrow\">Page Source</p><div class=\"source\">".utf8))
-        for (index, line) in source.split(separator: "\n", omittingEmptySubsequences: false).enumerated() {
+        for (index, line) in source.components(separatedBy: .newlines).enumerated() {
             let html = "<div style=\"display:grid;grid-template-columns:4rem 1fr\"><span style=\"color:SecondaryLabelColor;text-align:right;padding-right:1rem;user-select:none\">\(index + 1)</span><code style=\"white-space:pre-wrap;overflow-wrap:anywhere\">\(HTMLDocumentStreamRenderer.escape(String(line)))</code></div>"
             continuation.yield(Data(html.utf8))
         }
         continuation.yield(Data("</div>".utf8))
         continuation.yield(renderer.documentEnd())
         continuation.finish()
-        statusText = "Page source"
     }
 
     func savePage() async {
@@ -783,8 +808,12 @@ final class BrowserModel: ObservableObject {
         currentMIMEType = cached.mimeType
         title = cached.title ?? displayTitle(for: cached.url)
         canSavePage = !cached.body.isEmpty
-        canShowSource = cached.mimeType.hasPrefix("text/")
-        renderCurrentContent()
+        canShowSource = cached.mimeType.hasPrefix("text/") && cached.url.scheme?.lowercased() != "view-source"
+        if cached.url.scheme?.lowercased() == "view-source" {
+            renderSourceDocument(cached.body, at: cached.url)
+        } else {
+            renderCurrentContent()
+        }
         applyZoom()
         statusText = cached.completion == .complete
             ? "Cached • \(cached.body.count) bytes"
@@ -835,6 +864,10 @@ final class BrowserModel: ObservableObject {
 
     private func renderCurrentContent() {
         guard let committedURL else { return }
+        if committedURL.scheme?.lowercased() == "view-source" {
+            renderSourceDocument(currentSourceBytes, at: committedURL)
+            return
+        }
         if currentMIMEType == "text/gemini" {
             var decoder = IncrementalUTF8Decoder()
             var parser = IncrementalGemtextParser()
