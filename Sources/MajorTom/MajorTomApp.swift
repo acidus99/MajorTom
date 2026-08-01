@@ -85,7 +85,9 @@ struct MajorTomApp: App {
                 Button("Home") { NotificationCenter.default.post(name: .majorTomHome, object: nil) }
                     .keyboardShortcut("h", modifiers: [.command, .shift])
                 Button("Up One Level") { NotificationCenter.default.post(name: .majorTomUp, object: nil) }
+                    .keyboardShortcut(.upArrow, modifiers: .command)
                 Button("Capsule Root") { NotificationCenter.default.post(name: .majorTomRoot, object: nil) }
+                    .keyboardShortcut(.upArrow, modifiers: [.command, .shift])
             }
         }
 
