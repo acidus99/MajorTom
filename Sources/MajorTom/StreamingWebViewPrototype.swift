@@ -66,6 +66,7 @@ final class BrowserModel: ObservableObject {
     private var imageTasks: [Task<Void, Never>] = []
     private let imageLimiter = AsyncSemaphore(limit: 4)
     private var slowDownTask: Task<Void, Never>?
+    private var contextMenuTargets: [ContextMenuTarget] = []
 
     init(restoredState: RestoredTabState? = nil) {
         let documentStore = BrowserDocumentStore()
@@ -260,6 +261,40 @@ final class BrowserModel: ObservableObject {
                 arguments: ["query": query, "backwards": backwards]
             )
         }
+    }
+
+    func printPage() {
+        Task { _ = try? await page.callJavaScript("window.print()") }
+    }
+
+    func showPageContextMenu(at location: NSPoint, in view: NSView?) {
+        let menu = NSMenu()
+        contextMenuTargets.removeAll()
+        addContextMenuItem("Back", systemImage: "chevron.left", enabled: canGoBack, to: menu) { [weak self] in self?.goBack() }
+        addContextMenuItem("Forward", systemImage: "chevron.right", enabled: canGoForward, to: menu) { [weak self] in self?.goForward() }
+        menu.addItem(.separator())
+        addContextMenuItem("Reload Page", systemImage: "arrow.clockwise", enabled: canReload, to: menu) { [weak self] in self?.reload() }
+        menu.addItem(.separator())
+        addContextMenuItem("Show Page Source", systemImage: "doc.text.magnifyingglass", enabled: canShowSource, to: menu) { [weak self] in self?.showPageSource() }
+        addContextMenuItem("Save Page As…", systemImage: "square.and.arrow.down", enabled: canSavePage, to: menu) { [weak self] in Task { await self?.savePage() } }
+        addContextMenuItem("Print Page…", systemImage: "printer", enabled: true, to: menu) { [weak self] in self?.printPage() }
+        menu.popUp(positioning: nil, at: location, in: view)
+    }
+
+    private func addContextMenuItem(
+        _ title: String,
+        systemImage: String,
+        enabled: Bool,
+        to menu: NSMenu,
+        action: @escaping () -> Void
+    ) {
+        let target = ContextMenuTarget(action)
+        contextMenuTargets.append(target)
+        let item = NSMenuItem(title: title, action: #selector(ContextMenuTarget.performAction), keyEquivalent: "")
+        item.target = target
+        item.isEnabled = enabled
+        item.image = NSImage(systemSymbolName: systemImage, accessibilityDescription: title)
+        menu.addItem(item)
     }
 
     func showPageSource() {

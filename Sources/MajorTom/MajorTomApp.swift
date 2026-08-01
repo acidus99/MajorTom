@@ -328,6 +328,7 @@ private struct BrowserTabView: View {
     @State private var showsFind = false
     @State private var findQuery = ""
     @State private var navigationKeyMonitor: Any?
+    @State private var contextMenuMonitor: Any?
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -456,7 +457,11 @@ private struct BrowserTabView: View {
         }
         .task { browser.start() }
         .onAppear { installNavigationKeyMonitor() }
-        .onDisappear { removeNavigationKeyMonitor() }
+        .onAppear { installContextMenuMonitor() }
+        .onDisappear {
+            removeNavigationKeyMonitor()
+            removeContextMenuMonitor()
+        }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomFocusLocation)) { _ in
             locationIsFocused = true
         }
@@ -532,6 +537,33 @@ private struct BrowserTabView: View {
             self.navigationKeyMonitor = nil
         }
     }
+
+    private func installContextMenuMonitor() {
+        removeContextMenuMonitor()
+        contextMenuMonitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { event in
+            let isControlClick = event.type == .leftMouseDown && event.modifierFlags.contains(.control)
+            guard event.type == .rightMouseDown || isControlClick,
+                  let view = event.window?.contentView else { return event }
+            browser.showPageContextMenu(at: event.locationInWindow, in: view)
+            return nil
+        }
+    }
+
+    private func removeContextMenuMonitor() {
+        if let contextMenuMonitor {
+            NSEvent.removeMonitor(contextMenuMonitor)
+            self.contextMenuMonitor = nil
+        }
+    }
+}
+
+@available(macOS 26.0, *)
+final class ContextMenuTarget: NSObject {
+    private let action: () -> Void
+
+    init(_ action: @escaping () -> Void) { self.action = action }
+
+    @objc func performAction() { action() }
 }
 
 @available(macOS 26.0, *)
