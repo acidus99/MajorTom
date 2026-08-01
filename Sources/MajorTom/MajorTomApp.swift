@@ -284,14 +284,16 @@ private struct BrowserTabButton: View {
 
     var body: some View {
         HStack(spacing: 7) {
-            if isHovered {
+            ZStack {
+                if isHovered {
                 Button("Close Tab", systemImage: "xmark") { close() }
                     .labelStyle(.iconOnly)
                     .buttonStyle(.plain)
                     .controlSize(.small)
-                    .frame(width: 18, height: 18)
                     .accessibilityLabel("Close \(browser.title)")
+                }
             }
+            .frame(width: 18, height: 18)
             if browser.isLoading { ProgressView().controlSize(.mini) }
             Text(browser.title)
                 .lineLimit(1)
@@ -299,6 +301,10 @@ private struct BrowserTabButton: View {
         .padding(.horizontal, 12)
         .frame(minWidth: 150, maxWidth: 240, minHeight: 30)
         .background(tabBackground, in: Capsule())
+        .overlay {
+            Capsule()
+                .strokeBorder(Color(nsColor: .separatorColor).opacity(isSelected ? 0.82 : 0.56), lineWidth: 1)
+        }
         .contentShape(Rectangle())
         .onTapGesture(perform: select)
         .onHover { isHovered = $0 }
@@ -307,9 +313,9 @@ private struct BrowserTabButton: View {
 
     private var tabBackground: AnyShapeStyle {
         if isSelected {
-            return AnyShapeStyle(Color(nsColor: .windowBackgroundColor).opacity(0.92))
+            return AnyShapeStyle(Color(nsColor: .controlBackgroundColor).opacity(0.96))
         }
-        return AnyShapeStyle(Color(nsColor: .controlBackgroundColor).opacity(0.58))
+        return AnyShapeStyle(Color(nsColor: .quaternaryLabelColor).opacity(0.22))
     }
 }
 
