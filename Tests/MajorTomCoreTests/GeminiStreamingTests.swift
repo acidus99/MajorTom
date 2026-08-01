@@ -85,6 +85,12 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertTrue(link.contains("&quot;"))
     }
 
+    func testDocumentThemeIsAddressableWithoutReplacingContent() {
+        let document = String(decoding: HTMLDocumentStreamRenderer().documentStart(themeCSS: "body { color: red; }"), as: UTF8.self)
+        XCTAssertTrue(document.contains("id=\"majortom-theme\""))
+        XCTAssertTrue(document.contains("body { color: red; }"))
+    }
+
     func testInlineEnhancementsAreConservativeAndEscaped() {
         let rendered = HTMLDocumentStreamRenderer.renderInline(
             "Use **strong**, *emphasis*, and `code <here>`; leave *unmatched visible"

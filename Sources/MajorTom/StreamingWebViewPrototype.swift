@@ -68,6 +68,7 @@ final class BrowserModel: ObservableObject {
     private let imageLimiter = AsyncSemaphore(limit: 4)
     private var slowDownTask: Task<Void, Never>?
     private var contextMenuTargets: [ContextMenuTarget] = []
+    private var lastPreferences: BrowserPreferences
 
     init(restoredState: RestoredTabState? = nil) {
         let documentStore = BrowserDocumentStore()
@@ -93,6 +94,7 @@ final class BrowserModel: ObservableObject {
             navigationDecider: BrowserNavigationDecider(router: router)
         )
         self.trustStore = Self.makeTrustStore()
+        self.lastPreferences = settings.preferences
         if let restoredState {
             self.history = restoredState.history
             self.historyIndex = min(restoredState.historyIndex, restoredState.history.count - 1)
@@ -114,7 +116,7 @@ final class BrowserModel: ObservableObject {
         }
         settings.$preferences
             .dropFirst()
-            .sink { [weak self] _ in self?.preferencesChanged() }
+            .sink { [weak self] preferences in self?.preferencesChanged(to: preferences) }
             .store(in: &cancellables)
     }
 
@@ -322,7 +324,7 @@ final class BrowserModel: ObservableObject {
     private func renderSourceDocument(_ bytes: Data, at sourceURL: URL) {
         let source = String(decoding: bytes, as: UTF8.self)
         let continuation = beginDocument(at: sourceURL)
-        continuation.yield(renderer.documentStart(browserGenerated: true))
+        continuation.yield(renderer.documentStart(themeCSS: themeCSS, browserGenerated: true))
         continuation.yield(Data("<p class=\"eyebrow\">Page Source</p><div class=\"source\">".utf8))
         for (index, line) in source.components(separatedBy: .newlines).enumerated() {
             let html = "<div style=\"display:grid;grid-template-columns:4rem 1fr\"><span style=\"color:SecondaryLabelColor;text-align:right;padding-right:1rem;user-select:none\">\(index + 1)</span><code style=\"white-space:pre-wrap;overflow-wrap:anywhere\">\(HTMLDocumentStreamRenderer.escape(String(line)))</code></div>"
@@ -909,9 +911,30 @@ final class BrowserModel: ObservableObject {
         return settings.preferences.contentTheme.css(effectiveDarkAppearance: dark)
     }
 
-    private func preferencesChanged() {
-        guard !isLoading, committedURL != nil, canSavePage else { return }
+    private func preferencesChanged(to preferences: BrowserPreferences) {
+        defer { lastPreferences = preferences }
+        guard committedURL != nil, canSavePage else { return }
+
+        if preferences.contentTheme != lastPreferences.contentTheme {
+            applyThemeWithoutReload()
+            return
+        }
+
+        let renderingChanged = preferences.renderingOptions != lastPreferences.renderingOptions
+            || preferences.automaticallyLoadsSameCapsuleImages != lastPreferences.automaticallyLoadsSameCapsuleImages
+            || preferences.automaticallyLoadsDataImages != lastPreferences.automaticallyLoadsDataImages
+        guard renderingChanged, !isLoading else { return }
         renderCurrentContent()
+    }
+
+    private func applyThemeWithoutReload() {
+        let css = themeCSS
+        Task {
+            _ = try? await page.callJavaScript(
+                "document.getElementById('majortom-theme').textContent = css",
+                arguments: ["css": css]
+            )
+        }
     }
 
     private func applyZoom() {

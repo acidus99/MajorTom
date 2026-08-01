@@ -32,7 +32,7 @@ public struct HTMLDocumentStreamRenderer: Sendable {
         <!doctype html><html><head><meta charset="utf-8">
         <meta name="viewport" content="width=device-width,initial-scale=1">
         <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: majortom-resource:; style-src 'unsafe-inline'">
-        \(base)<style>\(themeCSS)</style></head><body\(documentClass)><main>
+        \(base)<style id="majortom-theme">\(themeCSS)</style></head><body\(documentClass)><main>
         """
         return Data(html.utf8)
     }
