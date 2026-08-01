@@ -289,6 +289,32 @@ final class BrowserModel: ObservableObject {
         menu.popUp(positioning: nil, at: location, in: view)
     }
 
+    func showContextMenu(at location: NSPoint, contentHeight: CGFloat, in view: NSView?) {
+        Task {
+            let script = """
+            (() => document.elementFromPoint(\(location.x), \(contentHeight - location.y))?.closest('a')?.href ?? null)()
+            """
+            let href = try? await page.callJavaScript(script) as? String
+            guard let href, let url = URL(string: href) else {
+                showPageContextMenu(at: location, in: view)
+                return
+            }
+            showLinkContextMenu(for: url, at: location, in: view)
+        }
+    }
+
+    private func showLinkContextMenu(for url: URL, at location: NSPoint, in view: NSView?) {
+        let menu = NSMenu()
+        contextMenuTargets.removeAll()
+        addContextMenuItem("Open Link", systemImage: "arrow.up.right.square", enabled: true, to: menu) { [weak self] in self?.openLink(url) }
+        addContextMenuItem("Copy Link", systemImage: "doc.on.doc", enabled: true, to: menu) {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(url.absoluteString, forType: .string)
+        }
+        addContextMenuItem("Download Linked Resource", systemImage: "arrow.down.circle", enabled: true, to: menu) { [weak self] in self?.download(url) }
+        menu.popUp(positioning: nil, at: location, in: view)
+    }
+
     private func addContextMenuItem(
         _ title: String,
         systemImage: String,

@@ -572,7 +572,8 @@ private struct BrowserTabView: View {
             let isControlClick = event.type == .leftMouseDown && event.modifierFlags.contains(.control)
             guard event.type == .rightMouseDown || isControlClick,
                   let view = event.window?.contentView else { return event }
-            browser.showPageContextMenu(at: event.locationInWindow, in: view)
+            let location = view.convert(event.locationInWindow, from: nil)
+            browser.showContextMenu(at: location, contentHeight: view.bounds.height, in: view)
             return nil
         }
     }
