@@ -797,7 +797,21 @@ final class BrowserModel: ObservableObject {
         let continuation = beginDocument(at: url)
         continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: url))
         let source = "data:\(HTMLDocumentStreamRenderer.escapeAttribute(mimeType));base64,\(data.base64EncodedString())"
-        continuation.yield(Data("<img alt=\"\" src=\"\(source)\" style=\"max-width:100%;height:auto\">".utf8))
+        let imageDocument = """
+        <style>
+        body { height: 100vh; box-sizing: border-box; overflow: hidden; }
+        main { box-sizing: border-box; max-width: none; height: 100%; padding: 0; }
+        .image-toggle { position: absolute; opacity: 0; pointer-events: none; }
+        .image-frame { display: flex; box-sizing: border-box; width: 100%; height: 100%; align-items: center; justify-content: center; overflow: hidden; cursor: zoom-in; }
+        .image-frame img { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; margin: 0; border-radius: 0; }
+        .image-toggle:focus-visible + .image-frame { outline: 3px solid AccentColor; outline-offset: -3px; }
+        .image-toggle:checked + .image-frame { display: block; overflow: auto; cursor: zoom-out; }
+        .image-toggle:checked + .image-frame img { max-width: none; max-height: none; }
+        </style>
+        <input class="image-toggle" type="checkbox" id="image-size" aria-label="Show image at natural size">
+        <label class="image-frame" for="image-size"><img alt="" src="\(source)"></label>
+        """
+        continuation.yield(Data(imageDocument.utf8))
         continuation.yield(renderer.documentEnd())
         continuation.finish()
         commit(url, disposition: disposition)
