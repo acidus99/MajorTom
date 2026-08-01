@@ -304,6 +304,7 @@ private struct BrowserTabView: View {
     @FocusState private var findIsFocused: Bool
     @State private var showsFind = false
     @State private var findQuery = ""
+    @State private var navigationKeyMonitor: Any?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -408,6 +409,8 @@ private struct BrowserTabView: View {
                 }
         }
         .task { browser.start() }
+        .onAppear { installNavigationKeyMonitor() }
+        .onDisappear { removeNavigationKeyMonitor() }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomFocusLocation)) { _ in
             locationIsFocused = true
         }
@@ -445,6 +448,31 @@ private struct BrowserTabView: View {
                 if let value { browser.submitInput(value) }
                 else { browser.cancelInput() }
             }
+        }
+    }
+
+    private func installNavigationKeyMonitor() {
+        removeNavigationKeyMonitor()
+        navigationKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            guard modifiers == .command else { return event }
+            switch event.charactersIgnoringModifiers {
+            case "[":
+                browser.goBack()
+                return nil
+            case "]":
+                browser.goForward()
+                return nil
+            default:
+                return event
+            }
+        }
+    }
+
+    private func removeNavigationKeyMonitor() {
+        if let navigationKeyMonitor {
+            NSEvent.removeMonitor(navigationKeyMonitor)
+            self.navigationKeyMonitor = nil
         }
     }
 }
