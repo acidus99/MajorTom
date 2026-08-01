@@ -514,6 +514,9 @@ private struct BrowserTabView: View {
         .onReceive(NotificationCenter.default.publisher(for: .majorTomHome)) { _ in browser.goHome() }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomUp)) { _ in browser.goUpOneLevel() }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomRoot)) { _ in browser.goToCapsuleRoot() }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomContentThemeChanged)) { _ in
+            browser.refreshContentTheme()
+        }
         .sheet(item: $browser.trustPrompt) { prompt in
             TrustPromptView(prompt: prompt) { approved in
                 browser.respondToTrust(allow: approved)

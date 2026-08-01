@@ -8,7 +8,12 @@ final class BrowserSettingsStore: ObservableObject {
     static let shared = BrowserSettingsStore()
 
     @Published var preferences: BrowserPreferences {
-        didSet { persist() }
+        didSet {
+            persist()
+            if oldValue.contentTheme != preferences.contentTheme {
+                NotificationCenter.default.post(name: .majorTomContentThemeChanged, object: nil)
+            }
+        }
     }
 
     private let defaults: UserDefaults
@@ -39,4 +44,8 @@ final class BrowserSettingsStore: ObservableObject {
             }
         )
     }
+}
+
+extension Notification.Name {
+    static let majorTomContentThemeChanged = Notification.Name("MajorTomContentThemeChanged")
 }

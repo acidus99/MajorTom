@@ -266,6 +266,11 @@ final class BrowserModel: ObservableObject {
         }
     }
 
+    func refreshContentTheme() {
+        guard committedURL != nil, canSavePage else { return }
+        applyThemeWithoutReload()
+    }
+
     func printPage() {
         Task { _ = try? await page.callJavaScript("window.print()") }
     }
@@ -929,10 +934,14 @@ final class BrowserModel: ObservableObject {
 
     private func applyThemeWithoutReload() {
         let css = themeCSS
+        guard let cssData = try? JSONEncoder().encode(css),
+              let cssLiteral = String(data: cssData, encoding: .utf8) else { return }
         Task {
             _ = try? await page.callJavaScript(
-                "document.getElementById('majortom-theme').textContent = css",
-                arguments: ["css": css]
+                """
+                const theme = document.getElementById('majortom-theme');
+                if (theme) { theme.textContent = \(cssLiteral); }
+                """
             )
         }
     }
