@@ -432,15 +432,58 @@ final class BrowserModel: ObservableObject {
         let source = String(decoding: bytes, as: UTF8.self)
         let continuation = beginDocument(at: sourceURL)
         continuation.yield(renderer.documentStart(themeCSS: themeCSS, browserGenerated: true))
-        continuation.yield(Data("<p class=\"eyebrow\">Page Source</p><div class=\"source\">".utf8))
-        for (index, line) in source.components(separatedBy: .newlines).enumerated() {
-            let html = "<div style=\"display:grid;grid-template-columns:4rem 1fr\"><span style=\"color:SecondaryLabelColor;text-align:right;padding-right:1rem;user-select:none\">\(index + 1)</span><code style=\"white-space:pre-wrap;overflow-wrap:anywhere\">\(HTMLDocumentStreamRenderer.escape(String(line)))</code></div>"
-            continuation.yield(Data(html.utf8))
+        continuation.yield(Data(Self.sourceViewPrologue.utf8))
+
+        // Batch lines so a large source is a few dozen scheme-handler writes rather
+        // than one per line, while still streaming.
+        var batch = ""
+        for line in SourceLineSplitter.lines(of: source) {
+            batch += "<div class=\"source-line\"><code>"
+                + HTMLDocumentStreamRenderer.escape(line)
+                + "</code></div>"
+            if batch.utf8.count >= 32 * 1_024 {
+                continuation.yield(Data(batch.utf8))
+                batch = ""
+            }
         }
+        if !batch.isEmpty { continuation.yield(Data(batch.utf8)) }
+
         continuation.yield(Data("</div>".utf8))
         continuation.yield(renderer.documentEnd())
         continuation.finish()
     }
+
+    /// Safari-style source gutter. The line number is generated content, so it is
+    /// never part of the selection and never lands in the clipboard, and a wrapped
+    /// long line keeps exactly one number.
+    private static let sourceViewPrologue = """
+    <style>
+    body.browser-generated:has(.source) main { max-width: 62rem; }
+    .source { counter-reset: source-line; margin-top: 1rem; }
+    .source-line { display: grid; grid-template-columns: 3.5rem 1fr; column-gap: 1rem; }
+    .source-line:hover { background: color-mix(in srgb, CanvasText 6%, transparent); }
+    .source-line::before {
+      counter-increment: source-line;
+      content: counter(source-line);
+      text-align: right;
+      color: SecondaryLabelColor;
+      font: .82rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      padding: .05rem .75rem 0 0;
+      border-inline-end: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+      -webkit-user-select: none;
+      user-select: none;
+    }
+    .source-line code {
+      font: .86rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      background: transparent;
+      padding: 0;
+      border-radius: 0;
+    }
+    </style>
+    <p class="eyebrow">Page Source</p><div class="source">
+    """
 
     func savePage() async {
         guard canSavePage, let committedURL else { return }
