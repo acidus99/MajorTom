@@ -101,10 +101,12 @@ struct MajorTomApp: App {
                 Divider()
                 Button("Home") { NotificationCenter.default.post(name: .majorTomHome, object: nil) }
                     .keyboardShortcut("h", modifiers: [.command, .shift])
+                // Command-Up/Down are the system's document scroll shortcuts, so binding
+                // Up One Level there fought the text system and neither worked reliably.
                 Button("Up One Level") { NotificationCenter.default.post(name: .majorTomUp, object: nil) }
-                    .keyboardShortcut(.upArrow, modifiers: .command)
+                    .keyboardShortcut(.upArrow, modifiers: .option)
                 Button("Capsule Root") { NotificationCenter.default.post(name: .majorTomRoot, object: nil) }
-                    .keyboardShortcut(.upArrow, modifiers: [.command, .shift])
+                    .keyboardShortcut(.upArrow, modifiers: [.option, .shift])
             }
         }
 
@@ -145,11 +147,18 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
             // Command-Left/Right are "move to beginning/end of line" while editing.
             // Swallowing them there broke standard Mac text editing in the address
             // and find fields (spec 11.4). Local key monitors run on the main thread.
+            // Only a genuinely editable responder should keep these keys. The previous
+            // class-only test was both too broad and too narrow: a diagnostic showed the
+            // web content responder is `WebKit.WebPageWebView` (so the test already
+            // failed there, and this event is correctly swallowed), while any
+            // non-editable text-system view would have wrongly kept it.
             let isEditingText = MainActor.assumeIsolated { () -> Bool in
                 guard let responder = NSApplication.shared.keyWindow?.firstResponder else {
                     return false
                 }
-                return responder is NSTextView || responder is NSTextField
+                if let textView = responder as? NSTextView { return textView.isEditable }
+                if let field = responder as? NSTextField { return field.isEditable }
+                return false
             }
             guard !isEditingText else { return event }
 
@@ -388,22 +397,28 @@ private struct BrowserTabButton: View {
     @State private var isHovered = false
 
     var body: some View {
-        HStack(spacing: 7) {
-            ZStack {
-                if isHovered {
-                Button("Close Tab", systemImage: "xmark") { close() }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.plain)
-                    .controlSize(.small)
-                    .accessibilityLabel("Close \(browser.title)")
-                }
-            }
-            .frame(width: 18, height: 18)
+        HStack(spacing: 6) {
+            // Safari puts the close control hard against the leading edge of the tab.
+            // The slot is always present, hidden rather than removed, so the title does
+            // not shift when the pointer enters the tab and so VoiceOver can still
+            // reach it without a mouse.
+            Button("Close Tab", systemImage: "xmark") { close() }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.plain)
+                .controlSize(.small)
+                .frame(width: 16, height: 16)
+                .contentShape(Rectangle())
+                .opacity(isHovered || isSelected ? 1 : 0)
+                .accessibilityLabel("Close \(browser.title)")
+                .accessibilityHidden(false)
+
             if browser.isLoading { ProgressView().controlSize(.mini) }
             Text(browser.title)
                 .lineLimit(1)
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
+        .padding(.leading, 5)
+        .padding(.trailing, 12)
         .frame(minWidth: 150, maxWidth: 240, minHeight: 30)
         .background(tabBackground, in: Capsule())
         .overlay {
@@ -441,6 +456,11 @@ private struct BrowserTabView: View {
     var body: some View {
         ZStack(alignment: .top) {
             StreamingWebViewPrototype(browser: browser, findNavigatorIsPresented: $showsFind)
+                .dropDestination(for: URL.self) { urls, _ in
+                    guard let file = urls.first(where: \.isFileURL) else { return false }
+                    browser.openFile(file)
+                    return true
+                }
                 .overlay(alignment: .bottomLeading) {
                     HStack(spacing: 7) {
                         if browser.isLoading {
@@ -460,27 +480,27 @@ private struct BrowserTabView: View {
 
             VStack(spacing: 0) {
             HStack(spacing: 8) {
-                Button("Back", systemImage: "chevron.left") {
-                    browser.goBack()
-                }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 42)
-                .disabled(!browser.canGoBack)
-                .help("Back")
+                // Safari joins Back and Forward into a single segmented control rather
+                // than two separate bordered buttons. `.navigation` is the AppKit
+                // control-group style that produces exactly that appearance.
+                ControlGroup {
+                    Button("Back", systemImage: "chevron.left") {
+                        browser.goBack()
+                    }
+                    .disabled(!browser.canGoBack)
+                    .help("Back")
 
-                Button("Forward", systemImage: "chevron.right") {
-                    browser.goForward()
+                    Button("Forward", systemImage: "chevron.right") {
+                        browser.goForward()
+                    }
+                    .disabled(!browser.canGoForward)
+                    .help("Forward")
                 }
+                .controlGroupStyle(.navigation)
                 .labelStyle(.iconOnly)
-                .buttonStyle(.bordered)
                 .controlSize(.large)
                 .foregroundStyle(.secondary)
-                .frame(minWidth: 42)
-                .disabled(!browser.canGoForward)
-                .help("Forward")
+                .fixedSize()
 
                 Button("Home", systemImage: "house") { browser.goHome() }
                     .labelStyle(.iconOnly)
