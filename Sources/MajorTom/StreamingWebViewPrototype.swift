@@ -357,7 +357,7 @@ final class BrowserModel: ObservableObject {
         let menu = NSMenu()
         contextMenuTargets.removeAll()
         addContextMenuItem("Open Link", systemImage: "arrow.up.right.square", enabled: true, to: menu) { [weak self] in self?.openLink(url) }
-        addContextMenuItem("Download Linked Resource", systemImage: "arrow.down.circle", enabled: true, to: menu) { [weak self] in self?.download(url) }
+        addContextMenuItem("Download Linked File As…", systemImage: "arrow.down.circle", enabled: true, to: menu) { [weak self] in self?.download(url) }
         menu.addItem(.separator())
         addContextMenuItem("Copy Link", systemImage: "doc.on.doc", enabled: true, to: menu) {
             NSPasteboard.general.clearContents()
