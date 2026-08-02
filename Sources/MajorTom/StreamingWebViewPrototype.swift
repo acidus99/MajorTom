@@ -430,7 +430,11 @@ final class BrowserModel: ObservableObject {
     func savePage() async {
         guard canSavePage, let committedURL else { return }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = suggestedFilename(for: committedURL, mimeType: currentMIMEType)
+        panel.nameFieldStringValue = BrowserFilenameSuggestion.make(
+            for: committedURL,
+            mimeType: currentMIMEType,
+            documentTitle: documentTitle
+        )
         panel.canCreateDirectories = true
         guard await panel.begin() == .OK, let destination = panel.url else { return }
         do {
@@ -455,7 +459,7 @@ final class BrowserModel: ObservableObject {
                     throw URLError(.unsupportedURL)
                 }
                 let panel = NSSavePanel()
-                panel.nameFieldStringValue = suggestedFilename(for: url, mimeType: result.1)
+                panel.nameFieldStringValue = BrowserFilenameSuggestion.make(for: url, mimeType: result.1)
                 panel.canCreateDirectories = true
                 guard await panel.begin() == .OK, let destination = panel.url else {
                     statusText = "Download cancelled"
@@ -909,29 +913,6 @@ final class BrowserModel: ObservableObject {
         continuation.yield(renderer.documentEnd())
         continuation.finish()
         commit(url, disposition: disposition)
-    }
-
-    private func suggestedFilename(for url: URL, mimeType: String) -> String {
-        var name = url.lastPathComponent
-        if name.isEmpty {
-            name = documentTitle.map(sanitizeFilename) ?? "untitled"
-        }
-        guard !name.contains(".") else { return name }
-        switch mimeType {
-        case "text/gemini": return name + ".gmi"
-        case "text/plain": return name + ".txt"
-        case "image/png": return name + ".png"
-        case "image/jpeg": return name + ".jpg"
-        case "image/gif": return name + ".gif"
-        default: return name
-        }
-    }
-
-    private func sanitizeFilename(_ value: String) -> String {
-        let invalid = CharacterSet(charactersIn: "/:\\")
-        let sanitized = value.components(separatedBy: invalid).joined(separator: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return sanitized.isEmpty ? "untitled" : sanitized
     }
 
     private func commit(_ url: URL, disposition: HistoryDisposition) {

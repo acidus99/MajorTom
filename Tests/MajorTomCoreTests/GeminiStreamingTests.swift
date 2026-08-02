@@ -130,6 +130,24 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertEqual(decoded, original)
     }
 
+    func testDirectorySaveFilenameUsesDocumentTitle() {
+        XCTAssertEqual(
+            BrowserFilenameSuggestion.make(
+                for: URL(string: "gemini://kennedy.gemi.dev/archive/")!,
+                mimeType: "text/gemini",
+                documentTitle: "Kennedy Archive"
+            ),
+            "Kennedy Archive.gmi"
+        )
+        XCTAssertEqual(
+            BrowserFilenameSuggestion.make(
+                for: URL(string: "gemini://kennedy.gemi.dev/archive/")!,
+                mimeType: "text/gemini"
+            ),
+            "untitled.gmi"
+        )
+    }
+
     func testGeminiRequestTargetNormalizesAndRemovesFragment() throws {
         let target = try GeminiRequestTarget("GEMINI://Example.COM/path?q=hello#section")
         XCTAssertEqual(target.endpoint, CapsuleEndpoint(host: "example.com", port: 1_965))
