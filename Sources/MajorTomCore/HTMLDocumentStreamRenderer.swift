@@ -75,12 +75,18 @@ public struct HTMLDocumentStreamRenderer: Sendable {
         case .blank:
             html = "<div class=\"blank\" aria-hidden=\"true\"></div>"
         case .beginPreformatted(let altText):
-            let label = altText.map { " aria-label=\"\(Self.escapeAttribute($0))\"" } ?? ""
-            html = "<pre\(label)><code>"
+            // <details>/<summary> is a native disclosure control needing no JavaScript,
+            // which matters because the document's CSP is `default-src 'none'`.
+            // Text on the opening fence is conventionally a description of the block —
+            // most often ASCII art — so it is exactly what should remain visible when
+            // the block is collapsed. Open by default.
+            let summary = altText.map(Self.escape) ?? "Preformatted text"
+            let unlabelled = altText == nil ? " class=\"unlabelled\"" : ""
+            html = "<details class=\"pre-block\" open><summary\(unlabelled)>\(summary)</summary><pre><code>"
         case .preformattedLine(let text):
             html = Self.escape(text) + "\n"
         case .endPreformatted:
-            html = "</code></pre>"
+            html = "</code></pre></details>"
         }
         return Data(html.utf8)
     }
@@ -197,6 +203,14 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     .list-item { display: grid; grid-template-columns: 1.25rem 1fr; margin: .25rem 0; }
     blockquote { margin: 1rem 0; padding: .6rem 1rem; border-inline-start: .25rem solid AccentColor; }
     pre { overflow-x: auto; padding: 1rem; border-radius: .65rem; background: color-mix(in srgb, CanvasText 8%, Canvas); }
+    .pre-block { margin: 1rem 0; }
+    .pre-block > summary { display: flex; align-items: center; gap: .4rem; cursor: pointer; list-style: none; color: SecondaryLabelColor; font-size: .82rem; padding: .1rem 0; }
+    .pre-block > summary::-webkit-details-marker { display: none; }
+    .pre-block > summary::before { content: "\\25BE"; font-size: .8em; line-height: 1; }
+    .pre-block:not([open]) > summary::before { content: "\\25B8"; }
+    .pre-block > summary.unlabelled { font-style: italic; opacity: .65; }
+    .pre-block > summary:hover { color: CanvasText; }
+    .pre-block > pre { margin: .3rem 0 0; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; background: color-mix(in srgb, CanvasText 8%, Canvas); border-radius: .25rem; padding: .08em .28em; }
     pre code { font-size: inherit; background: transparent; padding: 0; }
     img { display: block; max-width: 100%; height: auto; margin: 1rem 0; border-radius: .5rem; }
