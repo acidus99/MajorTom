@@ -148,6 +148,21 @@ final class GeminiStreamingTests: XCTestCase {
         )
     }
 
+    func testFallbackPageTitlePreservesFilenameExtension() {
+        XCTAssertEqual(
+            BrowserPageTitle.fallback(for: URL(string: "gemini://gemi.dev/tests/markdown.md")!),
+            "markdown.md"
+        )
+        XCTAssertEqual(
+            BrowserPageTitle.fallback(for: URL(string: "gemini://gemi.dev/archive/")!),
+            "archive"
+        )
+        XCTAssertEqual(
+            BrowserPageTitle.fallback(for: URL(string: "gemini://gemi.dev/")!),
+            "gemi.dev"
+        )
+    }
+
     func testGeminiRequestTargetNormalizesAndRemovesFragment() throws {
         let target = try GeminiRequestTarget("GEMINI://Example.COM/path?q=hello#section")
         XCTAssertEqual(target.endpoint, CapsuleEndpoint(host: "example.com", port: 1_965))

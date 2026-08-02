@@ -1256,9 +1256,7 @@ final class BrowserModel: ObservableObject {
     }
 
     private func displayTitle(for url: URL) -> String {
-        let filename = url.deletingPathExtension().lastPathComponent
-        if !filename.isEmpty { return filename }
-        return url.host ?? "Major Tom"
+        BrowserPageTitle.fallback(for: url)
     }
 }
 
