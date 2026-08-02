@@ -103,6 +103,7 @@ final class BrowserModel: ObservableObject {
     private weak var pendingContextMenuView: NSView?
     private var pendingContextMenuLocation: NSPoint?
     private let contextMenuScriptHandler: ContextMenuScriptHandler
+    private var contextSharingPicker: NSSharingServicePicker?
     private var lastPreferences: BrowserPreferences
 
     init(restoredState: RestoredTabState? = nil) {
@@ -356,11 +357,22 @@ final class BrowserModel: ObservableObject {
         let menu = NSMenu()
         contextMenuTargets.removeAll()
         addContextMenuItem("Open Link", systemImage: "arrow.up.right.square", enabled: true, to: menu) { [weak self] in self?.openLink(url) }
+        addContextMenuItem("Download Linked Resource", systemImage: "arrow.down.circle", enabled: true, to: menu) { [weak self] in self?.download(url) }
+        menu.addItem(.separator())
         addContextMenuItem("Copy Link", systemImage: "doc.on.doc", enabled: true, to: menu) {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(url.absoluteString, forType: .string)
         }
-        addContextMenuItem("Download Linked Resource", systemImage: "arrow.down.circle", enabled: true, to: menu) { [weak self] in self?.download(url) }
+
+        let sharingPicker = NSSharingServicePicker(items: [url])
+        contextSharingPicker = sharingPicker
+        menu.addItem(sharingPicker.standardShareMenuItem)
+
+        menu.addItem(.separator())
+        let servicesItem = NSMenuItem(title: "Services", action: nil, keyEquivalent: "")
+        NSApp.servicesMenu?.update()
+        servicesItem.submenu = (NSApp.servicesMenu?.copy() as? NSMenu) ?? NSMenu(title: "Services")
+        menu.addItem(servicesItem)
         menu.popUp(positioning: nil, at: location, in: view)
     }
 
