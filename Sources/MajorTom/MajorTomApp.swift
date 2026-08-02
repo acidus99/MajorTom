@@ -573,8 +573,8 @@ private struct BrowserTabView: View {
             guard event.type == .rightMouseDown || isControlClick,
                   let view = event.window?.contentView else { return event }
             let location = view.convert(event.locationInWindow, from: nil)
-            browser.showContextMenu(at: location, contentSize: view.bounds.size, in: view)
-            return nil
+            browser.prepareContextMenu(at: location, in: view)
+            return event
         }
     }
 

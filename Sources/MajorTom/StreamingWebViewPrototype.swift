@@ -7,6 +7,38 @@ import WebKit
 
 @available(macOS 26.0, *)
 @MainActor
+private final class ContextMenuScriptHandler: NSObject, WKScriptMessageHandler {
+    static let name = "majorTomContextMenu"
+
+    static let userScript = WKUserScript(
+        source: """
+        document.addEventListener('contextmenu', (event) => {
+            event.preventDefault();
+            const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+            const anchor = target?.closest('a[href]');
+            window.webkit.messageHandlers.\(name).postMessage(anchor?.href ?? '');
+        }, true);
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: true,
+        in: .defaultClient
+    )
+
+    weak var browser: BrowserModel?
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        let href = message.body as? String
+        Task { @MainActor [weak browser] in
+            browser?.showPendingContextMenu(link: href.flatMap(URL.init(string:)))
+        }
+    }
+}
+
+@available(macOS 26.0, *)
+@MainActor
 final class BrowserModel: ObservableObject {
     enum HistoryDisposition {
         case new, reload, traversal
@@ -68,14 +100,26 @@ final class BrowserModel: ObservableObject {
     private let imageLimiter = AsyncSemaphore(limit: 4)
     private var slowDownTask: Task<Void, Never>?
     private var contextMenuTargets: [ContextMenuTarget] = []
+    private weak var pendingContextMenuView: NSView?
+    private var pendingContextMenuLocation: NSPoint?
+    private let contextMenuScriptHandler: ContextMenuScriptHandler
     private var lastPreferences: BrowserPreferences
 
     init(restoredState: RestoredTabState? = nil) {
         let documentStore = BrowserDocumentStore()
         let resourceStore = BrowserResourceStore()
         let router = BrowserNavigationRouter()
+        let contextMenuScriptHandler = ContextMenuScriptHandler()
+        let userContentController = WKUserContentController()
+        userContentController.addUserScript(ContextMenuScriptHandler.userScript)
+        userContentController.add(
+            contextMenuScriptHandler,
+            contentWorld: .defaultClient,
+            name: ContextMenuScriptHandler.name
+        )
         var configuration = WebPage.Configuration()
         configuration.websiteDataStore = .nonPersistent()
+        configuration.userContentController = userContentController
         configuration.suppressesIncrementalRendering = false
         configuration.loadsSubresources = true
         configuration.defaultNavigationPreferences.allowsContentJavaScript = false
@@ -89,6 +133,7 @@ final class BrowserModel: ObservableObject {
         self.documentStore = documentStore
         self.resourceStore = resourceStore
         self.router = router
+        self.contextMenuScriptHandler = contextMenuScriptHandler
         self.page = WebPage(
             configuration: configuration,
             navigationDecider: BrowserNavigationDecider(router: router)
@@ -107,6 +152,7 @@ final class BrowserModel: ObservableObject {
         } else {
             self.locationText = settings.preferences.homepage
         }
+        contextMenuScriptHandler.browser = self
 
         router.openURL = { [weak self] url in
             self?.openLink(url)
@@ -289,22 +335,20 @@ final class BrowserModel: ObservableObject {
         menu.popUp(positioning: nil, at: location, in: view)
     }
 
-    func showContextMenu(at location: NSPoint, contentSize: CGSize, in view: NSView?) {
-        Task {
-            let script = """
-            (() => {
-                const x = \(location.x) * window.innerWidth / \(contentSize.width);
-                const y = (\(contentSize.height) - \(location.y)) * window.innerHeight / \(contentSize.height);
-                const element = document.elementsFromPoint(x, y).find((node) => node.closest?.('a'));
-                return element?.closest('a')?.href ?? null;
-            })()
-            """
-            let href = try? await page.callJavaScript(script) as? String
-            guard let href, let url = URL(string: href) else {
-                showPageContextMenu(at: location, in: view)
-                return
-            }
-            showLinkContextMenu(for: url, at: location, in: view)
+    func prepareContextMenu(at location: NSPoint, in view: NSView) {
+        pendingContextMenuLocation = location
+        pendingContextMenuView = view
+    }
+
+    fileprivate func showPendingContextMenu(link: URL?) {
+        guard let location = pendingContextMenuLocation,
+              let view = pendingContextMenuView else { return }
+        pendingContextMenuLocation = nil
+        pendingContextMenuView = nil
+        if let link {
+            showLinkContextMenu(for: link, at: location, in: view)
+        } else {
+            showPageContextMenu(at: location, in: view)
         }
     }
 
