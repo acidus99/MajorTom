@@ -291,7 +291,7 @@ final class BrowserModel: ObservableObject {
         if let committedURL, !history.isEmpty {
             if committedURL.isFileURL {
                 openFile(committedURL, disposition: .traversal)
-            } else if let target = try? GeminiRequestTarget(committedURL.absoluteString) {
+            } else if let target = makeTarget(for: committedURL) {
                 navigate(to: target, disposition: .traversal)
             } else {
                 submitLocation()
@@ -346,8 +346,7 @@ final class BrowserModel: ObservableObject {
             openFile(committedURL, disposition: .reload)
             return
         }
-        guard let committedURL,
-              let target = try? GeminiRequestTarget(committedURL.absoluteString) else { return }
+        guard let committedURL, let target = makeTarget(for: committedURL) else { return }
         navigate(to: target, disposition: .reload)
     }
 
@@ -846,7 +845,7 @@ final class BrowserModel: ObservableObject {
             openFile(url, disposition: .traversal)
             return
         }
-        guard let target = try? GeminiRequestTarget(url.absoluteString) else { return }
+        guard let target = makeTarget(for: url) else { return }
         navigate(to: target, disposition: .traversal)
     }
 
@@ -910,7 +909,7 @@ final class BrowserModel: ObservableObject {
         do {
             let events = transport.events(
                 for: target,
-                configuration: GeminiTransportConfiguration(proxy: settings.preferences.proxy)
+                configuration: GeminiTransportConfiguration()
             ) { [weak self] identity, _ in
                 guard let self else { return false }
                 return await self.authorize(identity)
@@ -928,8 +927,14 @@ final class BrowserModel: ObservableObject {
                     statusText = "Response \(header.status)"
 
                     if header.isRedirect {
-                        guard let redirectURL = URL(string: header.meta, relativeTo: target.url)?.absoluteURL,
-                              let redirectTarget = try? GeminiRequestTarget(redirectURL.absoluteString) else {
+                        // Resolved against target.url, which for a proxied request is the
+                        // original http:// resource, so a proxy's relative redirect lands
+                        // on the right host and is re-proxied by makeTarget.
+                        guard let redirectURL = URL(
+                            string: header.meta.trimmingCharacters(in: .whitespacesAndNewlines),
+                            relativeTo: target.url
+                        )?.absoluteURL,
+                              let redirectTarget = makeTarget(for: redirectURL) else {
                             showGeneratedPage(
                                 title: "Invalid Redirect",
                                 message: "The capsule returned a redirect that Major Tom could not understand.",
@@ -961,7 +966,11 @@ final class BrowserModel: ObservableObject {
                     }
 
                     if header.isTemporaryFailure || header.isPermanentFailure || header.requiresClientCertificate {
-                        let title = header.isTemporaryFailure
+                        // 43 and 53 are the proxy-specific failures. Reported generically
+                        // they read as "the capsule is broken", when in fact the proxy
+                        // is misconfigured or unwilling — a very different fix.
+                        let isProxied = target.url.scheme?.lowercased() != "gemini"
+                        var title = header.isTemporaryFailure
                             ? "Temporary Capsule Failure"
                             : header.isPermanentFailure
                                 ? "Permanent Capsule Failure"
@@ -969,6 +978,17 @@ final class BrowserModel: ObservableObject {
                         var message = header.requiresClientCertificate
                             ? "This capsule requires a client certificate. Major Tom does not support client identities yet."
                             : header.meta
+                        if header.status == 43 {
+                            title = "Proxy Error"
+                            message = header.meta.isEmpty
+                                ? "The proxy could not fetch this resource from the remote host."
+                                : header.meta
+                        } else if header.status == 53 {
+                            title = "Proxy Request Refused"
+                            message = isProxied
+                                ? "The configured proxy will not serve this URL. Check the proxy address in Settings ▸ Networking, and that it is a Gemini proxy willing to fetch \(target.url.scheme ?? "this scheme")."
+                                : "That capsule does not serve this address and will not proxy the request."
+                        }
                         if header.status == 44 {
                             let seconds = max(0, Int(header.meta.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
                             retryNotBefore = Date().addingTimeInterval(TimeInterval(seconds))
@@ -1163,6 +1183,24 @@ final class BrowserModel: ObservableObject {
         }
     }
 
+    /// Builds a request target for `url`, routing http/https through the configured
+    /// Gemini proxy when there is one.
+    ///
+    /// Every place that turns a URL into a request goes through here, so navigation,
+    /// reload, history traversal and redirect following all agree about whether the
+    /// proxy applies.
+    private func makeTarget(for url: URL) -> GeminiRequestTarget? {
+        switch url.scheme?.lowercased() {
+        case "gemini":
+            return try? GeminiRequestTarget(url.absoluteString)
+        case "http", "https":
+            guard let proxy = settings.preferences.proxy else { return nil }
+            return try? GeminiRequestTarget(proxying: url, through: proxy)
+        default:
+            return nil
+        }
+    }
+
     private func openLink(_ url: URL) {
         if url.scheme?.lowercased() == "gemini",
            let target = try? GeminiRequestTarget(url.absoluteString) {
@@ -1176,8 +1214,18 @@ final class BrowserModel: ObservableObject {
     }
 
     private func openExternalURL(_ url: URL) {
+        let scheme = url.scheme?.lowercased() ?? ""
+
+        // With a Gemini proxy configured, http/https stay inside Major Tom: the proxy
+        // fetches the page and returns Gemtext. Without one they go to the default
+        // browser as before.
+        if ["http", "https"].contains(scheme), let target = makeTarget(for: url) {
+            navigate(to: target, disposition: .new)
+            return
+        }
+
         let permitted = ["http", "https", "mailto"]
-        guard let scheme = url.scheme?.lowercased(), permitted.contains(scheme) else {
+        guard permitted.contains(scheme) else {
             validationMessage = "Major Tom does not permit the \(url.scheme ?? "unknown") URL scheme."
             return
         }
@@ -1499,7 +1547,6 @@ final class BrowserModel: ObservableObject {
             let events = transport.events(
                 for: target,
                 configuration: GeminiTransportConfiguration(
-                    proxy: settings.preferences.proxy,
                     maximumResponseByteCount: 16 * 1_024 * 1_024
                 )
             ) { [weak self] identity, _ in
@@ -1556,7 +1603,7 @@ final class BrowserModel: ObservableObject {
         var mimeType = "application/octet-stream"
         let events = transport.events(
             for: target,
-            configuration: GeminiTransportConfiguration(proxy: settings.preferences.proxy)
+            configuration: GeminiTransportConfiguration()
         ) { [weak self] identity, _ in
             guard let self else { return false }
             return await self.authorize(identity)

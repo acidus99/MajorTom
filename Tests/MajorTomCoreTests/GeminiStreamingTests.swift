@@ -148,6 +148,43 @@ final class GeminiStreamingTests: XCTestCase {
         }
     }
 
+    /// A proxied request connects to the proxy but asks for the original web URL.
+    func testProxiedRequestTargetsProxyButRequestsOriginalURL() throws {
+        let proxy = GeminiProxyConfiguration(host: "localhost", port: 1_994)
+        let target = try GeminiRequestTarget(
+            proxying: URL(string: "https://example.com/a/b?q=1")!,
+            through: proxy
+        )
+
+        // Connection goes to the proxy, so TOFU pins the proxy's identity.
+        XCTAssertEqual(target.endpoint, CapsuleEndpoint(host: "localhost", port: 1_994))
+        // The request line is the original URL, not a gemini:// one.
+        XCTAssertEqual(
+            String(decoding: target.requestData, as: UTF8.self),
+            "https://example.com/a/b?q=1\r\n"
+        )
+        // History and the address field show what the user asked for.
+        XCTAssertEqual(target.url.absoluteString, "https://example.com/a/b?q=1")
+    }
+
+    func testProxiedRequestRejectsUnusableInput() {
+        let proxy = GeminiProxyConfiguration(host: "localhost", port: 1_994)
+        XCTAssertThrowsError(
+            try GeminiRequestTarget(proxying: URL(string: "relative/path")!, through: proxy)
+        )
+        XCTAssertThrowsError(
+            try GeminiRequestTarget(
+                proxying: URL(string: "https://example.com/")!,
+                through: GeminiProxyConfiguration(host: "  ", port: 1_994)
+            )
+        )
+        // The 1024-byte request limit still applies to the proxied request line.
+        let long = "https://example.com/" + String(repeating: "a", count: 1_100)
+        XCTAssertThrowsError(
+            try GeminiRequestTarget(proxying: URL(string: long)!, through: proxy)
+        )
+    }
+
     func testBrowserPreferencesRoundTrip() throws {
         let original = BrowserPreferences(
             homepage: "gemini://example.com/",

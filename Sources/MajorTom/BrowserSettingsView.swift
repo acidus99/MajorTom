@@ -57,7 +57,7 @@ struct BrowserSettingsView: View {
 
     private var networking: some View {
         Form {
-            Toggle("Use HTTP CONNECT proxy", isOn: proxyEnabled)
+            Toggle("Open web links through a Gemini proxy", isOn: proxyEnabled)
             if let proxy = store.preferences.proxy {
                 TextField("Proxy host", text: Binding(
                     get: { proxy.host },
@@ -68,9 +68,19 @@ struct BrowserSettingsView: View {
                     set: { updateProxy(port: UInt16(clamping: $0)) }
                 ), format: .number)
             }
-            Text("Connections require TLS 1.2 or newer and time out after 30 seconds without activity.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            Text("""
+            With a proxy set, http:// and https:// links open inside Major Tom: it connects \
+            to the proxy over Gemini and sends the web address as the request, and the proxy \
+            returns the page converted to Gemtext. Without one, web links open in your \
+            default browser.
+
+            Trust is pinned to the proxy's certificate, not the website's — the proxy sees \
+            and rewrites everything it fetches for you.
+
+            Connections require TLS 1.2 or newer and time out after 30 seconds without activity.
+            """)
+            .font(.callout)
+            .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
     }
@@ -111,7 +121,9 @@ struct BrowserSettingsView: View {
             get: { store.preferences.proxy != nil },
             set: { enabled in
                 var updated = store.preferences
-                updated.proxy = enabled ? GeminiProxyConfiguration(host: "localhost", port: 8080) : nil
+                // 1994 is Stargate's default listening port; 8080 was a leftover from
+                // when this setting meant an HTTP CONNECT proxy.
+                updated.proxy = enabled ? GeminiProxyConfiguration(host: "localhost", port: 1_994) : nil
                 store.preferences = updated
             }
         )

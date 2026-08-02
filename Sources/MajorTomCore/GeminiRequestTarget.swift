@@ -43,6 +43,40 @@ public struct GeminiRequestTarget: Equatable, Sendable {
         self.endpoint = CapsuleEndpoint(host: host, port: port)
         self.requestData = request
     }
+
+    /// A request routed **through** a Gemini proxy such as Stargate.
+    ///
+    /// The connection is an ordinary Gemini connection to the proxy's host and port;
+    /// what differs is the request line, which carries the original absolute URL —
+    /// typically `http://` or `https://` — instead of a `gemini://` one. The proxy
+    /// fetches that resource, converts it, and replies with a normal Gemini response.
+    /// A proxy that will not serve the scheme replies `53`.
+    ///
+    /// Two consequences worth being explicit about:
+    ///
+    /// - `endpoint` is the **proxy**, so TOFU pins the proxy's certificate. That is
+    ///   correct: the proxy is the server actually being talked to, and it is the party
+    ///   that must be trusted, since it sees and rewrites everything.
+    /// - `url` remains the original resource, so history, the address field and the
+    ///   page title show what the user asked for rather than the proxy's address.
+    public init(proxying url: URL, through proxy: GeminiProxyConfiguration) throws {
+        guard let scheme = url.scheme, !scheme.isEmpty, url.host != nil else {
+            throw GeminiRequestError.invalidURL
+        }
+        guard !proxy.host.trimmingCharacters(in: .whitespaces).isEmpty, proxy.port > 0 else {
+            throw GeminiRequestError.invalidPort
+        }
+
+        let serialized = url.absoluteString
+        let request = Data((serialized + "\r\n").utf8)
+        guard request.count <= Self.maximumRequestByteCount else {
+            throw GeminiRequestError.urlTooLong
+        }
+
+        self.url = url
+        self.endpoint = CapsuleEndpoint(host: proxy.host, port: proxy.port)
+        self.requestData = request
+    }
 }
 
 public enum GeminiRequestError: Error, Equatable, Sendable {

@@ -21,16 +21,13 @@ public enum GeminiTransportError: Error, Sendable {
 }
 
 public struct GeminiTransportConfiguration: Equatable, Sendable {
-    public var proxy: GeminiProxyConfiguration?
     public var idleTimeout: Duration
     public var maximumResponseByteCount: Int
 
     public init(
-        proxy: GeminiProxyConfiguration? = nil,
         idleTimeout: Duration = .seconds(30),
         maximumResponseByteCount: Int = 64 * 1_024 * 1_024
     ) {
-        self.proxy = proxy
         self.idleTimeout = idleTimeout
         self.maximumResponseByteCount = maximumResponseByteCount
     }
@@ -138,18 +135,12 @@ private final class GeminiConnectionSession: @unchecked Sendable {
             queue
         )
 
+        // No transport-level proxy configuration. Major Tom's proxy support is a Gemini
+        // proxy (see GeminiRequestTarget.init(proxying:through:)): the connection is an
+        // ordinary Gemini connection to the proxy, and the request line carries the
+        // http:// URL. An HTTP CONNECT tunnel, which is what used to be configured here,
+        // is a different mechanism that no Gemini proxy speaks.
         let parameters = NWParameters(tls: tlsOptions, tcp: NWProtocolTCP.Options())
-        if let proxy = configuration.proxy,
-           let port = NWEndpoint.Port(rawValue: proxy.port) {
-            let privacy = NWParameters.PrivacyContext(description: "Major Tom Gemini proxy")
-            privacy.proxyConfigurations = [
-                ProxyConfiguration(httpCONNECTProxy: .hostPort(
-                    host: NWEndpoint.Host(proxy.host),
-                    port: port
-                ))
-            ]
-            parameters.setPrivacyContext(privacy)
-        }
         let connection = NWConnection(
             host: NWEndpoint.Host(target.endpoint.host),
             port: NWEndpoint.Port(rawValue: target.endpoint.port)!,
