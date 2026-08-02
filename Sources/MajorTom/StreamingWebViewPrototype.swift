@@ -242,19 +242,38 @@ final class BrowserModel: ObservableObject {
     }
 
     func stop() {
+        let wasLoading = isLoading
+        // A document continuation only exists while a response is actively streaming
+        // into the view, which is what distinguishes "stopped partway" from "stopped
+        // before anything committed".
+        let wasStreamingIntoDocument = documentContinuation != nil
+
+        // Cancellation is unconditional: stop() is also how closing a tab releases its
+        // work, and spec 9.2 requires that to cancel the network work it owns.
         navigationTask?.cancel()
         navigationTask = nil
+        imageTasks.forEach { $0.cancel() }
+        imageTasks.removeAll()
+        slowDownTask?.cancel()
+        slowDownTask = nil
         trustContinuation?.resume(returning: false)
         trustContinuation = nil
         trustPrompt = nil
+
+        // Stopping an idle page must not touch it. This previously rewrote the cache
+        // entry of a fully loaded page as .stopped and dropped its title.
+        guard wasLoading else { return }
+
         finishCurrentDocument(message: "Loading was stopped.")
-        if let committedURL, !currentSourceBytes.isEmpty {
+        if wasStreamingIntoDocument, let committedURL, !currentSourceBytes.isEmpty {
             cachedPages[committedURL] = CachedPage(
                 url: committedURL,
                 mimeType: currentMIMEType,
                 body: currentSourceBytes,
                 completion: .stopped,
-                receivedAt: Date()
+                receivedAt: Date(),
+                title: title,
+                documentTitle: documentTitle
             )
         }
         isLoading = false
@@ -487,6 +506,11 @@ final class BrowserModel: ObservableObject {
 
     func savePage() async {
         guard canSavePage, let committedURL else { return }
+        // NSSavePanel.begin is modeless, so the user can keep browsing the window
+        // behind it. Capture the bytes for the page that was on screen when Save was
+        // invoked; re-reading the property after the await wrote the *new* page's
+        // bytes into a file named after the old one.
+        let bytes = currentSourceBytes
         let panel = NSSavePanel()
         panel.nameFieldStringValue = BrowserFilenameSuggestion.make(
             for: committedURL,
@@ -496,7 +520,7 @@ final class BrowserModel: ObservableObject {
         panel.canCreateDirectories = true
         guard await panel.begin() == .OK, let destination = panel.url else { return }
         do {
-            try currentSourceBytes.write(to: destination, options: .atomic)
+            try bytes.write(to: destination, options: .atomic)
             statusText = "Saved \(destination.lastPathComponent)"
         } catch {
             validationMessage = "The page could not be saved: \(error.localizedDescription)"
@@ -1037,7 +1061,10 @@ final class BrowserModel: ObservableObject {
 
     private var themeCSS: String {
         let dark = NSApplication.shared.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return settings.preferences.contentTheme.css(effectiveDarkAppearance: dark)
+        let theme = settings.preferences.contentTheme.css(effectiveDarkAppearance: dark)
+        // Page zoom is carried in the document's own stylesheet so that it survives a
+        // navigation and does not depend on JavaScript being available in the page.
+        return theme + "\n:root { zoom: \(pageZoom); }"
     }
 
     private func preferencesChanged(to preferences: BrowserPreferences) {
@@ -1070,14 +1097,12 @@ final class BrowserModel: ObservableObject {
         }
     }
 
+    /// Zoom now lives in `themeCSS`, so re-applying the stylesheet is all that is
+    /// needed. Previously this set an inline style on the document element, which a
+    /// subsequent navigation discarded along with the document, silently resetting
+    /// every page to 100% while `pageZoom` still read 1.3.
     private func applyZoom() {
-        let zoom = pageZoom
-        Task {
-            _ = try? await page.callJavaScript(
-                "document.documentElement.style.zoom = String(zoom)",
-                arguments: ["zoom": zoom]
-            )
-        }
+        applyThemeWithoutReload()
     }
 
     private func renderCurrentContent() {
