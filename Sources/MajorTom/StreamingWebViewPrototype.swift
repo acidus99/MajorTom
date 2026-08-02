@@ -83,6 +83,10 @@ final class BrowserModel: ObservableObject {
 
     let page: WebPage
 
+    /// Set by the owning window session. A tab cannot create tabs or windows itself.
+    var openInNewTab: ((URL, _ inBackground: Bool) -> Void)?
+    var openInNewWindow: ((URL) -> Void)?
+
     private let documentStore: BrowserDocumentStore
     private let resourceStore: BrowserResourceStore
     private let router: BrowserNavigationRouter
@@ -113,7 +117,7 @@ final class BrowserModel: ObservableObject {
     private var contextSharingPicker: NSSharingServicePicker?
     private var lastPreferences: BrowserPreferences
 
-    init(restoredState: RestoredTabState? = nil) {
+    init(restoredState: RestoredTabState? = nil, initialURL: URL? = nil) {
         let documentStore = BrowserDocumentStore()
         let resourceStore = BrowserResourceStore()
         let router = BrowserNavigationRouter()
@@ -165,7 +169,7 @@ final class BrowserModel: ObservableObject {
             self.documentTitle = restoredState.documentTitle
                 ?? currentCachedPage?.documentTitle
         } else {
-            self.locationText = settings.preferences.homepage
+            self.locationText = initialURL?.absoluteString ?? settings.preferences.homepage
         }
         contextMenuScriptHandler.browser = self
 
@@ -174,6 +178,12 @@ final class BrowserModel: ObservableObject {
         }
         router.downloadURL = { [weak self] url in
             self?.download(url)
+        }
+        router.openInNewTab = { [weak self] url, background in
+            self?.openInNewTab?(url, background)
+        }
+        router.openInNewWindow = { [weak self] url in
+            self?.openInNewWindow?(url)
         }
         settings.$preferences
             .dropFirst()
@@ -338,16 +348,6 @@ final class BrowserModel: ObservableObject {
         applyZoom()
     }
 
-    func find(_ query: String, backwards: Bool = false) {
-        guard !query.isEmpty else { return }
-        Task {
-            _ = try? await page.callJavaScript(
-                "window.find(query, false, backwards, true, false, true, false)",
-                arguments: ["query": query, "backwards": backwards]
-            )
-        }
-    }
-
     func refreshContentTheme() {
         guard committedURL != nil, canSavePage else { return }
         applyThemeWithoutReload()
@@ -399,6 +399,12 @@ final class BrowserModel: ObservableObject {
 
     func showPageContextMenu(at location: NSPoint, in view: NSView?) {
         let menu = NSMenu()
+        // NSMenu.autoenablesItems defaults to true, under which NSMenuItem.isEnabled is
+        // ignored and AppKit asks the target's validateMenuItem: instead. Because
+        // ContextMenuTarget responds to the action selector but implements no
+        // validation, every item validated as enabled: Back and Forward appeared
+        // available on a fresh tab and did nothing when clicked (spec 18.3).
+        menu.autoenablesItems = false
         contextMenuTargets.removeAll()
         addContextMenuItem("Back", systemImage: "chevron.left", enabled: canGoBack, to: menu) { [weak self] in self?.goBack() }
         addContextMenuItem("Forward", systemImage: "chevron.right", enabled: canGoForward, to: menu) { [weak self] in self?.goForward() }
@@ -430,8 +436,16 @@ final class BrowserModel: ObservableObject {
 
     private func showLinkContextMenu(for url: URL, at location: NSPoint, in view: NSView?) {
         let menu = NSMenu()
+        menu.autoenablesItems = false
         contextMenuTargets.removeAll()
         addContextMenuItem("Open Link", systemImage: "arrow.up.right.square", enabled: true, to: menu) { [weak self] in self?.openLink(url) }
+        let isGemini = url.scheme?.lowercased() == "gemini"
+        addContextMenuItem("Open Link in New Tab", systemImage: "plus.rectangle.on.rectangle", enabled: isGemini, to: menu) { [weak self] in
+            self?.openInNewTab?(url, true)
+        }
+        addContextMenuItem("Open Link in New Window", systemImage: "macwindow.badge.plus", enabled: isGemini, to: menu) { [weak self] in
+            self?.openInNewWindow?(url)
+        }
         addContextMenuItem("Download Linked File As…", systemImage: "arrow.down.circle", enabled: true, to: menu) { [weak self] in self?.download(url) }
         menu.addItem(.separator())
         addContextMenuItem("Copy Link", systemImage: "doc.on.doc", enabled: true, to: menu) {
@@ -1386,11 +1400,16 @@ private actor AsyncSemaphore {
 @available(macOS 26.0, *)
 struct StreamingWebViewPrototype: View {
     @ObservedObject var browser: BrowserModel
+    /// Drives the system find bar. WebKit owns the matching, highlighting, match
+    /// count, wrap behaviour and Command-G, so Major Tom does not reimplement any
+    /// of it.
+    @Binding var findNavigatorIsPresented: Bool
 
     var body: some View {
         WebView(browser.page)
             .webViewTextSelection(.enabled)
             .webViewMagnificationGestures(.enabled)
+            .findNavigator(isPresented: $findNavigatorIsPresented)
     }
 }
 
@@ -1399,6 +1418,8 @@ struct StreamingWebViewPrototype: View {
 private final class BrowserNavigationRouter {
     var openURL: ((URL) -> Void)?
     var downloadURL: ((URL) -> Void)?
+    var openInNewTab: ((URL, _ inBackground: Bool) -> Void)?
+    var openInNewWindow: ((URL) -> Void)?
 }
 
 @available(macOS 26.0, *)
@@ -1417,6 +1438,22 @@ private struct BrowserNavigationDecider: WebPage.NavigationDeciding {
             router.downloadURL?(url)
             return .cancel
         }
+
+        // Safari's conventions: Command-click opens a background tab,
+        // Command-Shift-click opens it in front, plain Shift-click opens a window,
+        // and middle-click behaves like Command-click. Check .command before .shift.
+        let modifiers = action.modifierFlags
+        if url.scheme?.lowercased() == "gemini" {
+            if modifiers.contains(.command) || action.buttonNumber == 2 {
+                router.openInNewTab?(url, !modifiers.contains(.shift))
+                return .cancel
+            }
+            if modifiers.contains(.shift) {
+                router.openInNewWindow?(url)
+                return .cancel
+            }
+        }
+
         router.openURL?(url)
         return .cancel
     }

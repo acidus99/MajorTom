@@ -3,13 +3,25 @@ import Combine
 import MajorTomCore
 import SwiftUI
 
+private struct BrowserWindowDestination: Codable, Hashable {
+    let id: UUID
+    let url: URL?
+
+    init(url: URL? = nil) {
+        id = UUID()
+        self.url = url
+    }
+}
+
 @main
 struct MajorTomApp: App {
     @NSApplicationDelegateAdaptor(MajorTomApplicationDelegate.self) private var appDelegate
 
     var body: some Scene {
-        WindowGroup {
-            NativeFoundationView()
+        WindowGroup(for: BrowserWindowDestination.self) { destination in
+            NativeFoundationView(initialURL: destination.wrappedValue.url)
+        } defaultValue: {
+            BrowserWindowDestination()
         }
         .defaultSize(width: 1_100, height: 760)
         .commands {
@@ -176,11 +188,12 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
 
 private struct NativeFoundationView: View {
     @ObservedObject private var settings = BrowserSettingsStore.shared
+    let initialURL: URL?
 
     var body: some View {
         Group {
             if #available(macOS 26.0, *) {
-                BrowserWindowView()
+                BrowserWindowView(initialURL: initialURL)
             } else {
                 ContentUnavailableView {
                     Label("Major Tom requires macOS 26", systemImage: "sparkles")
@@ -204,8 +217,13 @@ private struct NativeFoundationView: View {
 
 @available(macOS 26.0, *)
 private struct BrowserWindowView: View {
-    @StateObject private var session = BrowserWindowSession()
+    @StateObject private var session: BrowserWindowSession
     @Environment(\.controlActiveState) private var controlActiveState
+    @Environment(\.openWindow) private var openWindow
+
+    init(initialURL: URL? = nil) {
+        _session = StateObject(wrappedValue: BrowserWindowSession(initialURL: initialURL))
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -216,6 +234,11 @@ private struct BrowserWindowView: View {
             BrowserTabStrip(session: session)
         }
         .navigationTitle(session.selectedTab?.browser.title ?? "Major Tom")
+        .onAppear {
+            session.openWindow = { url in
+                openWindow(value: BrowserWindowDestination(url: url))
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomNewTab)) { _ in
             guard controlActiveState == .key else { return }
             session.newTab()
@@ -237,8 +260,8 @@ private final class BrowserWindowSession: ObservableObject {
         let id = UUID()
         let browser: BrowserModel
 
-        init(restoredState: RestoredTabState? = nil) {
-            browser = BrowserModel(restoredState: restoredState)
+        init(restoredState: RestoredTabState? = nil, initialURL: URL? = nil) {
+            browser = BrowserModel(restoredState: restoredState, initialURL: initialURL)
         }
     }
 
@@ -247,9 +270,13 @@ private final class BrowserWindowSession: ObservableObject {
         didSet { scheduleSave() }
     }
     private var observers: [UUID: AnyCancellable] = [:]
+    var openWindow: ((URL) -> Void)?
 
-    init() {
-        if !BrowserSessionRestorationState.hasRestoredInitialWindow,
+    init(initialURL: URL? = nil) {
+        if let initialURL {
+            tabs = [Tab(initialURL: initialURL)]
+            selectedID = tabs.first?.id
+        } else if !BrowserSessionRestorationState.hasRestoredInitialWindow,
            let restored = SessionRestorationStore.shared.load(), !restored.tabs.isEmpty {
             BrowserSessionRestorationState.hasRestoredInitialWindow = true
             tabs = restored.tabs.map { Tab(restoredState: $0) }
@@ -268,11 +295,15 @@ private final class BrowserWindowSession: ObservableObject {
         tabs.first { $0.id == selectedID } ?? tabs.first
     }
 
-    func newTab() {
-        let tab = Tab()
+    func newTab(url: URL? = nil, select: Bool = true) {
+        let tab = Tab(initialURL: url)
         tabs.append(tab)
         observe(tab)
-        selectedID = tab.id
+        if select { selectedID = tab.id }
+        // Only the selected tab has a view, and start() is normally driven by that
+        // view's .task. A background tab therefore has to be started here, or a
+        // Command-clicked link would sit blank until the tab was selected.
+        tab.browser.start()
         scheduleSave()
     }
 
@@ -290,6 +321,12 @@ private final class BrowserWindowSession: ObservableObject {
     }
 
     private func observe(_ tab: Tab) {
+        tab.browser.openInNewTab = { [weak self] url, background in
+            self?.newTab(url: url, select: !background)
+        }
+        tab.browser.openInNewWindow = { [weak self] url in
+            self?.openWindow?(url)
+        }
         observers[tab.id] = tab.browser.objectWillChange.sink { [weak self] _ in
             DispatchQueue.main.async { self?.scheduleSave() }
         }
@@ -393,9 +430,7 @@ private struct BrowserTabView: View {
     let chromeTopInset: CGFloat
     @Environment(\.controlActiveState) private var controlActiveState
     @FocusState private var locationIsFocused: Bool
-    @FocusState private var findIsFocused: Bool
     @State private var showsFind = false
-    @State private var findQuery = ""
     @State private var contextMenuMonitor: Any?
 
     /// Menu commands are broadcast application-wide, so every window's selected tab
@@ -405,7 +440,7 @@ private struct BrowserTabView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            StreamingWebViewPrototype(browser: browser)
+            StreamingWebViewPrototype(browser: browser, findNavigatorIsPresented: $showsFind)
                 .overlay(alignment: .bottomLeading) {
                     HStack(spacing: 7) {
                         if browser.isLoading {
@@ -507,22 +542,6 @@ private struct BrowserTabView: View {
                     .accessibilityElement(children: .combine)
                 }
 
-                if showsFind {
-                    HStack {
-                        TextField("Find on Page", text: $findQuery)
-                            .textFieldStyle(.roundedBorder)
-                            .focused($findIsFocused)
-                            .onSubmit { browser.find(findQuery) }
-                        Button("Previous", systemImage: "chevron.up") { browser.find(findQuery, backwards: true) }
-                            .labelStyle(.iconOnly)
-                        Button("Next", systemImage: "chevron.down") { browser.find(findQuery) }
-                            .labelStyle(.iconOnly)
-                        Button("Done") { showsFind = false }
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.bottom, 8)
-                }
-
                 Divider()
             }
             .background(.ultraThinMaterial)
@@ -537,10 +556,7 @@ private struct BrowserTabView: View {
         .onCommand(.majorTomShowSource, when: isKeyWindow) { browser.showPageSource() }
         .onCommand(.majorTomSavePage, when: isKeyWindow) { Task { await browser.savePage() } }
         .onCommand(.majorTomPrint, when: isKeyWindow) { browser.printPage() }
-        .onCommand(.majorTomFind, when: isKeyWindow) {
-            showsFind = true
-            findIsFocused = true
-        }
+        .onCommand(.majorTomFind, when: isKeyWindow) { showsFind = true }
         .onCommand(.majorTomZoomIn, when: isKeyWindow) { browser.zoomIn() }
         .onCommand(.majorTomZoomOut, when: isKeyWindow) { browser.zoomOut() }
         .onCommand(.majorTomActualSize, when: isKeyWindow) { browser.actualSize() }
