@@ -149,7 +149,14 @@ final class BrowserModel: ObservableObject {
             self.committedURL = self.history.indices.contains(self.historyIndex)
                 ? self.history[self.historyIndex]
                 : nil
+            let currentCachedPage = self.committedURL.flatMap { self.cachedPages[$0] }
             self.locationText = self.committedURL?.absoluteString ?? settings.preferences.homepage
+            self.title = restoredState.title
+                ?? currentCachedPage?.title
+                ?? self.committedURL.map(displayTitle)
+                ?? "New Tab"
+            self.documentTitle = restoredState.documentTitle
+                ?? currentCachedPage?.documentTitle
         } else {
             self.locationText = settings.preferences.homepage
         }
@@ -188,7 +195,9 @@ final class BrowserModel: ObservableObject {
             history: history,
             historyIndex: historyIndex,
             cachedPages: Array(cachedPages.values),
-            zoom: pageZoom
+            zoom: pageZoom,
+            title: title,
+            documentTitle: documentTitle
         )
     }
 

@@ -23,6 +23,8 @@ struct RestoredTabState: Codable {
     var historyIndex: Int
     var cachedPages: [CachedPage]
     var zoom: Double
+    var title: String? = nil
+    var documentTitle: String? = nil
 }
 
 struct RestoredWindowState: Codable {
