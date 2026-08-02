@@ -43,6 +43,67 @@ private final class ContextMenuScriptHandler: NSObject, WKScriptMessageHandler {
     }
 }
 
+/// Reports the destination of the link under the pointer, or focused by keyboard.
+///
+/// Runs in the `.defaultClient` content world, which is isolated from page script and
+/// exempt from the document's `default-src 'none'` CSP. The script de-duplicates before
+/// posting, because `mouseover` fires continuously as the pointer moves within one
+/// anchor and each message would otherwise cross the process boundary and republish
+/// SwiftUI state.
+@available(macOS 26.0, *)
+@MainActor
+private final class LinkHoverScriptHandler: NSObject, WKScriptMessageHandler {
+    static let name = "majorTomLinkHover"
+
+    static let userScript = WKUserScript(
+        source: """
+        (() => {
+            var last = null;
+            const post = (href) => {
+                const value = href || '';
+                if (value === last) { return; }
+                last = value;
+                window.webkit.messageHandlers.\(name).postMessage(value);
+            };
+            const anchorFor = (node) => {
+                const element = node instanceof Element ? node : node?.parentElement;
+                return element ? element.closest('a[href]') : null;
+            };
+            // `.href` is already absolute, resolved against the document's <base>.
+            document.addEventListener('mouseover', (event) => {
+                const anchor = anchorFor(event.target);
+                post(anchor ? anchor.href : '');
+            }, true);
+            document.addEventListener('mouseout', (event) => {
+                if (!anchorFor(event.relatedTarget)) { post(''); }
+            }, true);
+            // Spec 18.4 covers focus as well as hover.
+            document.addEventListener('focusin', (event) => {
+                const anchor = anchorFor(event.target);
+                post(anchor ? anchor.href : '');
+            }, true);
+            document.addEventListener('focusout', () => post(''), true);
+            window.addEventListener('blur', () => post(''));
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: true,
+        in: .defaultClient
+    )
+
+    weak var browser: BrowserModel?
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        let href = message.body as? String
+        Task { @MainActor [weak browser] in
+            browser?.updateHoveredLink(href)
+        }
+    }
+}
+
 @available(macOS 26.0, *)
 @MainActor
 final class BrowserModel: ObservableObject {
@@ -69,6 +130,8 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var committedURL: URL?
     @Published private(set) var isLoading = false
     @Published private(set) var statusText = "Ready"
+    /// Destination of the link under the pointer, or focused by keyboard (spec 18.4).
+    @Published private(set) var hoveredLinkURL: String?
     @Published private(set) var title = "New Tab"
     @Published private(set) var documentTitle: String?
     @Published private(set) var canSavePage = false
@@ -109,10 +172,12 @@ final class BrowserModel: ObservableObject {
     private var imageTasks: [Task<Void, Never>] = []
     private let imageLimiter = AsyncSemaphore(limit: 4)
     private var slowDownTask: Task<Void, Never>?
+    private var downloadTask: Task<Void, Never>?
     private var contextMenuTargets: [ContextMenuTarget] = []
     private weak var pendingContextMenuView: NSView?
     private var pendingContextMenuLocation: NSPoint?
     private let contextMenuScriptHandler: ContextMenuScriptHandler
+    private let linkHoverScriptHandler: LinkHoverScriptHandler
     private var contextSharingPicker: NSSharingServicePicker?
     private var lastPreferences: BrowserPreferences
 
@@ -121,12 +186,19 @@ final class BrowserModel: ObservableObject {
         let resourceStore = BrowserResourceStore()
         let router = BrowserNavigationRouter()
         let contextMenuScriptHandler = ContextMenuScriptHandler()
+        let linkHoverScriptHandler = LinkHoverScriptHandler()
         let userContentController = WKUserContentController()
         userContentController.addUserScript(ContextMenuScriptHandler.userScript)
         userContentController.add(
             contextMenuScriptHandler,
             contentWorld: .defaultClient,
             name: ContextMenuScriptHandler.name
+        )
+        userContentController.addUserScript(LinkHoverScriptHandler.userScript)
+        userContentController.add(
+            linkHoverScriptHandler,
+            contentWorld: .defaultClient,
+            name: LinkHoverScriptHandler.name
         )
         var configuration = WebPage.Configuration()
         configuration.websiteDataStore = .nonPersistent()
@@ -145,6 +217,7 @@ final class BrowserModel: ObservableObject {
         self.resourceStore = resourceStore
         self.router = router
         self.contextMenuScriptHandler = contextMenuScriptHandler
+        self.linkHoverScriptHandler = linkHoverScriptHandler
         self.page = WebPage(
             configuration: configuration,
             navigationDecider: BrowserNavigationDecider(router: router)
@@ -176,6 +249,7 @@ final class BrowserModel: ObservableObject {
             self.locationText = initialURL?.absoluteString ?? settings.preferences.homepage
         }
         contextMenuScriptHandler.browser = self
+        linkHoverScriptHandler.browser = self
 
         router.openURL = { [weak self] url in
             self?.openLink(url)
@@ -680,31 +754,61 @@ final class BrowserModel: ObservableObject {
 
     func download(_ url: URL) {
         statusText = "Downloading \(url.lastPathComponent)…"
-        Task {
+        downloadTask?.cancel()
+        downloadTask = Task { [weak self] in
+            guard let self else { return }
             do {
-                let result: (Data, String)
-                if url.scheme?.lowercased() == "gemini" {
-                    result = try await retrieveGeminiResource(url)
-                } else if ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+                let fetched: (data: Data, mimeType: String, finalURL: URL)
+                switch url.scheme?.lowercased() {
+                case "gemini":
+                    fetched = try await retrieveGeminiResource(url)
+                case "http", "https":
                     let (data, response) = try await URLSession.shared.data(from: url)
-                    result = (data, response.mimeType ?? "application/octet-stream")
-                } else {
+                    fetched = (
+                        data,
+                        (response.mimeType ?? "application/octet-stream").lowercased(),
+                        response.url ?? url
+                    )
+                case "file":
+                    fetched = (
+                        try Data(contentsOf: url),
+                        Self.mimeType(forPathExtension: url.pathExtension),
+                        url
+                    )
+                default:
                     throw URLError(.unsupportedURL)
                 }
+                try Task.checkCancellation()
+
                 let panel = NSSavePanel()
-                panel.nameFieldStringValue = BrowserFilenameSuggestion.make(for: url, mimeType: result.1)
+                // Name from the FINAL url, so a redirected download is not named after
+                // the URL that redirected.
+                panel.nameFieldStringValue = BrowserFilenameSuggestion.make(
+                    for: fetched.finalURL,
+                    mimeType: fetched.mimeType
+                )
                 panel.canCreateDirectories = true
                 guard await panel.begin() == .OK, let destination = panel.url else {
                     statusText = "Download cancelled"
                     return
                 }
-                try result.0.write(to: destination, options: .atomic)
+                try fetched.data.write(to: destination, options: .atomic)
                 statusText = "Downloaded \(destination.lastPathComponent)"
+            } catch is CancellationError {
+                statusText = "Download cancelled"
             } catch {
                 validationMessage = "Download failed: \(friendly(error))"
                 statusText = "Download failed"
             }
         }
+    }
+
+    fileprivate func updateHoveredLink(_ href: String?) {
+        guard let href, !href.isEmpty else {
+            hoveredLinkURL = nil
+            return
+        }
+        hoveredLinkURL = href
     }
 
     func respondToTrust(allow: Bool) {
@@ -759,6 +863,8 @@ final class BrowserModel: ObservableObject {
         inputPrompt = nil
         inputValidationMessage = nil
         trustWasDeclined = false
+        // The document is going away, so its hover state is stale.
+        hoveredLinkURL = nil
         isLoading = true
         statusText = "Connecting to \(target.endpoint.host)…"
         locationText = target.url.absoluteString
@@ -1436,7 +1542,13 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    private func retrieveGeminiResource(_ url: URL) async throws -> (Data, String) {
+    private func retrieveGeminiResource(
+        _ url: URL,
+        redirects: Int = 0
+    ) async throws -> (data: Data, mimeType: String, finalURL: URL) {
+        guard redirects <= 5 else {
+            throw GeminiTransportError.connectionFailed("The capsule redirected too many times.")
+        }
         guard let target = try? GeminiRequestTarget(url.absoluteString) else {
             throw URLError(.badURL)
         }
@@ -1452,17 +1564,30 @@ final class BrowserModel: ObservableObject {
         for try await event in events {
             switch event {
             case .responseHeader(let header):
+                // A download that redirects previously died with "Gemini status 31".
+                if header.isRedirect {
+                    let meta = header.meta.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard let next = URL(string: meta, relativeTo: url)?.absoluteURL else {
+                        throw GeminiTransportError.connectionFailed(
+                            "The capsule returned a redirect Major Tom could not understand: \(header.meta)"
+                        )
+                    }
+                    return try await retrieveGeminiResource(next, redirects: redirects + 1)
+                }
                 guard header.isSuccess else {
                     throw GeminiTransportError.connectionFailed("Gemini status \(header.status): \(header.meta)")
                 }
-                mimeType = header.meta.split(separator: ";", maxSplits: 1).first.map(String.init) ?? mimeType
+                // Trim and lowercase, or the charset parameter and stray whitespace
+                // defeat BrowserFilenameSuggestion's extension mapping.
+                mimeType = header.meta.split(separator: ";", maxSplits: 1).first
+                    .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? mimeType
             case .body(let data):
                 body.append(data)
             default:
                 break
             }
         }
-        return (body, mimeType)
+        return (body, mimeType, url)
     }
 
     private func isProbableImage(_ url: URL) -> Bool {

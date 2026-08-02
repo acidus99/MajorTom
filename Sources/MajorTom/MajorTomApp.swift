@@ -461,7 +461,25 @@ private struct BrowserTabView: View {
                     browser.openFile(file)
                     return true
                 }
+                // Safari puts the hovered link's destination bottom-left and leaves the
+                // right for page status (spec 18.4, 21).
                 .overlay(alignment: .bottomLeading) {
+                    if let hovered = browser.hoveredLinkURL {
+                        Text(hovered)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
+                            .padding(8)
+                            .frame(maxWidth: 620, alignment: .leading)
+                            .transition(.opacity)
+                            .accessibilityLabel("Link destination: \(hovered)")
+                    }
+                }
+                .overlay(alignment: .bottomTrailing) {
                     HStack(spacing: 7) {
                         if browser.isLoading {
                             ProgressView()
