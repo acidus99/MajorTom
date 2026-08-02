@@ -91,6 +91,18 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertTrue(document.contains("body { color: red; }"))
     }
 
+    func testPrintThemeOverridesDarkScreenTheme() {
+        let css = ContentTheme.draculaDark.css(effectiveDarkAppearance: true)
+        guard let darkBody = css.range(of: "body { color: var(--foreground); background: var(--background); }"),
+              let printBody = css.range(of: "body { padding-top: 0 !important; color: #000 !important; background: #fff !important; }") else {
+            return XCTFail("Expected both screen and print body styles")
+        }
+
+        XCTAssertLessThan(darkBody.lowerBound, printBody.lowerBound)
+        XCTAssertTrue(css.contains("@page { margin: 0.65in; }"))
+        XCTAssertTrue(css.contains(":root { color-scheme: light; zoom: 1 !important; font-size: 11pt; }"))
+    }
+
     func testInlineEnhancementsAreConservativeAndEscaped() {
         let rendered = HTMLDocumentStreamRenderer.renderInline(
             "Use **strong**, *emphasis*, and `code <here>`; leave *unmatched visible"

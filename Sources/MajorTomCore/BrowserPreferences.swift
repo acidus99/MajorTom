@@ -31,22 +31,28 @@ public enum ContentTheme: String, CaseIterable, Codable, Sendable {
 
     public func css(effectiveDarkAppearance: Bool) -> String {
         let dark = self == .draculaDark || (self == .automatic && effectiveDarkAppearance)
+        let appearanceCSS: String
         if dark {
-            return HTMLDocumentStreamRenderer.defaultThemeCSS + """
-
+            appearanceCSS = """
             :root { color-scheme: dark; --background: #282a36; --foreground: #f8f8f2; --muted: #6272a4; --accent: #bd93f9; }
             body { color: var(--foreground); background: var(--background); }
             a { color: #8be9fd; } blockquote { border-color: var(--accent); color: #f1fa8c; }
             pre, code { background: #343746; } .details { background: #343746 !important; }
             """
+        } else {
+            appearanceCSS = """
+            :root { color-scheme: light; --background: #f8f8f2; --foreground: #282a36; --muted: #6272a4; --accent: #7c4dbe; }
+            body { color: var(--foreground); background: var(--background); }
+            a { color: #006a83; } blockquote { border-color: var(--accent); color: #5a3d00; }
+            pre, code { background: #ececf0; } .details { background: #ececf0 !important; }
+            """
         }
-        return HTMLDocumentStreamRenderer.defaultThemeCSS + """
 
-        :root { color-scheme: light; --background: #f8f8f2; --foreground: #282a36; --muted: #6272a4; --accent: #7c4dbe; }
-        body { color: var(--foreground); background: var(--background); }
-        a { color: #006a83; } blockquote { border-color: var(--accent); color: #5a3d00; }
-        pre, code { background: #ececf0; } .details { background: #ececf0 !important; }
-        """
+        // Print rules must follow appearance rules in the cascade so dark screen
+        // colors cannot win when WebKit switches to print media.
+        return HTMLDocumentStreamRenderer.defaultThemeCSS
+            + "\n" + appearanceCSS
+            + "\n" + HTMLDocumentStreamRenderer.printThemeCSS
     }
 }
 

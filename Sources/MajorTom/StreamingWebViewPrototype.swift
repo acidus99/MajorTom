@@ -2,7 +2,6 @@ import AppKit
 import Combine
 import Foundation
 import MajorTomCore
-import PDFKit
 import SwiftUI
 import WebKit
 
@@ -355,46 +354,34 @@ final class BrowserModel: ObservableObject {
 
     /// Prints the current document.
     ///
-    /// This used to call `window.print()`. That is a guaranteed no-op: WebKit routes
-    /// `window.print()` through `APIUIClient::printFrame`, whose default implementation
-    /// does nothing, and the only override calls the private
-    /// `_webView:printFrame:pdfFirstPageSize:completionHandler:` selector. SwiftUI's
-    /// `WKUIDelegateAdapter` does not implement it at all, so nothing happened and the
-    /// `try?` hid it. `WebPage` has no printing API and its backing web view is `@_spi`
-    /// and stripped from the public SDK, so the supported route is to export PDF data
-    /// and print that through PDFKit.
+    /// `WebPage.exported(as: .pdf())` captures the entire scrollable document as one
+    /// PDF page. Printing that PDF then shrinks a long article to a single sheet. The
+    /// hosted `WKWebView` has a public macOS print operation that performs real page
+    /// layout and applies `@media print`, so use it directly.
     func printPage() {
-        guard committedURL != nil else { return }
-        Task {
-            do {
-                let pdf = try await page.exported(as: .pdf())
-                guard let document = PDFDocument(data: pdf),
-                      let info = NSPrintInfo.shared.copy() as? NSPrintInfo else {
-                    validationMessage = "Major Tom could not prepare this page for printing."
-                    return
-                }
-                info.horizontalPagination = .fit
-                info.verticalPagination = .automatic
-                guard let operation = document.printOperation(
-                    for: info,
-                    scalingMode: .pageScaleDownToFit,
-                    autoRotate: false
-                ) else {
-                    validationMessage = "Major Tom could not prepare this page for printing."
-                    return
-                }
-                operation.jobTitle = title
-                operation.showsPrintPanel = true
-                operation.showsProgressPanel = true
-                if let window = NSApplication.shared.keyWindow {
-                    operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
-                } else {
-                    operation.run()
-                }
-            } catch {
-                validationMessage = "The page could not be printed: \(error.localizedDescription)"
-            }
+        guard committedURL != nil,
+              let window = NSApplication.shared.keyWindow,
+              let rootView = window.contentView,
+              let webView = Self.findWebView(in: rootView),
+              let info = NSPrintInfo.shared.copy() as? NSPrintInfo else {
+            validationMessage = "Major Tom could not prepare this page for printing."
+            return
         }
+        info.horizontalPagination = .fit
+        info.verticalPagination = .automatic
+        let operation = webView.printOperation(with: info)
+        operation.jobTitle = title
+        operation.showsPrintPanel = true
+        operation.showsProgressPanel = true
+        operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
+    }
+
+    private static func findWebView(in view: NSView) -> WKWebView? {
+        if let webView = view as? WKWebView { return webView }
+        for subview in view.subviews {
+            if let webView = findWebView(in: subview) { return webView }
+        }
+        return nil
     }
 
     func showPageContextMenu(at location: NSPoint, in view: NSView?) {
@@ -1117,9 +1104,8 @@ final class BrowserModel: ObservableObject {
     private var themeCSS: String {
         let dark = NSApplication.shared.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let theme = settings.preferences.contentTheme.css(effectiveDarkAppearance: dark)
-        // Page zoom is carried in the document's own stylesheet so that it survives a
-        // navigation and does not depend on JavaScript being available in the page.
-        return theme + "\n:root { zoom: \(pageZoom); }"
+        // Screen-only zoom survives navigation without overriding print's 100% scale.
+        return theme + "\n@media screen { :root { zoom: \(pageZoom); } }"
     }
 
     private func preferencesChanged(to preferences: BrowserPreferences) {

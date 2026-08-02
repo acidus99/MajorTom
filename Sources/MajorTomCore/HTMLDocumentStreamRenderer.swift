@@ -20,7 +20,7 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     public init() {}
 
     public func documentStart(
-        themeCSS: String = Self.defaultThemeCSS,
+        themeCSS: String = Self.defaultThemeCSS + Self.printThemeCSS,
         baseURL: URL? = nil,
         browserGenerated: Bool = false
     ) -> Data {
@@ -173,12 +173,19 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     .browser-generated main { max-width: 44rem; }
     .browser-generated .eyebrow { color: SecondaryLabelColor; font-size: .82rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
     .browser-generated .details { padding: .85rem 1rem; border-radius: .65rem; background: color-mix(in srgb, CanvasText 7%, Canvas); font-family: ui-monospace, monospace; white-space: pre-wrap; }
+    """
+
+    public static let printThemeCSS = """
+    @page { margin: 0.65in; }
     @media print {
       /* body's top padding only exists to clear the floating browser chrome. */
-      :root { zoom: 1; }
-      body { padding-top: 0; color: #000; background: #fff; }
-      main { max-width: none; padding: 0; }
-      a { color: #000; text-decoration: underline; }
+      :root { color-scheme: light; zoom: 1 !important; font-size: 11pt; }
+      body { padding-top: 0 !important; color: #000 !important; background: #fff !important; }
+      main { max-width: none; margin: 0; padding: 0; }
+      a { color: #000 !important; text-decoration: underline; }
+      blockquote { color: #222 !important; border-color: #777 !important; }
+      pre, code, .details { color: #000 !important; background: #f2f2f2 !important; }
+      figcaption { color: #444 !important; }
       h1, h2, h3 { break-after: avoid-page; }
       pre, blockquote, figure { break-inside: avoid-page; }
       .source-line { break-inside: avoid-page; }
