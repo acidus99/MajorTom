@@ -35,6 +35,11 @@ struct MajorTomApp: App {
                     NotificationCenter.default.post(name: .majorTomSavePage, object: nil)
                 }
                 .keyboardShortcut("s", modifiers: .command)
+
+                Button("Print…") {
+                    NotificationCenter.default.post(name: .majorTomPrint, object: nil)
+                }
+                .keyboardShortcut("p", modifiers: .command)
             }
 
             CommandGroup(after: .toolbar) {
@@ -98,11 +103,49 @@ struct MajorTomApp: App {
 }
 
 private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate {
+    private var commandKeyMonitor: Any?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
+        installCommandKeyMonitor()
         DispatchQueue.main.async {
             NSApplication.shared.activate()
             NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    /// Safari also navigates with Command-Left/Right. There is no way to express a
+    /// second key equivalent for one SwiftUI command, so this is an application-wide
+    /// monitor that posts the same notification the History menu posts. It lives on
+    /// the delegate rather than on each tab view: a per-view monitor was installed
+    /// once per open window, so every window reacted to one key press.
+    private func installCommandKeyMonitor() {
+        commandKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let keyCode = event.keyCode
+            if modifiers == .command, event.charactersIgnoringModifiers == "=" {
+                // Accept Command-= in addition to the standard Command-+ menu shortcut.
+                NotificationCenter.default.post(name: .majorTomZoomIn, object: nil)
+                return nil
+            }
+            guard modifiers == .command, keyCode == 123 || keyCode == 124 else { return event }
+
+            // Command-Left/Right are "move to beginning/end of line" while editing.
+            // Swallowing them there broke standard Mac text editing in the address
+            // and find fields (spec 11.4). Local key monitors run on the main thread.
+            let isEditingText = MainActor.assumeIsolated { () -> Bool in
+                guard let responder = NSApplication.shared.keyWindow?.firstResponder else {
+                    return false
+                }
+                return responder is NSTextView || responder is NSTextField
+            }
+            guard !isEditingText else { return event }
+
+            NotificationCenter.default.post(
+                name: keyCode == 123 ? .majorTomBack : .majorTomForward,
+                object: nil
+            )
+            return nil
         }
     }
 
@@ -348,12 +391,17 @@ private struct BrowserTabButton: View {
 private struct BrowserTabView: View {
     @ObservedObject var browser: BrowserModel
     let chromeTopInset: CGFloat
+    @Environment(\.controlActiveState) private var controlActiveState
     @FocusState private var locationIsFocused: Bool
     @FocusState private var findIsFocused: Bool
     @State private var showsFind = false
     @State private var findQuery = ""
-    @State private var navigationKeyMonitor: Any?
     @State private var contextMenuMonitor: Any?
+
+    /// Menu commands are broadcast application-wide, so every window's selected tab
+    /// receives them. Only the key window's tab may act, or one Command-R reloads
+    /// every open window and one Command-S opens a save panel per window.
+    private var isKeyWindow: Bool { controlActiveState == .key }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -481,42 +529,29 @@ private struct BrowserTabView: View {
             .padding(.top, chromeTopInset)
         }
         .task { browser.start() }
-        .onAppear { installNavigationKeyMonitor() }
         .onAppear { installContextMenuMonitor() }
-        .onDisappear {
-            removeNavigationKeyMonitor()
-            removeContextMenuMonitor()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomFocusLocation)) { _ in
-            locationIsFocused = true
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomReload)) { _ in
-            browser.reload()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomStop)) { _ in
-            browser.stop()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomShowSource)) { _ in
-            browser.showPageSource()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomSavePage)) { _ in
-            Task { await browser.savePage() }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomFind)) { _ in
+        .onDisappear { removeContextMenuMonitor() }
+        .onCommand(.majorTomFocusLocation, when: isKeyWindow) { locationIsFocused = true }
+        .onCommand(.majorTomReload, when: isKeyWindow) { browser.reload() }
+        .onCommand(.majorTomStop, when: isKeyWindow) { browser.stop() }
+        .onCommand(.majorTomShowSource, when: isKeyWindow) { browser.showPageSource() }
+        .onCommand(.majorTomSavePage, when: isKeyWindow) { Task { await browser.savePage() } }
+        .onCommand(.majorTomPrint, when: isKeyWindow) { browser.printPage() }
+        .onCommand(.majorTomFind, when: isKeyWindow) {
             showsFind = true
             findIsFocused = true
         }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomZoomIn)) { _ in browser.zoomIn() }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomZoomOut)) { _ in browser.zoomOut() }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomActualSize)) { _ in browser.actualSize() }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomBack)) { _ in browser.goBack() }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomForward)) { _ in browser.goForward() }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomHome)) { _ in browser.goHome() }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomUp)) { _ in browser.goUpOneLevel() }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomRoot)) { _ in browser.goToCapsuleRoot() }
-        .onReceive(NotificationCenter.default.publisher(for: .majorTomContentThemeChanged)) { _ in
-            browser.refreshContentTheme()
-        }
+        .onCommand(.majorTomZoomIn, when: isKeyWindow) { browser.zoomIn() }
+        .onCommand(.majorTomZoomOut, when: isKeyWindow) { browser.zoomOut() }
+        .onCommand(.majorTomActualSize, when: isKeyWindow) { browser.actualSize() }
+        .onCommand(.majorTomBack, when: isKeyWindow) { browser.goBack() }
+        .onCommand(.majorTomForward, when: isKeyWindow) { browser.goForward() }
+        .onCommand(.majorTomHome, when: isKeyWindow) { browser.goHome() }
+        .onCommand(.majorTomUp, when: isKeyWindow) { browser.goUpOneLevel() }
+        .onCommand(.majorTomRoot, when: isKeyWindow) { browser.goToCapsuleRoot() }
+        // Deliberately not window-scoped: a content-theme change must repaint every
+        // open document, not just the one in front (spec 6.3).
+        .onCommand(.majorTomContentThemeChanged, when: true) { browser.refreshContentTheme() }
         .sheet(item: $browser.trustPrompt) { prompt in
             TrustPromptView(prompt: prompt) { approved in
                 browser.respondToTrust(allow: approved)
@@ -527,42 +562,6 @@ private struct BrowserTabView: View {
                 if let value { browser.submitInput(value) }
                 else { browser.cancelInput() }
             }
-        }
-    }
-
-    private func installNavigationKeyMonitor() {
-        removeNavigationKeyMonitor()
-        navigationKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-            guard modifiers.contains(.command),
-                  !modifiers.contains(.option),
-                  !modifiers.contains(.control) else { return event }
-            switch event.charactersIgnoringModifiers {
-            case "[":
-                browser.goBack()
-                return nil
-            case "]":
-                browser.goForward()
-                return nil
-            default:
-                switch event.keyCode {
-                case 123: // Left Arrow
-                    browser.goBack()
-                    return nil
-                case 124: // Right Arrow
-                    browser.goForward()
-                    return nil
-                default:
-                    return event
-                }
-            }
-        }
-    }
-
-    private func removeNavigationKeyMonitor() {
-        if let navigationKeyMonitor {
-            NSEvent.removeMonitor(navigationKeyMonitor)
-            self.navigationKeyMonitor = nil
         }
     }
 
@@ -684,6 +683,21 @@ private struct CapsuleInputView: View {
     }
 }
 
+private extension View {
+    /// Application-wide command notifications are received by every window's selected
+    /// tab. `condition` restricts the action to the window that should own it.
+    func onCommand(
+        _ name: Notification.Name,
+        when condition: Bool,
+        perform action: @escaping () -> Void
+    ) -> some View {
+        onReceive(NotificationCenter.default.publisher(for: name)) { _ in
+            guard condition else { return }
+            action()
+        }
+    }
+}
+
 private extension Notification.Name {
     static let majorTomNewTab = Notification.Name("MajorTomNewTab")
     static let majorTomCloseTab = Notification.Name("MajorTomCloseTab")
@@ -692,6 +706,7 @@ private extension Notification.Name {
     static let majorTomStop = Notification.Name("MajorTomStop")
     static let majorTomShowSource = Notification.Name("MajorTomShowSource")
     static let majorTomSavePage = Notification.Name("MajorTomSavePage")
+    static let majorTomPrint = Notification.Name("MajorTomPrint")
     static let majorTomFind = Notification.Name("MajorTomFind")
     static let majorTomZoomIn = Notification.Name("MajorTomZoomIn")
     static let majorTomZoomOut = Notification.Name("MajorTomZoomOut")
