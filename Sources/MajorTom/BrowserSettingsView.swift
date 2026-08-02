@@ -110,7 +110,7 @@ struct BrowserSettingsView: View {
 private struct TrustedIdentitiesSettingsView: View {
     @State private var identities: [TrustedServerIdentity] = []
     @State private var showsClearConfirmation = false
-    private let store = Self.makeStore()
+    private let store = SharedTrustedIdentityStore.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -165,14 +165,5 @@ private struct TrustedIdentitiesSettingsView: View {
     @MainActor
     private func reload() async {
         identities = await store?.allIdentities() ?? []
-    }
-
-    private static func makeStore() -> TrustedIdentityStore? {
-        guard let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-        return try? TrustedIdentityStore(fileURL: root
-            .appendingPathComponent("Major Tom", isDirectory: true)
-            .appendingPathComponent("trusted-identities.json"))
     }
 }

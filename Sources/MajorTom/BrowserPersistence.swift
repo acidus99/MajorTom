@@ -1,5 +1,27 @@
 import Combine
 import Foundation
+import MajorTomCore
+
+/// The one `TrustedIdentityStore` for the whole application.
+///
+/// `TrustedIdentityStore` snapshots the JSON file into memory once in `init` and
+/// every write persists that whole snapshot. Constructing one per tab, per window
+/// and again for the Settings pane therefore meant each instance overwrote the file
+/// with its own stale view: trusting a capsule in one tab erased every identity
+/// trusted in another tab since that tab was opened. Losing a record silently
+/// downgrades a later key substitution to a first-use auto-trust, so this has to be
+/// a single shared instance.
+enum SharedTrustedIdentityStore {
+    static let shared: TrustedIdentityStore? = {
+        guard let root = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else { return nil }
+        return try? TrustedIdentityStore(fileURL: root
+            .appendingPathComponent("Major Tom", isDirectory: true)
+            .appendingPathComponent("trusted-identities.json"))
+    }()
+}
 
 enum PageCompletionState: String, Codable {
     case complete

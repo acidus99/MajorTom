@@ -145,7 +145,7 @@ final class BrowserModel: ObservableObject {
             configuration: configuration,
             navigationDecider: BrowserNavigationDecider(router: router)
         )
-        self.trustStore = Self.makeTrustStore()
+        self.trustStore = SharedTrustedIdentityStore.shared
         self.lastPreferences = settings.preferences
         if let restoredState {
             self.history = restoredState.history
@@ -1108,17 +1108,6 @@ final class BrowserModel: ObservableObject {
         } else if currentMIMEType.hasPrefix("image/") {
             showImagePage(data: currentSourceBytes, mimeType: currentMIMEType, url: committedURL, disposition: .reload)
         }
-    }
-
-    private static func makeTrustStore() -> TrustedIdentityStore? {
-        guard let applicationSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else { return nil }
-        let file = applicationSupport
-            .appendingPathComponent("Major Tom", isDirectory: true)
-            .appendingPathComponent("trusted-identities.json")
-        return try? TrustedIdentityStore(fileURL: file)
     }
 
     private static func prompt(for challenge: ServerTrustChallenge) -> TrustPrompt {
