@@ -13,6 +13,12 @@ private final class ContextMenuScriptHandler: NSObject, WKScriptMessageHandler {
     static let userScript = WKUserScript(
         source: """
         document.addEventListener('contextmenu', (event) => {
+            const selection = window.getSelection();
+            if (selection && !selection.isCollapsed && selection.toString().trim() !== '') {
+                // Preserve WebKit's native selected-text menu: Copy, Look Up,
+                // Translate, Speech, and Services all depend on WebKit handling it.
+                return;
+            }
             event.preventDefault();
             const target = event.target instanceof Element ? event.target : event.target?.parentElement;
             const anchor = target?.closest('a[href]');
