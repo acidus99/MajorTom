@@ -153,7 +153,12 @@ final class BrowserModel: ObservableObject {
         self.lastPreferences = settings.preferences
         if let restoredState {
             self.history = restoredState.history
-            self.historyIndex = min(restoredState.historyIndex, restoredState.history.count - 1)
+            // Clamp at both ends. A negative or out-of-range index from an older or
+            // corrupted blob previously left committedURL nil, silently discarding the
+            // whole restored history.
+            self.historyIndex = restoredState.history.isEmpty
+                ? -1
+                : min(max(restoredState.historyIndex, 0), restoredState.history.count - 1)
             self.cachedPages = Dictionary(uniqueKeysWithValues: restoredState.cachedPages.map { ($0.url, $0) })
             self.pageZoom = restoredState.zoom
             self.committedURL = self.history.indices.contains(self.historyIndex)
@@ -199,11 +204,28 @@ final class BrowserModel: ObservableObject {
     func start() {
         guard !hasStarted else { return }
         hasStarted = true
+
         if let committedURL, let cached = cachedPages[committedURL] {
             displayCachedPage(cached)
-        } else {
-            submitLocation()
+            return
         }
+
+        // Restoring a tab is NOT a new navigation. Falling through to submitLocation()
+        // committed with .new, and commit(.new) truncates the forward branch — so a
+        // session saved mid-history lost every entry ahead of the cursor before the
+        // user touched anything. Re-fetch as a traversal, which leaves history alone.
+        if let committedURL, !history.isEmpty {
+            if committedURL.isFileURL {
+                openFile(committedURL, disposition: .traversal)
+            } else if let target = try? GeminiRequestTarget(committedURL.absoluteString) {
+                navigate(to: target, disposition: .traversal)
+            } else {
+                submitLocation()
+            }
+            return
+        }
+
+        submitLocation()
     }
 
     var restorationState: RestoredTabState {
@@ -246,9 +268,93 @@ final class BrowserModel: ObservableObject {
             displayCachedPage(cached)
             return
         }
+        if let committedURL, committedURL.isFileURL {
+            openFile(committedURL, disposition: .reload)
+            return
+        }
         guard let committedURL,
               let target = try? GeminiRequestTarget(committedURL.absoluteString) else { return }
         navigate(to: target, disposition: .reload)
+    }
+
+    /// Opens a local file, e.g. a `.gmi` dragged onto the window or opened from Finder.
+    ///
+    /// Local files go through the same document pipeline, cache and history as capsule
+    /// responses, so View Source, Save Page As, Back/Forward and the content theme all
+    /// behave identically. Nothing is fetched over the network.
+    func openFile(_ url: URL, disposition: HistoryDisposition = .new) {
+        guard url.isFileURL else { return }
+
+        navigationTask?.cancel()
+        navigationTask = nil
+        imageTasks.forEach { $0.cancel() }
+        imageTasks.removeAll()
+        slowDownTask?.cancel()
+        slowDownTask = nil
+        retryNotBefore = nil
+        isLoading = false
+        validationMessage = nil
+
+        let mimeType = Self.mimeType(forPathExtension: url.pathExtension)
+
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            showGeneratedPage(
+                title: "Could Not Open File",
+                message: "Major Tom could not read this file: \(error.localizedDescription)",
+                details: url.path,
+                url: url,
+                disposition: disposition
+            )
+            return
+        }
+
+        guard mimeType.hasPrefix("text/") || mimeType.hasPrefix("image/") else {
+            showGeneratedPage(
+                title: "Unsupported File",
+                message: "Major Tom cannot display this file type. No file was written.",
+                details: "\(url.lastPathComponent)\n\(data.count) bytes",
+                url: url,
+                disposition: disposition
+            )
+            return
+        }
+
+        currentSourceBytes = data
+        currentMIMEType = mimeType
+        canSavePage = !data.isEmpty
+        canShowSource = mimeType.hasPrefix("text/")
+
+        // commit() first: it sets committedURL, which renderCurrentContent() reads, and
+        // resets the title so a level-one heading in the document can claim it.
+        commit(url, disposition: disposition)
+        renderCurrentContent()
+
+        cachedPages[url] = CachedPage(
+            url: url,
+            mimeType: mimeType,
+            body: data,
+            completion: .complete,
+            receivedAt: Date(),
+            title: title,
+            documentTitle: documentTitle
+        )
+        statusText = "Local file • \(data.count) bytes"
+    }
+
+    private static func mimeType(forPathExtension pathExtension: String) -> String {
+        switch pathExtension.lowercased() {
+        case "gmi", "gemini": return "text/gemini"
+        case "txt", "text", "md", "markdown", "log": return "text/plain"
+        case "png": return "image/png"
+        case "jpg", "jpeg": return "image/jpeg"
+        case "gif": return "image/gif"
+        case "webp": return "image/webp"
+        case "heic": return "image/heic"
+        default: return "application/octet-stream"
+        }
     }
 
     func stop() {
@@ -425,15 +531,18 @@ final class BrowserModel: ObservableObject {
         let menu = NSMenu()
         menu.autoenablesItems = false
         contextMenuTargets.removeAll()
-        addContextMenuItem("Open Link", systemImage: "arrow.up.right.square", enabled: true, to: menu) { [weak self] in self?.openLink(url) }
-        let isGemini = url.scheme?.lowercased() == "gemini"
-        addContextMenuItem("Open Link in New Tab", systemImage: "plus.rectangle.on.rectangle", enabled: isGemini, to: menu) { [weak self] in
+        // Safari's link menu leads with "Open Link in New Tab" and has no plain
+        // "Open Link" at all — a plain click already does that. Spec 18.2 lists
+        // "Open Link"; Safari parity was chosen over it deliberately.
+        let opensInApp = url.scheme?.lowercased() == "gemini" || url.isFileURL
+        addContextMenuItem("Open Link in New Tab", systemImage: "plus.rectangle.on.rectangle", enabled: opensInApp, to: menu) { [weak self] in
             self?.openInNewTab?(url, true)
         }
-        addContextMenuItem("Open Link in New Window", systemImage: "macwindow.badge.plus", enabled: isGemini, to: menu) { [weak self] in
+        addContextMenuItem("Open Link in New Window", systemImage: "macwindow.badge.plus", enabled: opensInApp, to: menu) { [weak self] in
             self?.openInNewWindow?(url)
         }
-        addContextMenuItem("Download Linked File As…", systemImage: "arrow.down.circle", enabled: true, to: menu) { [weak self] in self?.download(url) }
+        menu.addItem(.separator())
+        addContextMenuItem("Download Linked File As…", systemImage: "arrow.down.circle", enabled: !url.isFileURL, to: menu) { [weak self] in self?.download(url) }
         menu.addItem(.separator())
         addContextMenuItem("Copy Link", systemImage: "doc.on.doc", enabled: true, to: menu) {
             NSPasteboard.general.clearContents()
@@ -627,6 +736,10 @@ final class BrowserModel: ObservableObject {
     private func navigateHistory(to url: URL) {
         if let cached = cachedPages[url] {
             displayCachedPage(cached)
+            return
+        }
+        if url.isFileURL {
+            openFile(url, disposition: .traversal)
             return
         }
         guard let target = try? GeminiRequestTarget(url.absoluteString) else { return }
@@ -948,6 +1061,9 @@ final class BrowserModel: ObservableObject {
         if url.scheme?.lowercased() == "gemini",
            let target = try? GeminiRequestTarget(url.absoluteString) {
             navigate(to: target, disposition: .new)
+        } else if url.isFileURL {
+            // Relative links inside a local document resolve to file URLs.
+            openFile(url)
         } else {
             openExternalURL(url)
         }
