@@ -41,9 +41,7 @@ public struct AddressInputInterpreter: Sendable {
             return .gemini(target)
         }
 
-        var components = URLComponents(url: searchEndpoint, resolvingAgainstBaseURL: false)
-        components?.queryItems = [URLQueryItem(name: value, value: nil)]
-        guard let searchURL = components?.url,
+        guard let searchURL = GeminiQueryEncoding.url(base: searchEndpoint, query: value),
               let target = try? GeminiRequestTarget(searchURL.absoluteString) else {
             throw AddressInputError.invalidGeminiURL
         }

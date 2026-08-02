@@ -38,8 +38,11 @@ public struct IncrementalGemtextParser: Sendable {
         return events
     }
 
+    /// Gemtext terminates lines with CRLF, and tolerates a bare LF. `Character.isNewline`
+    /// additionally matches VT, FF, NEL, U+2028 and U+2029, which are ordinary text in a
+    /// capsule and must not split a line. Note that Swift treats "\r\n" as one Character.
     private func lineEnding(in value: String) -> String.Index? {
-        value.firstIndex(where: \.isNewline)
+        value.firstIndex { $0 == "\n" || $0 == "\r\n" || $0 == "\r" }
     }
 
     public mutating func finish() -> [GemtextEvent] {

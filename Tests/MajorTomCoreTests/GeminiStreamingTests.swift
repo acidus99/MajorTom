@@ -179,6 +179,39 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertThrowsError(try GeminiRequestTarget("gemini://example.com/" + String(repeating: "a", count: 1_100)))
     }
 
+    func testGeminiRequestLimitIncludesTrailingCRLF() throws {
+        let prefix = "gemini://example.com/"
+        let validURL = prefix + String(
+            repeating: "a",
+            count: GeminiRequestTarget.maximumURLByteCount - prefix.utf8.count
+        )
+        let valid = try GeminiRequestTarget(validURL)
+        XCTAssertEqual(valid.requestData.count, GeminiRequestTarget.maximumRequestByteCount)
+        XCTAssertThrowsError(try GeminiRequestTarget(validURL + "a"))
+    }
+
+    func testGeminiQueryEncodingRoundTripsReservedCharacters() throws {
+        let query = "C++ &/?:,;=#%"
+        let encoded = GeminiQueryEncoding.encode(query)
+        XCTAssertEqual(encoded, "C%2B%2B%20%26%2F%3F%3A%2C%3B%3D%23%25")
+        let url = try XCTUnwrap(GeminiQueryEncoding.url(
+            base: URL(string: "gemini://example.com/search?old")!,
+            query: query
+        ))
+        XCTAssertEqual(url.absoluteString, "gemini://example.com/search?\(encoded)")
+        XCTAssertEqual(url.query?.removingPercentEncoding, query)
+    }
+
+    func testUnicodeLineSeparatorsRemainGemtextContent() {
+        for separator in ["\u{000B}", "\u{000C}", "\u{0085}", "\u{2028}", "\u{2029}"] {
+            var parser = IncrementalGemtextParser()
+            XCTAssertEqual(
+                parser.receive("left\(separator)right\n") + parser.finish(),
+                [.text("left\(separator)right")]
+            )
+        }
+    }
+
     func testAddressInterpreterRecognizesExplicitAndImplicitCapsules() throws {
         let interpreter = AddressInputInterpreter()
 

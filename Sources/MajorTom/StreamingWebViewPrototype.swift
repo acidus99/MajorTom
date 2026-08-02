@@ -548,9 +548,7 @@ final class BrowserModel: ObservableObject {
 
     func submitInput(_ value: String) {
         guard let prompt = inputPrompt else { return }
-        var components = URLComponents(url: prompt.target.url, resolvingAgainstBaseURL: false)
-        components?.queryItems = [URLQueryItem(name: value, value: nil)]
-        guard let url = components?.url,
+        guard let url = GeminiQueryEncoding.url(base: prompt.target.url, query: value),
               let target = try? GeminiRequestTarget(url.absoluteString) else {
             inputValidationMessage = "This response is too large for a Gemini request. Shorten it and try again."
             return

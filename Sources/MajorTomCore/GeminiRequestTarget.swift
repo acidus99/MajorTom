@@ -2,7 +2,11 @@ import Foundation
 
 public struct GeminiRequestTarget: Equatable, Sendable {
     public static let defaultPort: UInt16 = 1_965
-    public static let maximumURLByteCount = 1_024
+
+    /// A Gemini request is one CRLF-terminated line of at most 1024 bytes *including*
+    /// the CRLF, so the URL itself may occupy at most 1022.
+    public static let maximumRequestByteCount = 1_024
+    public static let maximumURLByteCount = maximumRequestByteCount - 2
 
     public let url: URL
     public let endpoint: CapsuleEndpoint
@@ -30,13 +34,14 @@ public struct GeminiRequestTarget: Equatable, Sendable {
         guard let normalizedURL = components.url else { throw GeminiRequestError.invalidURL }
 
         let serialized = normalizedURL.absoluteString
-        guard serialized.utf8.count <= Self.maximumURLByteCount else {
+        let request = Data((serialized + "\r\n").utf8)
+        guard request.count <= Self.maximumRequestByteCount else {
             throw GeminiRequestError.urlTooLong
         }
 
         self.url = normalizedURL
         self.endpoint = CapsuleEndpoint(host: host, port: port)
-        self.requestData = Data((serialized + "\r\n").utf8)
+        self.requestData = request
     }
 }
 
