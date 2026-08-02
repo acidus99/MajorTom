@@ -173,5 +173,15 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     .browser-generated main { max-width: 44rem; }
     .browser-generated .eyebrow { color: SecondaryLabelColor; font-size: .82rem; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
     .browser-generated .details { padding: .85rem 1rem; border-radius: .65rem; background: color-mix(in srgb, CanvasText 7%, Canvas); font-family: ui-monospace, monospace; white-space: pre-wrap; }
+    @media print {
+      /* body's top padding only exists to clear the floating browser chrome. */
+      :root { zoom: 1; }
+      body { padding-top: 0; color: #000; background: #fff; }
+      main { max-width: none; padding: 0; }
+      a { color: #000; text-decoration: underline; }
+      h1, h2, h3 { break-after: avoid-page; }
+      pre, blockquote, figure { break-inside: avoid-page; }
+      .source-line { break-inside: avoid-page; }
+    }
     """
 }

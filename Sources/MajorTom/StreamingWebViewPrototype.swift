@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Foundation
 import MajorTomCore
+import PDFKit
 import SwiftUI
 import WebKit
 
@@ -352,8 +353,48 @@ final class BrowserModel: ObservableObject {
         applyThemeWithoutReload()
     }
 
+    /// Prints the current document.
+    ///
+    /// This used to call `window.print()`. That is a guaranteed no-op: WebKit routes
+    /// `window.print()` through `APIUIClient::printFrame`, whose default implementation
+    /// does nothing, and the only override calls the private
+    /// `_webView:printFrame:pdfFirstPageSize:completionHandler:` selector. SwiftUI's
+    /// `WKUIDelegateAdapter` does not implement it at all, so nothing happened and the
+    /// `try?` hid it. `WebPage` has no printing API and its backing web view is `@_spi`
+    /// and stripped from the public SDK, so the supported route is to export PDF data
+    /// and print that through PDFKit.
     func printPage() {
-        Task { _ = try? await page.callJavaScript("window.print()") }
+        guard committedURL != nil else { return }
+        Task {
+            do {
+                let pdf = try await page.exported(as: .pdf())
+                guard let document = PDFDocument(data: pdf),
+                      let info = NSPrintInfo.shared.copy() as? NSPrintInfo else {
+                    validationMessage = "Major Tom could not prepare this page for printing."
+                    return
+                }
+                info.horizontalPagination = .fit
+                info.verticalPagination = .automatic
+                guard let operation = document.printOperation(
+                    for: info,
+                    scalingMode: .pageScaleDownToFit,
+                    autoRotate: false
+                ) else {
+                    validationMessage = "Major Tom could not prepare this page for printing."
+                    return
+                }
+                operation.jobTitle = title
+                operation.showsPrintPanel = true
+                operation.showsProgressPanel = true
+                if let window = NSApplication.shared.keyWindow {
+                    operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
+                } else {
+                    operation.run()
+                }
+            } catch {
+                validationMessage = "The page could not be printed: \(error.localizedDescription)"
+            }
+        }
     }
 
     func showPageContextMenu(at location: NSPoint, in view: NSView?) {
