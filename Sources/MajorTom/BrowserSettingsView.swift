@@ -79,10 +79,26 @@ struct BrowserSettingsView: View {
         Form {
             Toggle("Automatically display same-capsule images", isOn: store.binding(\.automaticallyLoadsSameCapsuleImages))
             Toggle("Display inline data images", isOn: store.binding(\.automaticallyLoadsDataImages))
-            Toggle("Recognize *emphasis*", isOn: store.binding(\.renderingOptions.recognizesEmphasis))
-            Toggle("Recognize **strong emphasis**", isOn: store.binding(\.renderingOptions.recognizesStrongEmphasis))
-            Toggle("Recognize `inline code`", isOn: store.binding(\.renderingOptions.recognizesInlineCode))
-            Toggle("Collapse consecutive quote lines", isOn: store.binding(\.renderingOptions.collapsesConsecutiveQuotes))
+            Toggle(
+                "Italicize text between *single asterisks*",
+                isOn: store.binding(\.renderingOptions.recognizesEmphasis)
+            )
+            Toggle(
+                "Bold text between **double asterisks**",
+                isOn: store.binding(\.renderingOptions.recognizesStrongEmphasis)
+            )
+            Toggle(
+                "Monospace text between `backtick characters`",
+                isOn: store.binding(\.renderingOptions.recognizesInlineCode)
+            )
+            Text("The asterisks and backticks stay visible. Major Tom only adds styling; it never removes characters the author typed.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            Toggle(
+                "Collapse consecutive quote lines",
+                isOn: store.binding(\.renderingOptions.collapsesConsecutiveQuotes)
+            )
             Text("Renders a run of quote lines as one continuous quotation instead of separate blocks.")
                 .font(.callout)
                 .foregroundStyle(.secondary)

@@ -137,7 +137,18 @@ public struct HTMLDocumentStreamRenderer: Sendable {
             output += escape(String(remainder[..<candidate.range.lowerBound]))
             let contentStart = remainder.index(candidate.range.lowerBound, offsetBy: candidate.marker.count)
             let contentEnd = remainder.index(candidate.range.upperBound, offsetBy: -candidate.marker.count)
-            output += "<\(candidate.tag)>\(escape(String(remainder[contentStart..<contentEnd])))</\(candidate.tag)>"
+
+            // The author's delimiters stay in the document. Major Tom adds styling; it
+            // never removes characters the author typed (spec 3.4, 5.1). This also
+            // makes over-matching harmless: `2*3 and 4*5` still reads as written, it
+            // merely picks up an unwanted italic, instead of silently losing both
+            // asterisks as it did when the delimiters were consumed.
+            let delimiter = "<span class=\"delimiter\">\(escape(candidate.marker))</span>"
+            output += "<\(candidate.tag)>"
+                + delimiter
+                + escape(String(remainder[contentStart..<contentEnd]))
+                + delimiter
+                + "</\(candidate.tag)>"
             remainder = remainder[candidate.range.upperBound...]
         }
         return output
@@ -212,6 +223,9 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     .pre-block > summary:hover { color: CanvasText; }
     .pre-block > pre { margin: .3rem 0 0; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; background: color-mix(in srgb, CanvasText 8%, Canvas); border-radius: .25rem; padding: .08em .28em; }
+    /* The author's * and ` characters, kept in the document but de-emphasised so the
+       styled text still reads cleanly. Upright and regular weight inside em/strong. */
+    .delimiter { opacity: .4; font-style: normal; font-weight: normal; }
     pre code { font-size: inherit; background: transparent; padding: 0; }
     img { display: block; max-width: 100%; height: auto; margin: 1rem 0; border-radius: .5rem; }
     figure { margin: 1rem 0; } figure img { margin-bottom: .35rem; } figcaption { color: SecondaryLabelColor; font-size: .82rem; }

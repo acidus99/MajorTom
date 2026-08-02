@@ -109,7 +109,10 @@ final class GeminiStreamingTests: XCTestCase {
         )
         XCTAssertEqual(
             rendered,
-            "Use <strong>strong</strong>, <em>emphasis</em>, and <code>code &lt;here&gt;</code>; leave *unmatched visible"
+            "Use <strong><span class=\"delimiter\">**</span>strong<span class=\"delimiter\">**</span></strong>, "
+                + "<em><span class=\"delimiter\">*</span>emphasis<span class=\"delimiter\">*</span></em>, and "
+                + "<code><span class=\"delimiter\">`</span>code &lt;here&gt;<span class=\"delimiter\">`</span></code>; "
+                + "leave *unmatched visible"
         )
     }
 
@@ -121,8 +124,28 @@ final class GeminiStreamingTests: XCTestCase {
         )
         XCTAssertEqual(
             HTMLDocumentStreamRenderer.renderInline("**yes** *no* `no`", options: options),
-            "<strong>yes</strong> *no* `no`"
+            "<strong><span class=\"delimiter\">**</span>yes<span class=\"delimiter\">**</span></strong> *no* `no`"
         )
+    }
+
+    /// The author's characters must survive rendering even when recognition fires where
+    /// it should not. Stripping the tags must give back exactly the input.
+    func testInlineEnhancementsNeverRemoveAuthorCharacters() {
+        for input in [
+            "2*3 and 4*5",
+            "C:\\*.txt and *.md",
+            "See note* and other* thing",
+            "take `foo.bmp` and move it",
+            "**bold** and *italic* together"
+        ] {
+            let rendered = HTMLDocumentStreamRenderer.renderInline(input)
+            let stripped = rendered.replacingOccurrences(
+                of: "<[^>]+>",
+                with: "",
+                options: .regularExpression
+            )
+            XCTAssertEqual(stripped, input, "delimiters were lost rendering \(input.debugDescription)")
+        }
     }
 
     func testBrowserPreferencesRoundTrip() throws {
