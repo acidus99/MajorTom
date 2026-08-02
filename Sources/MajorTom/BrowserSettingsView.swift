@@ -82,6 +82,10 @@ struct BrowserSettingsView: View {
             Toggle("Recognize *emphasis*", isOn: store.binding(\.renderingOptions.recognizesEmphasis))
             Toggle("Recognize **strong emphasis**", isOn: store.binding(\.renderingOptions.recognizesStrongEmphasis))
             Toggle("Recognize `inline code`", isOn: store.binding(\.renderingOptions.recognizesInlineCode))
+            Toggle("Collapse consecutive quote lines", isOn: store.binding(\.renderingOptions.collapsesConsecutiveQuotes))
+            Text("Renders a run of quote lines as one continuous quotation instead of separate blocks.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
     }

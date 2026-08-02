@@ -1219,7 +1219,10 @@ final class BrowserModel: ObservableObject {
 
     private var themeCSS: String {
         let dark = NSApplication.shared.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let theme = settings.preferences.contentTheme.css(effectiveDarkAppearance: dark)
+        var theme = settings.preferences.contentTheme.css(effectiveDarkAppearance: dark)
+        if settings.preferences.renderingOptions.collapsesConsecutiveQuotes {
+            theme += HTMLDocumentStreamRenderer.collapsedQuotesCSS
+        }
         // Screen-only zoom survives navigation without overriding print's 100% scale.
         return theme + "\n@media screen { :root { zoom: \(pageZoom); } }"
     }

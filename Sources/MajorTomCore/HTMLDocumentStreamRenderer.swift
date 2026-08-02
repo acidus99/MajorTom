@@ -4,15 +4,33 @@ public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
     public var recognizesEmphasis: Bool
     public var recognizesStrongEmphasis: Bool
     public var recognizesInlineCode: Bool
+    /// Renders a run of consecutive quote lines as one continuous quotation rather
+    /// than as separate blocks with whitespace between them.
+    public var collapsesConsecutiveQuotes: Bool
 
     public init(
         recognizesEmphasis: Bool = true,
         recognizesStrongEmphasis: Bool = true,
-        recognizesInlineCode: Bool = true
+        recognizesInlineCode: Bool = true,
+        collapsesConsecutiveQuotes: Bool = true
     ) {
         self.recognizesEmphasis = recognizesEmphasis
         self.recognizesStrongEmphasis = recognizesStrongEmphasis
         self.recognizesInlineCode = recognizesInlineCode
+        self.collapsesConsecutiveQuotes = collapsesConsecutiveQuotes
+    }
+
+    /// Decodes leniently so that adding an option cannot discard a user's settings.
+    ///
+    /// `BrowserPreferences` is loaded with `try?`, so one missing key would fail the
+    /// whole decode and silently reset the homepage, search provider, proxy and
+    /// trusted-appearance choices back to defaults.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        recognizesEmphasis = try container.decodeIfPresent(Bool.self, forKey: .recognizesEmphasis) ?? true
+        recognizesStrongEmphasis = try container.decodeIfPresent(Bool.self, forKey: .recognizesStrongEmphasis) ?? true
+        recognizesInlineCode = try container.decodeIfPresent(Bool.self, forKey: .recognizesInlineCode) ?? true
+        collapsesConsecutiveQuotes = try container.decodeIfPresent(Bool.self, forKey: .collapsesConsecutiveQuotes) ?? true
     }
 }
 
@@ -151,6 +169,21 @@ public struct HTMLDocumentStreamRenderer: Sendable {
         }
         return nil
     }
+
+    /// Joins a run of consecutive `<blockquote>` elements into one visual block.
+    ///
+    /// Done in CSS rather than by making the renderer stateful. Gemtext quotes one
+    /// line at a time, so a multi-line quotation is a run of sibling blockquotes;
+    /// dropping the margin and the corner rounding between adjacent siblings makes
+    /// the shared left rule continuous. A blank line between quotes emits a
+    /// `.blank` div, which breaks the adjacency and correctly keeps the two
+    /// quotations apart. Purely presentational, so the source bytes, View Source and
+    /// Save Page As are untouched (spec 5.1).
+    public static let collapsedQuotesCSS = """
+
+    blockquote + blockquote { margin-top: 0; padding-top: 0; }
+    blockquote:has(+ blockquote) { margin-bottom: 0; padding-bottom: 0; }
+    """
 
     public static let defaultThemeCSS = """
     :root { color-scheme: light dark; font: 17px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; }
