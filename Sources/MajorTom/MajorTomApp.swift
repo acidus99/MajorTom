@@ -360,22 +360,54 @@ private enum BrowserSessionRestorationState {
 private struct BrowserTabStrip: View {
     @ObservedObject var session: BrowserWindowSession
 
+    /// The width below which a tab stops shrinking and the strip scrolls instead.
+    /// Safari shares the available width among tabs until they would stop being
+    /// readable, and only then scrolls; it never scrolls while slack remains.
+    private static let minimumTabWidth: CGFloat = 150
+    private static let tabSpacing: CGFloat = 6
+
     var body: some View {
-        HStack(spacing: 6) {
-            ForEach(session.tabs) { tab in
-                BrowserTabButton(
-                    browser: tab.browser,
-                    isSelected: session.selectedID == tab.id,
-                    select: { session.selectedID = tab.id },
-                    close: {
-                        session.selectedID = tab.id
-                        if session.closeSelectedTab() {
-                            NSApplication.shared.keyWindow?.performClose(nil)
+        HStack(spacing: Self.tabSpacing) {
+            GeometryReader { proxy in
+                ScrollViewReader { scroller in
+                    ScrollView(.horizontal) {
+                        HStack(spacing: Self.tabSpacing) {
+                            ForEach(session.tabs) { tab in
+                                BrowserTabButton(
+                                    browser: tab.browser,
+                                    isSelected: session.selectedID == tab.id,
+                                    select: { session.selectedID = tab.id },
+                                    close: {
+                                        session.selectedID = tab.id
+                                        if session.closeSelectedTab() {
+                                            NSApplication.shared.keyWindow?.performClose(nil)
+                                        }
+                                    }
+                                )
+                                .id(tab.id)
+                            }
                         }
+                        // Taking at least the available width keeps a handful of tabs
+                        // stretched exactly as before; past that the tabs' own minimum
+                        // wins and the overflow scrolls. Matching the reader's height
+                        // keeps them centred in the strip.
+                        .frame(
+                            width: max(proxy.size.width, unshrunkWidth),
+                            height: proxy.size.height,
+                            alignment: .leading
+                        )
                     }
-                )
+                    .scrollIndicators(.never)
+                    // Without this a tab past the fold is unreachable and invisible —
+                    // including the background tab a Command-clicked link just created.
+                    .onChange(of: session.selectedID) { _, id in
+                        scrollIntoView(id, using: scroller)
+                    }
+                    .onChange(of: session.tabs.count) { _, _ in
+                        scrollIntoView(session.selectedID, using: scroller)
+                    }
+                }
             }
-            Spacer(minLength: 0)
             Button("New Tab", systemImage: "plus") { session.newTab() }
                 .labelStyle(.iconOnly)
                 .buttonStyle(.plain)
@@ -385,6 +417,18 @@ private struct BrowserTabStrip: View {
         .padding(.horizontal, 8)
         .frame(height: 42)
         .background(.ultraThinMaterial)
+    }
+
+    /// Width the tabs occupy when none of them is compressed.
+    private var unshrunkWidth: CGFloat {
+        let count = CGFloat(session.tabs.count)
+        guard count > 0 else { return 0 }
+        return count * Self.minimumTabWidth + (count - 1) * Self.tabSpacing
+    }
+
+    private func scrollIntoView(_ id: UUID?, using scroller: ScrollViewProxy) {
+        guard let id else { return }
+        withAnimation(.easeOut(duration: 0.18)) { scroller.scrollTo(id) }
     }
 }
 
