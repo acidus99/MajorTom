@@ -1500,7 +1500,8 @@ final class BrowserModel: ObservableObject {
         }
         documentContinuation?.yield(renderer.render(
             event,
-            options: settings.preferences.renderingOptions
+            options: settings.preferences.renderingOptions,
+            baseURL: baseURL
         ))
         guard case .link(let destination, let label) = event else { return }
 
@@ -1637,15 +1638,14 @@ final class BrowserModel: ObservableObject {
         return (body, mimeType, url)
     }
 
+    // Both defined once in MajorTomCore, so link hints and inline-image loading can
+    // never disagree about what counts as an image or as the same capsule.
     private func isProbableImage(_ url: URL) -> Bool {
-        ["png", "jpg", "jpeg", "gif", "webp", "heic", "heif"]
-            .contains(url.pathExtension.lowercased())
+        GemtextLinkHint.isProbableImage(url)
     }
 
     private func isSameCapsule(_ lhs: URL, _ rhs: URL) -> Bool {
-        lhs.host?.lowercased() == rhs.host?.lowercased()
-            && (lhs.port ?? Int(GeminiRequestTarget.defaultPort))
-                == (rhs.port ?? Int(GeminiRequestTarget.defaultPort))
+        GemtextLinkHint.isSameCapsule(lhs, rhs)
     }
 
     private func displayTitle(for url: URL) -> String {

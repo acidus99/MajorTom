@@ -7,17 +7,21 @@ public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
     /// Renders a run of consecutive quote lines as one continuous quotation rather
     /// than as separate blocks with whitespace between them.
     public var collapsesConsecutiveQuotes: Bool
+    /// Shows a glyph ahead of each link label indicating where the link leads.
+    public var showsLinkHints: Bool
 
     public init(
         recognizesEmphasis: Bool = true,
         recognizesStrongEmphasis: Bool = true,
         recognizesInlineCode: Bool = true,
-        collapsesConsecutiveQuotes: Bool = true
+        collapsesConsecutiveQuotes: Bool = true,
+        showsLinkHints: Bool = true
     ) {
         self.recognizesEmphasis = recognizesEmphasis
         self.recognizesStrongEmphasis = recognizesStrongEmphasis
         self.recognizesInlineCode = recognizesInlineCode
         self.collapsesConsecutiveQuotes = collapsesConsecutiveQuotes
+        self.showsLinkHints = showsLinkHints
     }
 
     /// Decodes leniently so that adding an option cannot discard a user's settings.
@@ -31,6 +35,7 @@ public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
         recognizesStrongEmphasis = try container.decodeIfPresent(Bool.self, forKey: .recognizesStrongEmphasis) ?? true
         recognizesInlineCode = try container.decodeIfPresent(Bool.self, forKey: .recognizesInlineCode) ?? true
         collapsesConsecutiveQuotes = try container.decodeIfPresent(Bool.self, forKey: .collapsesConsecutiveQuotes) ?? true
+        showsLinkHints = try container.decodeIfPresent(Bool.self, forKey: .showsLinkHints) ?? true
     }
 }
 
@@ -55,9 +60,13 @@ public struct HTMLDocumentStreamRenderer: Sendable {
         return Data(html.utf8)
     }
 
+    /// - Parameter baseURL: the document's own URL, used to tell a link that stays
+    ///   inside the capsule from one that leaves it. Without it, link hints can still
+    ///   report scheme but not locality.
     public func render(
         _ event: GemtextEvent,
-        options: HTMLRenderingOptions = HTMLRenderingOptions()
+        options: HTMLRenderingOptions = HTMLRenderingOptions(),
+        baseURL: URL? = nil
     ) -> Data {
         let html: String
         switch event {
@@ -67,7 +76,16 @@ public struct HTMLDocumentStreamRenderer: Sendable {
             html = "<h\(level)>\(Self.renderInline(text, options: options))</h\(level)>"
         case .link(let destination, let label):
             let visibleText = label ?? destination
-            html = "<p class=\"link-line\"><a href=\"\(Self.escapeAttribute(destination))\">\(Self.renderInline(visibleText, options: options))</a></p>"
+            let hint = options.showsLinkHints
+                ? GemtextLinkHint.classify(destination: destination, relativeTo: baseURL)
+                : nil
+            // aria-hidden, because the glyph is shorthand for what the href already
+            // states, and "rightwards double arrow" announced before every link is
+            // noise rather than information.
+            let hintMarkup = hint.map {
+                "<span class=\"link-hint\" aria-hidden=\"true\">\(Self.escape($0.rawValue))</span>"
+            } ?? ""
+            html = "<p class=\"link-line\">\(hintMarkup)<a href=\"\(Self.escapeAttribute(destination))\">\(Self.renderInline(visibleText, options: options))</a></p>"
         case .listItem(let text):
             html = "<div class=\"list-item\"><span aria-hidden=\"true\">•</span><span>\(Self.renderInline(text, options: options))</span></div>"
         case .quote(let text):
@@ -211,6 +229,10 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     p { margin: .7rem 0; }
     a { color: LinkText; text-underline-offset: .15em; }
     .link-line { margin: .45rem 0; }
+    /* A hinted link line becomes a two-column grid so every label starts at the same
+       x position, whether its glyph is a narrow arrow or a full-width emoji. */
+    .link-line:has(.link-hint) { display: grid; grid-template-columns: 1.6rem 1fr; align-items: baseline; }
+    .link-hint { opacity: .55; font-size: .9em; -webkit-user-select: none; user-select: none; }
     .list-item { display: grid; grid-template-columns: 1.25rem 1fr; margin: .25rem 0; }
     blockquote { margin: 1rem 0; padding: .6rem 1rem; border-inline-start: .25rem solid AccentColor; }
     pre { overflow-x: auto; padding: 1rem; border-radius: .65rem; background: color-mix(in srgb, CanvasText 8%, Canvas); }

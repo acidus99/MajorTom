@@ -112,6 +112,14 @@ struct BrowserSettingsView: View {
             Text("Renders a run of quote lines as one continuous quotation instead of separate blocks.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+
+            Toggle(
+                "Show link type hints",
+                isOn: store.binding(\.renderingOptions.showsLinkHints)
+            )
+            Text("Marks each link with where it leads: \u{2192} elsewhere in this capsule, \u{21D2} to another capsule, \u{1F310} out to the web, \u{1F5BC}\u{FE0F} an image, \u{1F4E7} an email address.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
     }
