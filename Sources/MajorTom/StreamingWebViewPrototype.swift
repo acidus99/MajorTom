@@ -124,6 +124,8 @@ final class BrowserModel: ObservableObject {
         let target: GeminiRequestTarget
         let message: String
         let isSensitive: Bool
+        /// Text kept from an earlier, cancelled attempt at this same prompt.
+        var initialText: String = ""
     }
 
     @Published var locationText = "gemini://gemi.dev/"
@@ -165,6 +167,9 @@ final class BrowserModel: ObservableObject {
     private var history: [URL] = []
     private var historyIndex = -1
     private var cachedPages: [URL: CachedPage] = [:]
+    /// Answers typed but not submitted, so cancelling a prompt and returning to it does
+    /// not lose the work. Sensitive prompts are deliberately never recorded here.
+    private var inputDrafts: [URL: String] = [:]
     private var hasStarted = false
     private var trustWasDeclined = false
     private var currentSourceBytes = Data()
@@ -856,7 +861,16 @@ final class BrowserModel: ObservableObject {
         trustContinuation = nil
     }
 
-    func cancelInput() {
+    /// - Parameter draft: whatever had been typed, kept so returning to the same prompt
+    ///   offers it again. A sensitive prompt's text is discarded rather than stored.
+    func cancelInput(draft: String = "") {
+        if let prompt = inputPrompt, !prompt.isSensitive {
+            if draft.isEmpty {
+                inputDrafts.removeValue(forKey: prompt.target.url)
+            } else {
+                inputDrafts[prompt.target.url] = draft
+            }
+        }
         inputPrompt = nil
         inputValidationMessage = nil
         isLoading = false
@@ -866,6 +880,7 @@ final class BrowserModel: ObservableObject {
 
     func submitInput(_ value: String) {
         guard let prompt = inputPrompt else { return }
+        inputDrafts.removeValue(forKey: prompt.target.url)
         guard let url = GeminiQueryEncoding.url(base: prompt.target.url, query: value),
               let target = try? GeminiRequestTarget(url.absoluteString) else {
             inputValidationMessage = "This response is too large for a Gemini request. Shorten it and try again."
@@ -1010,10 +1025,12 @@ final class BrowserModel: ObservableObject {
                     }
 
                     if header.isInput {
+                        let isSensitive = header.status == 11
                         inputPrompt = InputPrompt(
                             target: target,
                             message: header.meta,
-                            isSensitive: header.status == 11
+                            isSensitive: isSensitive,
+                            initialText: isSensitive ? "" : (inputDrafts[target.url] ?? "")
                         )
                         isLoading = false
                         statusText = "Input required"

@@ -710,9 +710,13 @@ private struct BrowserTabView: View {
             }
         }
         .sheet(item: $browser.inputPrompt) { prompt in
-            CapsuleInputView(prompt: prompt, validationMessage: browser.inputValidationMessage) { value in
-                if let value { browser.submitInput(value) }
-                else { browser.cancelInput() }
+            CapsuleInputView(prompt: prompt, validationMessage: browser.inputValidationMessage) { outcome in
+                switch outcome {
+                case .submit(let value):
+                    browser.submitInput(value)
+                case .cancel(let draft):
+                    browser.cancelInput(draft: draft)
+                }
             }
         }
     }
@@ -815,17 +819,48 @@ private struct TrustPromptView: View {
 }
 
 @available(macOS 26.0, *)
+private enum CapsuleInputOutcome {
+    case submit(String)
+    /// Carries what was typed, so the same prompt can offer it back later.
+    case cancel(draft: String)
+}
+
+@available(macOS 26.0, *)
 private struct CapsuleInputView: View {
     let prompt: BrowserModel.InputPrompt
     let validationMessage: String?
-    let completion: (String?) -> Void
-    @State private var value = ""
+    let completion: (CapsuleInputOutcome) -> Void
+    @State private var value: String
     @FocusState private var isFocused: Bool
+    private let budget: GeminiInputBudget
+
+    init(
+        prompt: BrowserModel.InputPrompt,
+        validationMessage: String?,
+        completion: @escaping (CapsuleInputOutcome) -> Void
+    ) {
+        self.prompt = prompt
+        self.validationMessage = validationMessage
+        self.completion = completion
+        _value = State(initialValue: prompt.initialText)
+        budget = GeminiInputBudget(promptURL: prompt.target.url)
+    }
+
+    private var remaining: Int { budget.remainingByteCount(for: value) }
+    private var isWithinBudget: Bool { remaining >= 0 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text(prompt.message)
-                .font(.headline)
+            VStack(alignment: .leading, spacing: 3) {
+                // Which capsule is asking. A prompt is a request for information, and
+                // the answer is about to be sent somewhere, so the destination belongs
+                // on screen next to the question.
+                Text(capsuleLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(prompt.message)
+                    .font(.headline)
+            }
             Group {
                 if prompt.isSensitive {
                     SecureField("Response", text: $value)
@@ -836,25 +871,60 @@ private struct CapsuleInputView: View {
             }
             .textFieldStyle(.roundedBorder)
             .focused($isFocused)
-            .onSubmit { completion(value) }
-            if let validationMessage {
-                Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
-                    .font(.callout)
-                    .foregroundStyle(.orange)
-                    .accessibilityLabel("Input error: \(validationMessage)")
+            .onSubmit { submit() }
+
+            HStack(alignment: .firstTextBaseline) {
+                if let validationMessage {
+                    Label(validationMessage, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .accessibilityLabel("Input error: \(validationMessage)")
+                }
+                Spacer(minLength: 8)
+                Text(budgetLabel)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(isWithinBudget ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.red))
+                    .accessibilityLabel(budgetAccessibilityLabel)
             }
+
             HStack {
                 Spacer()
-                Button("Cancel", role: .cancel) { completion(nil) }
+                Button("Cancel", role: .cancel) { completion(.cancel(draft: value)) }
                     .keyboardShortcut(.cancelAction)
-                Button("Submit") { completion(value) }
+                Button("Submit") { submit() }
                     .keyboardShortcut(.defaultAction)
+                    .disabled(!isWithinBudget)
             }
         }
         .padding(24)
         .frame(width: 480)
         .onAppear { isFocused = true }
         .interactiveDismissDisabled()
+    }
+
+    private var capsuleLabel: String {
+        let endpoint = prompt.target.endpoint
+        return endpoint.port == GeminiRequestTarget.defaultPort
+            ? endpoint.host
+            : "\(endpoint.host):\(endpoint.port)"
+    }
+
+    /// Counts encoded bytes rather than characters: one typed character can cost up to
+    /// twelve bytes once percent-encoded, so a character count would promise room that
+    /// the request does not have.
+    private var budgetLabel: String {
+        isWithinBudget ? "\(remaining) bytes left" : "\(-remaining) bytes over"
+    }
+
+    private var budgetAccessibilityLabel: String {
+        isWithinBudget
+            ? "\(remaining) of \(budget.maximumEncodedByteCount) bytes remaining"
+            : "Too long by \(-remaining) bytes"
+    }
+
+    private func submit() {
+        guard isWithinBudget else { return }
+        completion(.submit(value))
     }
 }
 
