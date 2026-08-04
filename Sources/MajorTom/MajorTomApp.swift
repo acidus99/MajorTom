@@ -41,11 +41,9 @@ struct MajorTomApp: App {
                 }
                 .keyboardShortcut("t", modifiers: .command)
 
-                Button("Close Tab") {
-                    NotificationCenter.default.post(name: .majorTomCloseTab, object: nil)
-                }
-                .keyboardShortcut("w", modifiers: .command)
-
+                // Close Tab is not declared here. It is the standard File ▸ Close item
+                // that SwiftUI injects, retitled and retargeted at launch by
+                // FileMenuCustomization, so ⌘W belongs to exactly one menu item.
                 Button("Close Window") {
                     NotificationCenter.default.post(name: .majorTomCloseWindow, object: nil)
                 }
@@ -54,7 +52,9 @@ struct MajorTomApp: App {
                 Button("Close All Windows") {
                     NotificationCenter.default.post(name: .majorTomCloseAllWindows, object: nil)
                 }
-                .keyboardShortcut("w", modifiers: [.command, .option])
+                // Safari's shortcut. ⌥⌘W is deliberately left alone: that is Close Other
+                // Tabs in Safari, so borrowing it here would misteach the gesture.
+                .keyboardShortcut("w", modifiers: [.command, .option, .shift])
 
                 Divider()
 
@@ -171,6 +171,7 @@ struct MajorTomApp: App {
 private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate {
     private var commandKeyMonitor: Any?
     private var aboutObserver: (any NSObjectProtocol)?
+    private var menuObserver: (any NSObjectProtocol)?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
@@ -188,28 +189,22 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         DispatchQueue.main.async {
             NSApplication.shared.activate()
             NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
-            self.removeDuplicateCloseCommand()
+            FileMenuCustomization.apply()
+        }
+
+        // SwiftUI rebuilds the main menu as scenes come and go, which would restore the
+        // stock Close item, so the customisation is re-applied whenever a window takes
+        // focus. Capture-free on purpose: sending the delegate into this closure is a data
+        // race the compiler rightly refuses.
+        menuObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.didBecomeKeyNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { FileMenuCustomization.apply() }
         }
     }
 
-    /// Drops the standard File ▸ Close item that SwiftUI injects for a `WindowGroup`.
-    ///
-    /// It claims ⌘W, which this app gives to Close Tab, and two menu items sharing one
-    /// key equivalent resolve unpredictably. "Close" is also the wrong verb for a tabbed
-    /// browser: ⌘W closes the tab and ⇧⌘W closes the window. Matched on the action
-    /// selector rather than the title, since titles are localised.
-    ///
-    /// Deferred to the next run loop turn because SwiftUI builds the main menu after
-    /// applicationDidFinishLaunching returns.
-    @MainActor
-    private func removeDuplicateCloseCommand() {
-        guard let fileMenu = NSApplication.shared.mainMenu?.item(withTitle: "File")?.submenu else {
-            return
-        }
-        for item in fileMenu.items where item.action == #selector(NSWindow.performClose(_:)) {
-            fileMenu.removeItem(item)
-        }
-    }
 
     /// Safari also navigates with Command-Left/Right. There is no way to express a
     /// second key equivalent for one SwiftUI command, so this is an application-wide
@@ -912,6 +907,47 @@ private struct BrowserTabView: View {
         if let contextMenuMonitor {
             NSEvent.removeMonitor(contextMenuMonitor)
             self.contextMenuMonitor = nil
+        }
+    }
+}
+
+/// Receives menu actions that have to be delivered through AppKit's target/action rather
+/// than a SwiftUI `Button`.
+@MainActor
+private final class MenuCommandRelay: NSObject {
+    @objc func closeTab(_ sender: Any?) {
+        NotificationCenter.default.post(name: .majorTomCloseTab, object: nil)
+    }
+}
+
+/// Turns the standard File ▸ Close item into this app's Close Tab command.
+///
+/// SwiftUI injects a Close item for a `WindowGroup`, bound to ⌘W and to
+/// `performClose:`. Keeping that item is the right call — it is where a Mac user looks —
+/// but its title and its action are both wrong for a tabbed browser: `performClose:`
+/// closes the whole window, so retitling alone would produce a "Close Tab" that discards
+/// every tab in the window. Both are changed together.
+///
+/// Re-applied whenever a window becomes key, because SwiftUI rebuilds the main menu as
+/// scenes change and would otherwise restore the original title and action. Idempotent, so
+/// repeating it costs nothing.
+@MainActor
+private enum FileMenuCustomization {
+    /// Menu items do not retain their target, so the relay has to be owned here.
+    private static let relay = MenuCommandRelay()
+
+    static func apply() {
+        guard let fileMenu = NSApplication.shared.mainMenu?.item(withTitle: "File")?.submenu else {
+            return
+        }
+        // Matched on the action selector rather than the title, since titles are localised
+        // and this one is about to be replaced anyway.
+        for item in fileMenu.items where item.action == #selector(NSWindow.performClose(_:)) {
+            item.title = "Close Tab"
+            item.target = relay
+            item.action = #selector(MenuCommandRelay.closeTab(_:))
+            item.keyEquivalent = "w"
+            item.keyEquivalentModifierMask = [.command]
         }
     }
 }
