@@ -2,6 +2,8 @@ import Foundation
 
 public enum AddressInputResult: Equatable, Sendable {
     case gemini(GeminiRequestTarget)
+    /// Fetch this resource but present its bytes as source rather than rendering them.
+    case viewSource(GeminiRequestTarget)
     case external(URL)
 }
 
@@ -21,6 +23,18 @@ public struct AddressInputInterpreter: Sendable {
     public func interpret(_ input: String) throws -> AddressInputResult {
         let value = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { throw AddressInputError.empty }
+
+        // Checked before the "://" test below, which would otherwise classify
+        // view-source:gemini://… as an external URL and hand it to the system opener.
+        // Only gemini resources can be viewed as source; a web page would have to be
+        // fetched through the proxy, and its source would be the proxy's Gemtext rather
+        // than the page's own markup, which is not what the address asks for.
+        if let inner = ViewSourceURL.unwrap(text: value) {
+            guard let target = try? GeminiRequestTarget(inner) else {
+                throw AddressInputError.invalidGeminiURL
+            }
+            return .viewSource(target)
+        }
 
         if value.lowercased().hasPrefix("gemini:") {
             guard let target = try? GeminiRequestTarget(value) else {

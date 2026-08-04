@@ -326,6 +326,8 @@ final class BrowserModel: ObservableObject {
             switch try interpreter.interpret(locationText) {
             case .gemini(let target):
                 navigate(to: target, disposition: .new)
+            case .viewSource(let target):
+                navigate(to: target, disposition: .new, renderAsSource: true)
             case .external(let url):
                 openExternalURL(url)
             }
@@ -339,10 +341,17 @@ final class BrowserModel: ObservableObject {
     }
 
     func reload() {
-        if let committedURL,
-           committedURL.scheme?.lowercased() == "view-source",
-           let cached = cachedPages[committedURL] {
-            displayCachedPage(cached)
+        if let committedURL, ViewSourceURL.isViewSource(committedURL) {
+            if let cached = cachedPages[committedURL] {
+                displayCachedPage(cached)
+                return
+            }
+            // No cached bytes, e.g. a session restored after the cache was cleared:
+            // fetch the resource again and re-present it as source.
+            if let resource = ViewSourceURL.unwrap(committedURL),
+               let target = try? GeminiRequestTarget(resource.absoluteString) {
+                navigate(to: target, disposition: .reload, renderAsSource: true)
+            }
             return
         }
         if let committedURL, committedURL.isFileURL {
@@ -656,22 +665,50 @@ final class BrowserModel: ObservableObject {
     func showPageSource() {
         guard canShowSource,
               let resourceURL = committedURL,
-              resourceURL.scheme?.lowercased() != "view-source",
-              let sourceURL = URL(string: "view-source:\(resourceURL.absoluteString)") else { return }
-        renderSourceDocument(currentSourceBytes, at: sourceURL)
-        commit(sourceURL, disposition: .new)
+              !ViewSourceURL.isViewSource(resourceURL) else { return }
+        presentSource(
+            currentSourceBytes,
+            of: resourceURL,
+            mimeType: currentMIMEType,
+            disposition: .new
+        )
+    }
+
+    /// Presents `bytes` as the source of `resourceURL`, committed at its `view-source:`
+    /// URL so it has its own history entry and can be revisited.
+    ///
+    /// Shared by Show Page Source, which already holds the bytes, and by a
+    /// `view-source:` address typed into the location field, which has just fetched
+    /// them. The cache entry records the *resource's* MIME type rather than text/plain,
+    /// so Save Page As suggests .gmi for Gemtext source whether the page is fresh or
+    /// restored from cache — the source of a .gmi document is that .gmi document.
+    private func presentSource(
+        _ bytes: Data,
+        of resourceURL: URL,
+        mimeType: String,
+        disposition: HistoryDisposition
+    ) {
+        guard let sourceURL = ViewSourceURL.wrap(resourceURL) else { return }
+        renderSourceDocument(bytes, at: sourceURL)
+        let heading = "Source: \(displayTitle(for: resourceURL))"
+        // commit() resets the title, so the heading is applied after it.
+        commit(sourceURL, disposition: disposition)
         cachedPages[sourceURL] = CachedPage(
             url: sourceURL,
-            mimeType: "text/plain",
-            body: currentSourceBytes,
+            mimeType: mimeType,
+            body: bytes,
             completion: .complete,
             receivedAt: Date(),
-            title: "Source: \(displayTitle(for: resourceURL))"
+            title: heading
         )
-        canSavePage = !currentSourceBytes.isEmpty
+        currentSourceBytes = bytes
+        currentMIMEType = mimeType
+        canSavePage = !bytes.isEmpty
         canShowSource = false
-        title = "Source: \(displayTitle(for: resourceURL))"
+        title = heading
         statusText = "Page source"
+        isLoading = false
+        navigationTask = nil
     }
 
     private func renderSourceDocument(_ bytes: Data, at sourceURL: URL) {
@@ -848,11 +885,23 @@ final class BrowserModel: ObservableObject {
             openFile(url, disposition: .traversal)
             return
         }
+        // A view-source entry whose cached bytes are gone. makeTarget cannot build a
+        // request for the view-source scheme, so without this the entry would be
+        // unreachable and Back would appear to do nothing.
+        if let resource = ViewSourceURL.unwrap(url),
+           let target = try? GeminiRequestTarget(resource.absoluteString) {
+            navigate(to: target, disposition: .traversal, renderAsSource: true)
+            return
+        }
         guard let target = makeTarget(for: url) else { return }
         navigate(to: target, disposition: .traversal)
     }
 
-    private func navigate(to target: GeminiRequestTarget, disposition: HistoryDisposition) {
+    private func navigate(
+        to target: GeminiRequestTarget,
+        disposition: HistoryDisposition,
+        renderAsSource: Bool = false
+    ) {
         navigationTask?.cancel()
         slowDownTask?.cancel()
         slowDownTask = nil
@@ -877,7 +926,8 @@ final class BrowserModel: ObservableObject {
                 target: target,
                 disposition: disposition,
                 visited: [],
-                redirectCount: 0
+                redirectCount: 0,
+                renderAsSource: renderAsSource
             )
         }
     }
@@ -886,7 +936,8 @@ final class BrowserModel: ObservableObject {
         target: GeminiRequestTarget,
         disposition: HistoryDisposition,
         visited: Set<URL>,
-        redirectCount: Int
+        redirectCount: Int,
+        renderAsSource: Bool = false
     ) async {
         guard !Task.isCancelled else { return }
         guard redirectCount <= 10, !visited.contains(target.url) else {
@@ -952,7 +1003,8 @@ final class BrowserModel: ObservableObject {
                             target: redirectTarget,
                             disposition: disposition,
                             visited: nextVisited,
-                            redirectCount: redirectCount + 1
+                            redirectCount: redirectCount + 1,
+                            renderAsSource: renderAsSource
                         )
                         return
                     }
@@ -1026,7 +1078,12 @@ final class BrowserModel: ObservableObject {
 
                     mimeType = header.meta.split(separator: ";", maxSplits: 1).first
                         .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
-                    if mimeType == "text/gemini" || mimeType.hasPrefix("text/") {
+                    if renderAsSource {
+                        // No document is begun and nothing is committed yet: the source
+                        // view needs the complete text, so a fetch that fails partway
+                        // leaves the page currently on screen untouched.
+                        statusText = "Receiving source\u{2026}"
+                    } else if mimeType == "text/gemini" || mimeType.hasPrefix("text/") {
                         currentSourceBytes = Data()
                         currentMIMEType = mimeType
                         canSavePage = false
@@ -1049,6 +1106,8 @@ final class BrowserModel: ObservableObject {
                     guard let header = responseHeader, header.isSuccess else { continue }
                     sourceBytes.append(data)
                     currentSourceBytes = sourceBytes
+                    // Source view renders once, from the finished bytes.
+                    guard !renderAsSource else { continue }
                     if mimeType == "text/gemini" {
                         let decoded = utf8Decoder.decode(data)
                         for parsedEvent in gemtextParser.receive(decoded) {
@@ -1061,6 +1120,25 @@ final class BrowserModel: ObservableObject {
 
                 case .completed:
                     guard let header = responseHeader, header.isSuccess else { return }
+                    if renderAsSource {
+                        guard mimeType.hasPrefix("text/") else {
+                            showGeneratedPage(
+                                title: "Source Not Available",
+                                message: "Major Tom can only show the source of a text response.",
+                                details: "\(mimeType.isEmpty ? header.meta : mimeType)\n\(sourceBytes.count) bytes",
+                                url: target.url,
+                                disposition: disposition
+                            )
+                            return
+                        }
+                        presentSource(
+                            sourceBytes,
+                            of: target.url,
+                            mimeType: mimeType,
+                            disposition: disposition
+                        )
+                        return
+                    }
                     if mimeType == "text/gemini" {
                         let tail = utf8Decoder.finish()
                         let finalEvents = gemtextParser.receive(tail) + gemtextParser.finish()
@@ -1344,8 +1422,8 @@ final class BrowserModel: ObservableObject {
         // title already known or a fence caption could displace a real heading.
         titleClaim = GemtextTitleClaim(existingTitle: cached.documentTitle)
         canSavePage = !cached.body.isEmpty
-        canShowSource = cached.mimeType.hasPrefix("text/") && cached.url.scheme?.lowercased() != "view-source"
-        if cached.url.scheme?.lowercased() == "view-source" {
+        canShowSource = cached.mimeType.hasPrefix("text/") && !ViewSourceURL.isViewSource(cached.url)
+        if ViewSourceURL.isViewSource(cached.url) {
             renderSourceDocument(cached.body, at: cached.url)
         } else {
             renderCurrentContent()
@@ -1428,7 +1506,7 @@ final class BrowserModel: ObservableObject {
 
     private func renderCurrentContent() {
         guard let committedURL else { return }
-        if committedURL.scheme?.lowercased() == "view-source" {
+        if ViewSourceURL.isViewSource(committedURL) {
             renderSourceDocument(currentSourceBytes, at: committedURL)
             return
         }
