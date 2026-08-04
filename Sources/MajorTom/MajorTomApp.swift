@@ -25,6 +25,12 @@ struct MajorTomApp: App {
         }
         .defaultSize(width: 1_100, height: 760)
         .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("About Major Tom") {
+                    NotificationCenter.default.post(name: .majorTomAbout, object: nil)
+                }
+            }
+
             CommandGroup(after: .newItem) {
                 Button("New Tab") {
                     NotificationCenter.default.post(name: .majorTomNewTab, object: nil)
@@ -128,10 +134,21 @@ struct MajorTomApp: App {
 
 private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate {
     private var commandKeyMonitor: Any?
+    private var aboutObserver: (any NSObjectProtocol)?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
         installCommandKeyMonitor()
+        // Observed here rather than in a window's view so About still opens when every
+        // browser window has been closed — the app deliberately keeps running.
+        aboutObserver = NotificationCenter.default.addObserver(
+            forName: .majorTomAbout,
+            object: nil,
+            queue: .main
+        ) { _ in
+            // Delivered on the main queue, so main-actor isolation is guaranteed here.
+            MainActor.assumeIsolated { AboutWindowPresenter.show() }
+        }
         DispatchQueue.main.async {
             NSApplication.shared.activate()
             NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
@@ -959,6 +976,7 @@ private extension View {
 }
 
 private extension Notification.Name {
+    static let majorTomAbout = Notification.Name("MajorTomAbout")
     static let majorTomNewTab = Notification.Name("MajorTomNewTab")
     static let majorTomCloseTab = Notification.Name("MajorTomCloseTab")
     static let majorTomCloseWindow = Notification.Name("MajorTomCloseWindow")
