@@ -18,13 +18,22 @@ case "$configuration" in
 esac
 
 cd "$project_root"
+# Clang module caches embed the checkout's absolute path. The same working tree can
+# be reached through different paths when it is shared over SMB, so sharing one
+# SwiftPM scratch directory causes otherwise valid cached modules to fail with
+# "compiled with module cache path ... but the path is currently ...". Keep a
+# separate scratch directory for each absolute checkout path while retaining the
+# finished app at the conventional .build/Major Tom.app location.
+scratch_key="$(printf '%s' "$project_root" | shasum -a 256 | cut -c1-12)"
+scratch_path="$project_root/.build/swiftpm-$scratch_key"
+
 # Indexing-while-building exists to feed an editor's index and does nothing for a
 # packaging build. It also writes thousands of small files into .build and renames each
 # into place, which fails outright when a checkout lives on a volume where another
 # process — an editor's own index-build — is writing the same store concurrently. The
 # build then dies with "failed writing record … File exists" despite the sources being
 # fine, so it is switched off here rather than left to break the bundle.
-swift_arguments=(build -c "$swift_configuration" --disable-index-store)
+swift_arguments=(build -c "$swift_configuration" --disable-index-store --scratch-path "$scratch_path")
 if [[ "${MAJOR_TOM_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
     swift_arguments+=(--disable-sandbox)
 fi
@@ -32,7 +41,7 @@ swift "${swift_arguments[@]}"
 
 app="$project_root/.build/Major Tom.app"
 contents="$app/Contents"
-executable="$project_root/.build/$swift_configuration/MajorTom"
+executable="$scratch_path/$swift_configuration/MajorTom"
 
 rm -rf "$app"
 mkdir -p "$contents/MacOS" "$contents/Resources"
