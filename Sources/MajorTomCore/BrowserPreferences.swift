@@ -78,6 +78,8 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
     public var renderingOptions: HTMLRenderingOptions
     /// Shows each capsule's `favicon.txt` emoji beside its address and on its tab.
     public var showsFavicons: Bool
+    /// Shows the Favourites bar under the toolbar.
+    public var showsFavoritesBar: Bool
 
     public init(
         homepage: String = "gemini://gemi.dev/",
@@ -89,7 +91,8 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         automaticallyLoadsSameCapsuleImages: Bool = true,
         automaticallyLoadsDataImages: Bool = true,
         renderingOptions: HTMLRenderingOptions = HTMLRenderingOptions(),
-        showsFavicons: Bool = true
+        showsFavicons: Bool = true,
+        showsFavoritesBar: Bool = false
     ) {
         self.homepage = homepage
         self.searchProvider = searchProvider
@@ -101,6 +104,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         self.automaticallyLoadsDataImages = automaticallyLoadsDataImages
         self.renderingOptions = renderingOptions
         self.showsFavicons = showsFavicons
+        self.showsFavoritesBar = showsFavoritesBar
     }
 
     /// Decodes leniently, key by key, so that adding a preference cannot discard the
@@ -141,5 +145,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         ) ?? defaults.renderingOptions
         showsFavicons = try container.decodeIfPresent(Bool.self, forKey: .showsFavicons)
             ?? defaults.showsFavicons
+        showsFavoritesBar = try container.decodeIfPresent(Bool.self, forKey: .showsFavoritesBar)
+            ?? defaults.showsFavoritesBar
     }
 }

@@ -16,6 +16,10 @@ private struct BrowserWindowDestination: Codable, Hashable {
 @main
 struct MajorTomApp: App {
     @NSApplicationDelegateAdaptor(MajorTomApplicationDelegate.self) private var appDelegate
+    /// Observed so the Bookmarks menu lists the current favourites and reflects the
+    /// Favourites-bar toggle.
+    @ObservedObject private var bookmarks = BookmarksModel.shared
+    @ObservedObject private var settings = BrowserSettingsStore.shared
 
     var body: some Scene {
         WindowGroup(for: BrowserWindowDestination.self) { destination in
@@ -111,6 +115,34 @@ struct MajorTomApp: App {
                     NotificationCenter.default.post(name: .majorTomActualSize, object: nil)
                 }
                 .keyboardShortcut("0", modifiers: .command)
+            }
+
+            CommandMenu("Bookmarks") {
+                Button("Add Bookmark…") {
+                    NotificationCenter.default.post(name: .majorTomAddBookmark, object: nil)
+                }
+                .keyboardShortcut("d", modifiers: .command)
+
+                Button("Show Bookmarks") {
+                    NotificationCenter.default.post(name: .majorTomShowBookmarks, object: nil)
+                }
+                .keyboardShortcut("b", modifiers: [.command, .option])
+
+                Toggle("Show Favorites Bar", isOn: settings.binding(\.showsFavoritesBar))
+                    .keyboardShortcut("b", modifiers: [.command, .shift])
+
+                Divider()
+
+                // The Favourites folder inline, as Safari lists it, so a saved capsule is
+                // one menu away rather than behind the manager.
+                ForEach(bookmarks.collection.favorites.bookmarks) { bookmark in
+                    Button(bookmark.title) {
+                        NotificationCenter.default.post(
+                            name: .majorTomOpenBookmark,
+                            object: bookmark.url
+                        )
+                    }
+                }
             }
 
             CommandMenu("History") {
@@ -571,9 +603,20 @@ private struct BrowserTabView: View {
     @ObservedObject var browser: BrowserModel
     let chromeTopInset: CGFloat
     @Environment(\.controlActiveState) private var controlActiveState
+    @ObservedObject private var bookmarks = BookmarksModel.shared
+    @ObservedObject private var settings = BrowserSettingsStore.shared
     @FocusState private var locationIsFocused: Bool
     @State private var showsFind = false
     @State private var contextMenuMonitor: Any?
+    @State private var addBookmarkTarget: AddBookmarkTarget?
+
+    /// Identifies the sheet rather than the bookmark: a fresh id each time means invoking
+    /// Add Bookmark twice for the same page still re-presents it.
+    private struct AddBookmarkTarget: Identifiable {
+        let id = UUID()
+        let url: URL
+        let title: String
+    }
     /// Measured height of the floating chrome, used to keep the find bar clear of it.
     /// Measured rather than hard-coded because the chrome grows when a validation
     /// message appears beneath the toolbar.
@@ -586,7 +629,18 @@ private struct BrowserTabView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            StreamingWebViewPrototype(browser: browser, findNavigatorIsPresented: $showsFind)
+            if let internalPage = browser.internalPage {
+                // One of Major Tom's own pages: a native view stands in for the web view,
+                // inset to clear the floating chrome since it does not scroll under it.
+                switch internalPage {
+                case .bookmarks:
+                    BookmarksManagerView(bookmarks: bookmarks) { url, inNewTab in
+                        openBookmark(url, inNewTab: inNewTab)
+                    }
+                    .padding(.top, chromeHeight)
+                }
+            } else {
+                StreamingWebViewPrototype(browser: browser, findNavigatorIsPresented: $showsFind)
                 // WebKit anchors the find bar to the top of the web view. The web view
                 // deliberately extends up underneath the floating chrome, so the bar was
                 // landing on top of the tab strip and toolbar. Insetting the web view
@@ -642,6 +696,7 @@ private struct BrowserTabView: View {
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
                     .padding(8)
                 }
+            }
 
             VStack(spacing: 0) {
             HStack(spacing: 8) {
@@ -748,6 +803,13 @@ private struct BrowserTabView: View {
                     .accessibilityElement(children: .combine)
                 }
 
+                if settings.preferences.showsFavoritesBar {
+                    Divider()
+                    FavoritesBar(bookmarks: bookmarks) { url, inNewTab in
+                        openBookmark(url, inNewTab: inNewTab)
+                    }
+                }
+
                 Divider()
             }
             .background(.ultraThinMaterial)
@@ -767,6 +829,12 @@ private struct BrowserTabView: View {
         .onCommand(.majorTomStop, when: isKeyWindow) { browser.stop() }
         .onCommand(.majorTomShowSource, when: isKeyWindow) { browser.showPageSource() }
         .onCommand(.majorTomArchive, when: isKeyWindow) { browser.openArchive() }
+        .onCommand(.majorTomAddBookmark, when: isKeyWindow) { requestAddBookmark() }
+        .onCommand(.majorTomShowBookmarks, when: isKeyWindow) { browser.showInternalPage(.bookmarks) }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomOpenBookmark)) { notification in
+            guard isKeyWindow, let url = notification.object as? URL else { return }
+            openBookmark(url, inNewTab: false)
+        }
         .onCommand(.majorTomSavePage, when: isKeyWindow) { Task { await browser.savePage() } }
         .onCommand(.majorTomPrint, when: isKeyWindow) { browser.printPage() }
         .onCommand(.majorTomFind, when: isKeyWindow) { showsFind = true }
@@ -781,6 +849,15 @@ private struct BrowserTabView: View {
         // Deliberately not window-scoped: a content-theme change must repaint every
         // open document, not just the one in front (spec 6.3).
         .onCommand(.majorTomContentThemeChanged, when: true) { browser.refreshContentTheme() }
+        .sheet(item: $addBookmarkTarget) { target in
+            AddBookmarkView(
+                url: target.url,
+                suggestedTitle: target.title,
+                bookmarks: bookmarks
+            ) {
+                addBookmarkTarget = nil
+            }
+        }
         .sheet(item: $browser.pageInformation) { information in
             PageInfoView(information: information) { browser.pageInformation = nil }
         }
@@ -799,6 +876,24 @@ private struct BrowserTabView: View {
                 }
             }
         }
+    }
+
+    /// Offers to bookmark the page on screen.
+    ///
+    /// Major Tom's own pages are excluded: `about:bookmarks` is reachable from the menu,
+    /// and a bookmark to the bookmark manager is noise.
+    private func requestAddBookmark() {
+        guard let url = browser.committedURL, InternalPage.page(for: url) == nil else { return }
+        addBookmarkTarget = AddBookmarkTarget(url: url, title: browser.title)
+    }
+
+    private func openBookmark(_ url: URL, inNewTab: Bool) {
+        if inNewTab {
+            browser.openInNewTab?(url, true)
+            return
+        }
+        browser.locationText = url.absoluteString
+        browser.submitLocation()
     }
 
     private func installContextMenuMonitor() {
@@ -1034,6 +1129,9 @@ private extension Notification.Name {
     static let majorTomStop = Notification.Name("MajorTomStop")
     static let majorTomShowSource = Notification.Name("MajorTomShowSource")
     static let majorTomArchive = Notification.Name("MajorTomArchive")
+    static let majorTomAddBookmark = Notification.Name("MajorTomAddBookmark")
+    static let majorTomShowBookmarks = Notification.Name("MajorTomShowBookmarks")
+    static let majorTomOpenBookmark = Notification.Name("MajorTomOpenBookmark")
     static let majorTomSavePage = Notification.Name("MajorTomSavePage")
     static let majorTomPrint = Notification.Name("MajorTomPrint")
     static let majorTomFind = Notification.Name("MajorTomFind")

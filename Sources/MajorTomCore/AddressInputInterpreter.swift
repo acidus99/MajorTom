@@ -4,6 +4,8 @@ public enum AddressInputResult: Equatable, Sendable {
     case gemini(GeminiRequestTarget)
     /// Fetch this resource but present its bytes as source rather than rendering them.
     case viewSource(GeminiRequestTarget)
+    /// A page Major Tom serves itself, such as `about:bookmarks`.
+    case internalPage(InternalPage)
     case external(URL)
 }
 
@@ -34,6 +36,12 @@ public struct AddressInputInterpreter: Sendable {
                 throw AddressInputError.invalidGeminiURL
             }
             return .viewSource(target)
+        }
+
+        // Checked before the search fallback, which would otherwise send "about:bookmarks"
+        // off to a search engine.
+        if let url = URL(string: value), let page = InternalPage.page(for: url) {
+            return .internalPage(page)
         }
 
         if value.lowercased().hasPrefix("gemini:") {

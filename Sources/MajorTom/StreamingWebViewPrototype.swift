@@ -186,6 +186,8 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var documentTitle: String?
     /// The current capsule's favicon emoji, when it offers one.
     @Published private(set) var favicon: String?
+    /// Set when the tab is showing one of Major Tom's own pages instead of a document.
+    @Published private(set) var internalPage: InternalPage?
     @Published private(set) var canSavePage = false
     @Published private(set) var canShowSource = false
     @Published var validationMessage: String?
@@ -368,7 +370,9 @@ final class BrowserModel: ObservableObject {
         // session saved mid-history lost every entry ahead of the cursor before the
         // user touched anything. Re-fetch as a traversal, which leaves history alone.
         if let committedURL, !history.isEmpty {
-            if committedURL.isFileURL {
+            if let page = InternalPage.page(for: committedURL) {
+                showInternalPage(page, disposition: .traversal)
+            } else if committedURL.isFileURL {
                 openFile(committedURL, disposition: .traversal)
             } else if let target = makeTarget(for: committedURL) {
                 navigate(to: target, disposition: .traversal)
@@ -404,6 +408,8 @@ final class BrowserModel: ObservableObject {
                 navigate(to: target, disposition: .new)
             case .viewSource(let target):
                 navigate(to: target, disposition: .new, renderAsSource: true)
+            case .internalPage(let page):
+                showInternalPage(page)
             case .external(let url):
                 openExternalURL(url)
             }
@@ -417,6 +423,10 @@ final class BrowserModel: ObservableObject {
     }
 
     func reload() {
+        if let internalPage {
+            showInternalPage(internalPage, disposition: .reload)
+            return
+        }
         if let committedURL, ViewSourceURL.isViewSource(committedURL) {
             if let cached = cachedPages[committedURL] {
                 displayCachedPage(cached)
@@ -455,6 +465,7 @@ final class BrowserModel: ObservableObject {
         retryNotBefore = nil
         isLoading = false
         validationMessage = nil
+        internalPage = nil
 
         let mimeType = Self.mimeType(forPathExtension: url.pathExtension)
 
@@ -949,6 +960,39 @@ final class BrowserModel: ObservableObject {
         hoveredLinkURL = href
     }
 
+    /// Shows one of Major Tom's own pages, such as the bookmark manager.
+    ///
+    /// Committed like any other address so it takes part in history, Back and Forward. The
+    /// tab replaces the web view with a native view while one of these is showing, because
+    /// the document pipeline forbids script and could not host an interactive manager.
+    func showInternalPage(_ page: InternalPage, disposition: HistoryDisposition = .new) {
+        navigationTask?.cancel()
+        navigationTask = nil
+        imageTasks.forEach { $0.cancel() }
+        imageTasks.removeAll()
+        slowDownTask?.cancel()
+        slowDownTask = nil
+        documentContinuation?.finish()
+        documentContinuation = nil
+        retryNotBefore = nil
+        isLoading = false
+        validationMessage = nil
+        hoveredLinkURL = nil
+        favicon = nil
+        serverIdentity = nil
+        responseStatus = nil
+        responseMeta = ""
+        currentSourceBytes = Data()
+        currentMIMEType = ""
+        canSavePage = false
+        canShowSource = false
+        internalPage = page
+
+        commit(page.url, disposition: disposition)
+        title = page.title
+        statusText = page.title
+    }
+
     /// Gathers what is known about the current page and presents the Page Info panel.
     ///
     /// The trusted record is read from the store rather than remembered, so the panel
@@ -1010,6 +1054,10 @@ final class BrowserModel: ObservableObject {
     }
 
     private func navigateHistory(to url: URL) {
+        if let page = InternalPage.page(for: url) {
+            showInternalPage(page, disposition: .traversal)
+            return
+        }
         if let cached = cachedPages[url] {
             displayCachedPage(cached)
             return
@@ -1047,6 +1095,8 @@ final class BrowserModel: ObservableObject {
         inputPrompt = nil
         inputValidationMessage = nil
         trustWasDeclined = false
+        // Leaving one of Major Tom's own pages for a real document.
+        internalPage = nil
         // Belongs to the page being replaced, and a stale identity in Page Info would
         // describe the wrong capsule.
         serverIdentity = nil
@@ -1590,6 +1640,7 @@ final class BrowserModel: ObservableObject {
 
     private func displayCachedPage(_ cached: CachedPage) {
         navigationTask?.cancel()
+        internalPage = nil
         isLoading = false
         committedURL = cached.url
         locationText = cached.url.absoluteString
