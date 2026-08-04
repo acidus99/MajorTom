@@ -666,6 +666,7 @@ final class BrowserModel: ObservableObject {
         addContextMenuItem("Reload Page", systemImage: "arrow.clockwise", enabled: canReload, to: menu) { [weak self] in self?.reload() }
         menu.addItem(.separator())
         addContextMenuItem("Show Page Source", systemImage: "doc.text.magnifyingglass", enabled: canShowSource, to: menu) { [weak self] in self?.showPageSource() }
+        addContextMenuItem("Check for Previous Versions", systemImage: "clock.arrow.circlepath", enabled: canCheckArchive, to: menu) { [weak self] in self?.openArchive() }
         addContextMenuItem("Save Page As…", systemImage: "square.and.arrow.down", enabled: canSavePage, to: menu) { [weak self] in Task { await self?.savePage() } }
         addContextMenuItem("Print Page…", systemImage: "printer", enabled: true, to: menu) { [weak self] in self?.printPage() }
         menu.popUp(positioning: nil, at: location, in: view)
@@ -1185,7 +1186,10 @@ final class BrowserModel: ObservableObject {
                             message: message,
                             details: "Gemini status \(header.status)\n\(target.url.absoluteString)",
                             url: target.url,
-                            disposition: disposition
+                            disposition: disposition,
+                            archiveURL: DeloreanArchive.isWorthOffering(status: header.status)
+                                ? DeloreanArchive.captures(of: target.url)
+                                : nil
                         )
                         return
                     }
@@ -1343,7 +1347,10 @@ final class BrowserModel: ObservableObject {
                     message: friendly(error),
                     details: target.url.absoluteString,
                     url: target.url,
-                    disposition: disposition
+                    disposition: disposition,
+                    archiveURL: offersArchive(after: error)
+                        ? DeloreanArchive.captures(of: target.url)
+                        : nil
                 )
             }
         }
@@ -1461,12 +1468,15 @@ final class BrowserModel: ObservableObject {
         documentContinuation = nil
     }
 
+    /// - Parameter archiveURL: when present, the page offers a link to past captures of
+    ///   the address that failed.
     private func showGeneratedPage(
         title: String,
         message: String,
         details: String,
         url: URL,
-        disposition: HistoryDisposition
+        disposition: HistoryDisposition,
+        archiveURL: URL? = nil
     ) {
         let continuation = beginDocument(at: url)
         continuation.yield(renderer.documentStart(
@@ -1481,6 +1491,19 @@ final class BrowserModel: ObservableObject {
         <div class="details">\(HTMLDocumentStreamRenderer.escape(details))</div>
         """
         continuation.yield(Data(html.utf8))
+        // Rendered through the ordinary link renderer, so it looks and behaves like any
+        // other Gemtext link: the navigation decider handles the click with no extra
+        // machinery, and it picks up the usual hint glyph.
+        if let archiveURL {
+            continuation.yield(renderer.render(
+                .link(
+                    destination: archiveURL.absoluteString,
+                    label: "Check for previous versions of this page"
+                ),
+                options: settings.preferences.renderingOptions,
+                baseURL: url
+            ))
+        }
         continuation.yield(renderer.documentEnd())
         continuation.finish()
         commit(url, disposition: disposition)
@@ -1567,6 +1590,36 @@ final class BrowserModel: ObservableObject {
             ? "Cached • \(cached.body.count) bytes"
             : "Cached \(cached.completion.rawValue) response"
         Task { await refreshFavicon(forCapsuleAt: cached.url) }
+    }
+
+    /// Whether a failed connection is one where an archived copy might help.
+    ///
+    /// Only failures to reach the capsule at all — DNS, TCP, or the TLS handshake, and a
+    /// capsule that stopped answering. Anything about identity is excluded on purpose: a
+    /// changed key or a declined trust decision is a security signal, and offering to read
+    /// the page from somewhere else instead would undercut the warning rather than help.
+    private func offersArchive(after error: any Error) -> Bool {
+        guard let transportError = error as? GeminiTransportError else { return false }
+        switch transportError {
+        case .connectionFailed, .timedOut:
+            return true
+        case .certificateUnavailable, .publicKeyFingerprintFailed, .trustDeclined,
+             .responseFailed, .responseTooLarge:
+            return false
+        }
+    }
+
+    /// Whether the current address is one the archive could hold captures of.
+    var canCheckArchive: Bool {
+        committedURL.flatMap(DeloreanArchive.captures(of:)) != nil
+    }
+
+    /// Opens Delorean's list of captures for the current address.
+    func openArchive() {
+        guard let committedURL,
+              let archiveURL = DeloreanArchive.captures(of: committedURL),
+              let target = try? GeminiRequestTarget(archiveURL.absoluteString) else { return }
+        navigate(to: target, disposition: .new)
     }
 
     private func friendly(_ error: any Error) -> String {

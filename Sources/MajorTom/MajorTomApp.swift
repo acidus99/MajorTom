@@ -88,6 +88,10 @@ struct MajorTomApp: App {
                 }
                 .keyboardShortcut("u", modifiers: [.command, .option])
 
+                Button("Check for Previous Versions") {
+                    NotificationCenter.default.post(name: .majorTomArchive, object: nil)
+                }
+
                 Button("Find…") {
                     NotificationCenter.default.post(name: .majorTomFind, object: nil)
                 }
@@ -751,6 +755,7 @@ private struct BrowserTabView: View {
         .onCommand(.majorTomReload, when: isKeyWindow) { browser.reload() }
         .onCommand(.majorTomStop, when: isKeyWindow) { browser.stop() }
         .onCommand(.majorTomShowSource, when: isKeyWindow) { browser.showPageSource() }
+        .onCommand(.majorTomArchive, when: isKeyWindow) { browser.openArchive() }
         .onCommand(.majorTomSavePage, when: isKeyWindow) { Task { await browser.savePage() } }
         .onCommand(.majorTomPrint, when: isKeyWindow) { browser.printPage() }
         .onCommand(.majorTomFind, when: isKeyWindow) { showsFind = true }
@@ -1017,6 +1022,7 @@ private extension Notification.Name {
     static let majorTomReload = Notification.Name("MajorTomReload")
     static let majorTomStop = Notification.Name("MajorTomStop")
     static let majorTomShowSource = Notification.Name("MajorTomShowSource")
+    static let majorTomArchive = Notification.Name("MajorTomArchive")
     static let majorTomSavePage = Notification.Name("MajorTomSavePage")
     static let majorTomPrint = Notification.Name("MajorTomPrint")
     static let majorTomFind = Notification.Name("MajorTomFind")
