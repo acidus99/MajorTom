@@ -21,7 +21,15 @@ The product requirements are in [`docs/design/major-tom-specification.md`](docs/
 - Atomic persistent trusted-identity store.
 - Per-tab history/cache/zoom, persistent browsing history, source viewing, saving, and downloads.
 - Application/content themes, inline formatting controls, and bounded same-capsule image loading.
-- HTTP CONNECT proxy, idle timeout, response-size limits, find, native commands, and browsing-data controls.
+- Gemini proxy for web links, idle timeout, response-size limits, find, native commands, and browsing-data controls.
+- Bookmarks with folders, a Favourites bar, and a manager at `about:bookmarks`.
+- Capsule favicons per the favicon RFC, cached for a week and never prefetched.
+- Page Info with domain, expiry and trust checks, and copyable certificate and public-key fingerprints.
+- Link hints for destination and type, and image links that expand in place on click.
+- Archived captures offered through Delorean when a capsule is gone or unreachable.
+- Seeded capsule identities read from `certs.csv` in Application Support.
+- Request-budget feedback and retained drafts when answering a capsule's input prompt.
+- `view-source:` and `about:` addresses, and local files opened by drag or from Finder.
 
 ## Build and test
 
