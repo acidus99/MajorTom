@@ -18,7 +18,13 @@ case "$configuration" in
 esac
 
 cd "$project_root"
-swift_arguments=(build -c "$swift_configuration")
+# Indexing-while-building exists to feed an editor's index and does nothing for a
+# packaging build. It also writes thousands of small files into .build and renames each
+# into place, which fails outright when a checkout lives on a volume where another
+# process — an editor's own index-build — is writing the same store concurrently. The
+# build then dies with "failed writing record … File exists" despite the sources being
+# fine, so it is switched off here rather than left to break the bundle.
+swift_arguments=(build -c "$swift_configuration" --disable-index-store)
 if [[ "${MAJOR_TOM_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
     swift_arguments+=(--disable-sandbox)
 fi
