@@ -169,6 +169,9 @@ final class BrowserModel: ObservableObject {
     private var trustWasDeclined = false
     private var currentSourceBytes = Data()
     private var currentMIMEType = ""
+    /// Tracks what has named the current document, so a level-one heading can still
+    /// take the title from a preformatted block's caption that streamed in earlier.
+    private var titleClaim = GemtextTitleClaim()
     private var imageTasks: [Task<Void, Never>] = []
     private let imageLimiter = AsyncSemaphore(limit: 4)
     private var slowDownTask: Task<Void, Never>?
@@ -1311,6 +1314,7 @@ final class BrowserModel: ObservableObject {
         committedURL = url
         title = displayTitle(for: url)
         documentTitle = nil
+        titleClaim = GemtextTitleClaim()
         locationText = url.absoluteString
         switch disposition {
         case .new:
@@ -1336,6 +1340,9 @@ final class BrowserModel: ObservableObject {
         currentMIMEType = cached.mimeType
         title = cached.title ?? displayTitle(for: cached.url)
         documentTitle = cached.documentTitle
+        // Re-rendering a cached page replays its events, so seed the claim with the
+        // title already known or a fence caption could displace a real heading.
+        titleClaim = GemtextTitleClaim(existingTitle: cached.documentTitle)
         canSavePage = !cached.body.isEmpty
         canShowSource = cached.mimeType.hasPrefix("text/") && cached.url.scheme?.lowercased() != "view-source"
         if cached.url.scheme?.lowercased() == "view-source" {
@@ -1490,13 +1497,9 @@ final class BrowserModel: ObservableObject {
     }
 
     private func emit(_ event: GemtextEvent, baseURL: URL) {
-        if case .heading(level: 1, text: let heading) = event,
-           title == displayTitle(for: baseURL) {
-            let candidate = heading.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !candidate.isEmpty {
-                title = candidate
-                documentTitle = candidate
-            }
+        if titleClaim.receive(event), let claimed = titleClaim.title {
+            title = claimed
+            documentTitle = claimed
         }
         documentContinuation?.yield(renderer.render(
             event,
