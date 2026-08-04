@@ -661,6 +661,19 @@ private struct BrowserTabView: View {
                     .frame(minWidth: 42)
                     .help("Home")
 
+                // Safari puts page-level information behind a control at the leading edge
+                // of the address field; info.circle is the system's idiom for it.
+                Button("Page Information", systemImage: "info.circle") {
+                    browser.showPageInformation()
+                }
+                .labelStyle(.iconOnly)
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 42)
+                .disabled(browser.committedURL == nil)
+                .help("Page Information")
+
                 // The capsule's favicon, immediately left of the address it belongs to.
                 if let favicon = browser.favicon {
                     Text(favicon)
@@ -752,6 +765,9 @@ private struct BrowserTabView: View {
         // Deliberately not window-scoped: a content-theme change must repaint every
         // open document, not just the one in front (spec 6.3).
         .onCommand(.majorTomContentThemeChanged, when: true) { browser.refreshContentTheme() }
+        .sheet(item: $browser.pageInformation) { information in
+            PageInfoView(information: information) { browser.pageInformation = nil }
+        }
         .sheet(item: $browser.trustPrompt) { prompt in
             TrustPromptView(prompt: prompt) { approved in
                 browser.respondToTrust(allow: approved)

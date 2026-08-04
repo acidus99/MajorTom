@@ -191,6 +191,12 @@ final class BrowserModel: ObservableObject {
     @Published var validationMessage: String?
     @Published var trustPrompt: TrustPrompt?
     @Published var inputPrompt: InputPrompt?
+    /// Set to present the Page Info panel; cleared when it is dismissed.
+    @Published var pageInformation: PageInformation?
+    /// The identity presented by the capsule serving the current page, kept for Page Info.
+    @Published private(set) var serverIdentity: PresentedServerIdentity?
+    private var responseStatus: Int?
+    private var responseMeta = ""
     @Published var inputValidationMessage: String?
     @Published private(set) var pageZoom = 1.0
     @Published private(set) var retryNotBefore: Date?
@@ -920,6 +926,30 @@ final class BrowserModel: ObservableObject {
         hoveredLinkURL = href
     }
 
+    /// Gathers what is known about the current page and presents the Page Info panel.
+    ///
+    /// The trusted record is read from the store rather than remembered, so the panel
+    /// reports the pinned key and sighting count even for a page served from cache, where
+    /// no live certificate was seen.
+    func showPageInformation() {
+        guard let committedURL else { return }
+        Task {
+            var trusted: TrustedServerIdentity?
+            if let endpoint = CapsuleEndpoint(url: committedURL) {
+                trusted = await trustStore?.identity(for: endpoint)
+            }
+            pageInformation = PageInformation(
+                url: committedURL,
+                status: responseStatus,
+                meta: responseMeta,
+                byteCount: currentSourceBytes.count,
+                mimeType: currentMIMEType,
+                identity: serverIdentity,
+                trusted: trusted
+            )
+        }
+    }
+
     func respondToTrust(allow: Bool) {
         trustPrompt = nil
         trustContinuation?.resume(returning: allow)
@@ -994,6 +1024,11 @@ final class BrowserModel: ObservableObject {
         inputPrompt = nil
         inputValidationMessage = nil
         trustWasDeclined = false
+        // Belongs to the page being replaced, and a stale identity in Page Info would
+        // describe the wrong capsule.
+        serverIdentity = nil
+        responseStatus = nil
+        responseMeta = ""
         // The document is going away, so its hover state is stale.
         hoveredLinkURL = nil
         // Drop the glyph only when leaving the capsule, so it does not flicker while
@@ -1059,10 +1094,13 @@ final class BrowserModel: ObservableObject {
                 switch event {
                 case .connecting:
                     statusText = "Connecting securely…"
-                case .serverIdentity:
+                case .serverIdentity(let identity):
+                    serverIdentity = identity
                     statusText = "Verifying capsule identity…"
                 case .responseHeader(let header):
                     responseHeader = header
+                    responseStatus = header.status
+                    responseMeta = header.meta
                     statusText = "Response \(header.status)"
 
                     if header.isRedirect {
