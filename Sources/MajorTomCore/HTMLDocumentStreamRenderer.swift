@@ -238,7 +238,7 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     :root { color-scheme: light dark; font: 17px/1.55 -apple-system, BlinkMacSystemFont, sans-serif; }
     body { margin: 0; padding-top: 7.25rem; color: CanvasText; background: Canvas; }
     main { box-sizing: border-box; max-width: 48rem; margin: 0 auto; padding: 3rem 2rem 6rem; }
-    h1, h2, h3 { line-height: 1.2; text-wrap: balance; }
+    h1, h2, h3 { line-height: 1.2; }
     h1 { font-size: 2rem; } h2 { font-size: 1.5rem; } h3 { font-size: 1.2rem; }
     p { margin: .7rem 0; }
     a { color: LinkText; text-underline-offset: .15em; }

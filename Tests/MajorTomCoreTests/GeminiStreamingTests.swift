@@ -91,6 +91,10 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertTrue(document.contains("body { color: red; }"))
     }
 
+    func testDefaultThemeLetsHeadingsWrapAtTheAvailableWidth() {
+        XCTAssertFalse(HTMLDocumentStreamRenderer.defaultThemeCSS.contains("text-wrap: balance"))
+    }
+
     func testPrintThemeOverridesDarkScreenTheme() {
         let css = ContentTheme.draculaDark.css(effectiveDarkAppearance: true)
         guard let darkBody = css.range(of: "body { color: var(--foreground); background: var(--background); }"),
