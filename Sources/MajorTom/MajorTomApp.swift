@@ -545,6 +545,10 @@ private struct BrowserTabView: View {
     @FocusState private var locationIsFocused: Bool
     @State private var showsFind = false
     @State private var contextMenuMonitor: Any?
+    /// Measured height of the floating chrome, used to keep the find bar clear of it.
+    /// Measured rather than hard-coded because the chrome grows when a validation
+    /// message appears beneath the toolbar.
+    @State private var chromeHeight: CGFloat = 0
 
     /// Menu commands are broadcast application-wide, so every window's selected tab
     /// receives them. Only the key window's tab may act, or one Command-R reloads
@@ -554,6 +558,12 @@ private struct BrowserTabView: View {
     var body: some View {
         ZStack(alignment: .top) {
             StreamingWebViewPrototype(browser: browser, findNavigatorIsPresented: $showsFind)
+                // WebKit anchors the find bar to the top of the web view. The web view
+                // deliberately extends up underneath the floating chrome, so the bar was
+                // landing on top of the tab strip and toolbar. Insetting the web view
+                // while the bar is open drops it just below the toolbar instead.
+                .padding(.top, showsFind ? chromeHeight : 0)
+                .animation(.easeOut(duration: 0.15), value: showsFind)
                 .dropDestination(for: URL.self) { urls, _ in
                     guard let file = urls.first(where: \.isFileURL) else { return false }
                     browser.openFile(file)
@@ -682,6 +692,11 @@ private struct BrowserTabView: View {
             }
             .background(.ultraThinMaterial)
             .padding(.top, chromeTopInset)
+            .onGeometryChange(for: CGFloat.self) { proxy in
+                proxy.size.height
+            } action: { height in
+                chromeHeight = height
+            }
         }
         .task { browser.start() }
         .onAppear { installContextMenuMonitor() }
