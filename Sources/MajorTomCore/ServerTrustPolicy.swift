@@ -15,17 +15,34 @@ public struct PresentedServerIdentity: Equatable, Sendable {
     public let publicKeySHA256: String
     public let certificateNotBefore: Date?
     public let certificateNotAfter: Date?
+    /// The certificate exactly as the server presented it.
+    ///
+    /// Carried rather than pre-digested so there is a single source of truth: Page Info
+    /// shows the certificate's own digest, the trust record stores an exportable copy,
+    /// and both derive from these bytes.
+    public let certificateDER: Data?
 
     public init(
         endpoint: CapsuleEndpoint,
         publicKeySHA256: String,
         certificateNotBefore: Date? = nil,
-        certificateNotAfter: Date? = nil
+        certificateNotAfter: Date? = nil,
+        certificateDER: Data? = nil
     ) {
         self.endpoint = endpoint
         self.publicKeySHA256 = publicKeySHA256.lowercased()
         self.certificateNotBefore = certificateNotBefore
         self.certificateNotAfter = certificateNotAfter
+        self.certificateDER = certificateDER
+    }
+
+    /// SHA-256 of the whole certificate, lowercase hex, when the certificate is known.
+    public var certificateSHA256: String? {
+        certificateDER.map(CertificateDetails.sha256(certificateDER:))
+    }
+
+    public var certificatePEM: String? {
+        certificateDER.map(CertificateDetails.pem(certificateDER:))
     }
 
     public func dateIssue(at date: Date) -> CertificateDateIssue? {
@@ -51,6 +68,17 @@ public struct TrustedServerIdentity: Equatable, Codable, Sendable {
     public var firstTrustedAt: Date
     public var lastSeenAt: Date
     public var timesSeen: Int
+    /// SHA-256 of the certificate last seen from this endpoint, lowercase hex.
+    public var certificateSHA256: String?
+    /// When that certificate expires, so an approaching expiry can be surfaced without
+    /// reconnecting.
+    public var certificateNotAfter: Date?
+    /// That certificate in PEM form, for inspection and export.
+    ///
+    /// All three describe the certificate *last seen*, not the one first trusted: trust
+    /// is pinned to the public key, which survives renewal, so the certificate carrying
+    /// it legitimately changes over time.
+    public var certificatePEM: String?
 
     public init(
         endpoint: CapsuleEndpoint,
@@ -58,7 +86,10 @@ public struct TrustedServerIdentity: Equatable, Codable, Sendable {
         source: Source,
         firstTrustedAt: Date,
         lastSeenAt: Date,
-        timesSeen: Int = 1
+        timesSeen: Int = 1,
+        certificateSHA256: String? = nil,
+        certificateNotAfter: Date? = nil,
+        certificatePEM: String? = nil
     ) {
         self.endpoint = endpoint
         self.publicKeySHA256 = publicKeySHA256.lowercased()
@@ -66,6 +97,9 @@ public struct TrustedServerIdentity: Equatable, Codable, Sendable {
         self.firstTrustedAt = firstTrustedAt
         self.lastSeenAt = lastSeenAt
         self.timesSeen = timesSeen
+        self.certificateSHA256 = certificateSHA256
+        self.certificateNotAfter = certificateNotAfter
+        self.certificatePEM = certificatePEM
     }
 }
 

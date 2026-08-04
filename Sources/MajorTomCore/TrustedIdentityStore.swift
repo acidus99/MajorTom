@@ -34,6 +34,16 @@ public actor TrustedIdentityStore {
            existing.publicKeySHA256.caseInsensitiveCompare(presented.publicKeySHA256) == .orderedSame {
             existing.lastSeenAt = date
             existing.timesSeen += 1
+            // Refreshed on every sighting, but only when a certificate was actually
+            // presented: a capsule that renewed while keeping its key serves a new
+            // certificate with a later expiry, and a stale stored copy would describe
+            // one the server no longer offers. Absent bytes must not erase what is
+            // already recorded.
+            if presented.certificateDER != nil {
+                existing.certificateSHA256 = presented.certificateSHA256
+                existing.certificateNotAfter = presented.certificateNotAfter
+                existing.certificatePEM = presented.certificatePEM
+            }
             records[presented.endpoint] = existing
         } else {
             records[presented.endpoint] = TrustedServerIdentity(
@@ -41,7 +51,10 @@ public actor TrustedIdentityStore {
                 publicKeySHA256: presented.publicKeySHA256,
                 source: source,
                 firstTrustedAt: date,
-                lastSeenAt: date
+                lastSeenAt: date,
+                certificateSHA256: presented.certificateSHA256,
+                certificateNotAfter: presented.certificateNotAfter,
+                certificatePEM: presented.certificatePEM
             )
         }
         try persist()

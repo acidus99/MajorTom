@@ -123,7 +123,8 @@ private final class GeminiConnectionSession: @unchecked Sendable {
                     endpoint: target.endpoint,
                     publicKeySHA256: fingerprint,
                     certificateNotBefore: dates.notBefore,
-                    certificateNotAfter: dates.notAfter
+                    certificateNotAfter: dates.notAfter,
+                    certificateDER: certificateDER
                 )
                 continuation.yield(.serverIdentity(identity))
 
