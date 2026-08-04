@@ -594,9 +594,19 @@ private struct BrowserTabView: View {
                 .padding(.top, showsFind ? chromeHeight : 0)
                 .animation(.easeOut(duration: 0.15), value: showsFind)
                 .dropDestination(for: URL.self) { urls, _ in
-                    guard let file = urls.first(where: \.isFileURL) else { return false }
-                    browser.openFile(file)
-                    return true
+                    // A dropped file becomes a file:// page, as in Safari. A dropped
+                    // gemini address is navigated to, which is what dragging a link
+                    // anywhere else on the Mac does.
+                    if let file = urls.first(where: \.isFileURL) {
+                        browser.openFile(file)
+                        return true
+                    }
+                    if let capsule = urls.first(where: { $0.scheme?.lowercased() == "gemini" }) {
+                        browser.locationText = capsule.absoluteString
+                        browser.submitLocation()
+                        return true
+                    }
+                    return false
                 }
                 // Safari puts the hovered link's destination bottom-left and leaves the
                 // right for page status (spec 18.4, 21).
@@ -749,6 +759,7 @@ private struct BrowserTabView: View {
             }
         }
         .task { browser.start() }
+        .task { await browser.releaseWebViewDragTypes() }
         .onAppear { installContextMenuMonitor() }
         .onDisappear { removeContextMenuMonitor() }
         .onCommand(.majorTomFocusLocation, when: isKeyWindow) { locationIsFocused = true }

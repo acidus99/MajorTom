@@ -643,6 +643,28 @@ final class BrowserModel: ObservableObject {
         operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
     }
 
+    /// Stops the hosted `WKWebView` from claiming dragged files.
+    ///
+    /// WKWebView registers for dragged types itself and consumes a drop before it can
+    /// reach SwiftUI's drop destination, so dropping a `.gmi` or an image on a tab appeared
+    /// to do nothing at all. Unregistering lets the drag fall through to the handler that
+    /// opens the file. Nothing is lost by it: the document is not editable, so there was no
+    /// legitimate drop for the web view to handle.
+    ///
+    /// The view does not exist until after the first layout pass, hence the bounded wait
+    /// rather than a single attempt.
+    func releaseWebViewDragTypes() async {
+        for _ in 0..<20 {
+            if let window = NSApplication.shared.keyWindow ?? NSApplication.shared.windows.first,
+               let root = window.contentView,
+               let webView = Self.findWebView(in: root) {
+                webView.unregisterDraggedTypes()
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     private static func findWebView(in view: NSView) -> WKWebView? {
         if let webView = view as? WKWebView { return webView }
         for subview in view.subviews {
