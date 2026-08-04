@@ -527,7 +527,15 @@ private struct BrowserTabButton: View {
                 .accessibilityLabel("Close \(browser.title)")
                 .accessibilityHidden(false)
 
-            if browser.isLoading { ProgressView().controlSize(.mini) }
+            // One slot: the spinner while loading, the capsule's favicon otherwise, which
+            // is how Safari uses the same space.
+            if browser.isLoading {
+                ProgressView().controlSize(.mini)
+            } else if let favicon = browser.favicon {
+                Text(favicon)
+                    .font(.system(size: 12))
+                    .accessibilityHidden(true)
+            }
             Text(browser.title)
                 .lineLimit(1)
             Spacer(minLength: 0)
@@ -652,6 +660,14 @@ private struct BrowserTabView: View {
                     .foregroundStyle(.secondary)
                     .frame(minWidth: 42)
                     .help("Home")
+
+                // The capsule's favicon, immediately left of the address it belongs to.
+                if let favicon = browser.favicon {
+                    Text(favicon)
+                        .font(.system(size: 15))
+                        .transition(.opacity)
+                        .accessibilityLabel("Capsule favicon \(favicon)")
+                }
 
                 TextField("Search or enter capsule address", text: $browser.locationText)
                     .textFieldStyle(.roundedBorder)

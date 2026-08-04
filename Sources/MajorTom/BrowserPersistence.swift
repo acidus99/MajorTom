@@ -23,6 +23,23 @@ enum SharedTrustedIdentityStore {
     }()
 }
 
+/// The one favicon cache for the whole application.
+///
+/// Shared for the same reason the trusted-identity store is: each instance holds the file
+/// in memory and rewrites it wholesale, so a second instance would overwrite the first's
+/// records.
+enum SharedFaviconStore {
+    static let shared: FaviconStore? = {
+        guard let root = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else { return nil }
+        return FaviconStore(fileURL: root
+            .appendingPathComponent("Major Tom", isDirectory: true)
+            .appendingPathComponent("favicons.json"))
+    }()
+}
+
 /// Capsule identities known ahead of first contact, read once per launch.
 ///
 /// Legacy Major Tom read the same `certs.csv` from Application Support, with the path

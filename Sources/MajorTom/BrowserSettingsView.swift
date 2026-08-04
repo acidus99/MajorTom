@@ -3,6 +3,7 @@ import SwiftUI
 
 struct BrowserSettingsView: View {
     @ObservedObject private var store = BrowserSettingsStore.shared
+    @State private var faviconCacheCleared = false
 
     var body: some View {
         TabView {
@@ -87,6 +88,20 @@ struct BrowserSettingsView: View {
 
     private var qualityOfLife: some View {
         Form {
+            Toggle("Show capsule favicons", isOn: store.binding(\.showsFavicons))
+            Text("A capsule may publish one emoji at /favicon.txt. Major Tom shows it beside the address and on the tab, asks for it only after you visit the capsule, and remembers the answer for a week.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Clear Favicon Cache") { clearFaviconCache() }
+                if faviconCacheCleared {
+                    Text("Cleared")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .transition(.opacity)
+                }
+            }
+
             Toggle("Automatically display same-capsule images", isOn: store.binding(\.automaticallyLoadsSameCapsuleImages))
             Toggle("Display inline data images", isOn: store.binding(\.automaticallyLoadsDataImages))
             Toggle(
@@ -122,6 +137,16 @@ struct BrowserSettingsView: View {
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
+    }
+
+    private func clearFaviconCache() {
+        Task {
+            try? await SharedFaviconStore.shared?.removeAll()
+            faviconCacheCleared = true
+            // Transient confirmation: this is an action, not a state to stay latched on.
+            try? await Task.sleep(for: .seconds(2))
+            faviconCacheCleared = false
+        }
     }
 
     private var proxyEnabled: Binding<Bool> {

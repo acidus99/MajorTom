@@ -76,6 +76,8 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
     public var automaticallyLoadsSameCapsuleImages: Bool
     public var automaticallyLoadsDataImages: Bool
     public var renderingOptions: HTMLRenderingOptions
+    /// Shows each capsule's `favicon.txt` emoji beside its address and on its tab.
+    public var showsFavicons: Bool
 
     public init(
         homepage: String = "gemini://gemi.dev/",
@@ -86,7 +88,8 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         proxy: GeminiProxyConfiguration? = nil,
         automaticallyLoadsSameCapsuleImages: Bool = true,
         automaticallyLoadsDataImages: Bool = true,
-        renderingOptions: HTMLRenderingOptions = HTMLRenderingOptions()
+        renderingOptions: HTMLRenderingOptions = HTMLRenderingOptions(),
+        showsFavicons: Bool = true
     ) {
         self.homepage = homepage
         self.searchProvider = searchProvider
@@ -97,5 +100,46 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         self.automaticallyLoadsSameCapsuleImages = automaticallyLoadsSameCapsuleImages
         self.automaticallyLoadsDataImages = automaticallyLoadsDataImages
         self.renderingOptions = renderingOptions
+        self.showsFavicons = showsFavicons
+    }
+
+    /// Decodes leniently, key by key, so that adding a preference cannot discard the
+    /// ones already stored.
+    ///
+    /// The synthesized decoder throws when a key it expects is missing, and the settings
+    /// store loads with `try?` — so before this existed, shipping one new preference
+    /// would silently reset the homepage, search provider, proxy and themes back to
+    /// their defaults for everyone who already had settings saved.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let defaults = BrowserPreferences()
+        homepage = try container.decodeIfPresent(String.self, forKey: .homepage)
+            ?? defaults.homepage
+        searchProvider = try container.decodeIfPresent(SearchProvider.self, forKey: .searchProvider)
+            ?? defaults.searchProvider
+        customSearchEndpoint = try container.decodeIfPresent(String.self, forKey: .customSearchEndpoint)
+            ?? defaults.customSearchEndpoint
+        applicationAppearance = try container.decodeIfPresent(
+            ApplicationAppearance.self,
+            forKey: .applicationAppearance
+        ) ?? defaults.applicationAppearance
+        contentTheme = try container.decodeIfPresent(ContentTheme.self, forKey: .contentTheme)
+            ?? defaults.contentTheme
+        // Genuinely optional: absent and "no proxy" are the same thing.
+        proxy = try container.decodeIfPresent(GeminiProxyConfiguration.self, forKey: .proxy)
+        automaticallyLoadsSameCapsuleImages = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .automaticallyLoadsSameCapsuleImages
+        ) ?? defaults.automaticallyLoadsSameCapsuleImages
+        automaticallyLoadsDataImages = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .automaticallyLoadsDataImages
+        ) ?? defaults.automaticallyLoadsDataImages
+        renderingOptions = try container.decodeIfPresent(
+            HTMLRenderingOptions.self,
+            forKey: .renderingOptions
+        ) ?? defaults.renderingOptions
+        showsFavicons = try container.decodeIfPresent(Bool.self, forKey: .showsFavicons)
+            ?? defaults.showsFavicons
     }
 }

@@ -184,6 +184,8 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var hoveredLinkURL: String?
     @Published private(set) var title = "New Tab"
     @Published private(set) var documentTitle: String?
+    /// The current capsule's favicon emoji, when it offers one.
+    @Published private(set) var favicon: String?
     @Published private(set) var canSavePage = false
     @Published private(set) var canShowSource = false
     @Published var validationMessage: String?
@@ -994,6 +996,11 @@ final class BrowserModel: ObservableObject {
         trustWasDeclined = false
         // The document is going away, so its hover state is stale.
         hoveredLinkURL = nil
+        // Drop the glyph only when leaving the capsule, so it does not flicker while
+        // moving between pages of the one capsule.
+        if CapsuleEndpoint(url: target.url) != committedURL.flatMap(CapsuleEndpoint.init(url:)) {
+            favicon = nil
+        }
         isLoading = true
         statusText = "Connecting to \(target.endpoint.host)…"
         locationText = target.url.absoluteString
@@ -1256,6 +1263,9 @@ final class BrowserModel: ObservableObject {
                         documentTitle: documentTitle
                     )
                     statusText = "Loaded \(sourceBytes.count) bytes"
+                    // Only now, once the reader has actually landed on this capsule: the
+                    // RFC forbids probing for a favicon any earlier.
+                    Task { await refreshFavicon(forCapsuleAt: target.url) }
                     navigationTask = nil
                     return
                 }
@@ -1518,6 +1528,7 @@ final class BrowserModel: ObservableObject {
         statusText = cached.completion == .complete
             ? "Cached • \(cached.body.count) bytes"
             : "Cached \(cached.completion.rawValue) response"
+        Task { await refreshFavicon(forCapsuleAt: cached.url) }
     }
 
     private func friendly(_ error: any Error) -> String {
@@ -1554,6 +1565,20 @@ final class BrowserModel: ObservableObject {
 
     private func preferencesChanged(to preferences: BrowserPreferences) {
         defer { lastPreferences = preferences }
+
+        // Handled ahead of the guard below, which is about re-rendering a document:
+        // turning favicons off should clear the glyph even on a page that cannot be
+        // re-rendered, such as a generated error page.
+        if preferences.showsFavicons != lastPreferences.showsFavicons {
+            if preferences.showsFavicons {
+                if let committedURL {
+                    Task { await refreshFavicon(forCapsuleAt: committedURL) }
+                }
+            } else {
+                favicon = nil
+            }
+        }
+
         guard committedURL != nil, canSavePage else { return }
 
         if preferences.contentTheme != lastPreferences.contentTheme {
@@ -1807,6 +1832,114 @@ final class BrowserModel: ObservableObject {
         guard let data = try? JSONEncoder().encode(value),
               let literal = String(data: data, encoding: .utf8) else { return "\"\"" }
         return literal
+    }
+
+    private enum FaviconProbe {
+        case found(String)
+        /// The capsule answered, but not with a conforming favicon.
+        case absent
+        /// The probe never got an answer, so nothing may be concluded or cached.
+        case failed
+    }
+
+    /// Brings `favicon` up to date for the capsule just navigated to, fetching
+    /// `favicon.txt` only when nothing fresh is cached.
+    ///
+    /// The RFC forbids prefetching: a client may not ask for a favicon until the user has
+    /// navigated to that server. This is called after a page commits, which is exactly
+    /// that moment.
+    private func refreshFavicon(forCapsuleAt url: URL) async {
+        guard settings.preferences.showsFavicons else {
+            favicon = nil
+            return
+        }
+        // Only real capsules. A proxied http page is fetched over a connection to the
+        // proxy, and the proxy's favicon is not the site's.
+        guard url.scheme?.lowercased() == "gemini",
+              let endpoint = CapsuleEndpoint(url: url),
+              let store = SharedFaviconStore.shared else {
+            favicon = nil
+            return
+        }
+
+        switch await store.favicon(for: endpoint) {
+        case .known(let emoji):
+            favicon = emoji
+            return
+        case .absent:
+            favicon = nil
+            return
+        case .unknown:
+            favicon = nil
+        }
+
+        guard let probeTarget = try? GeminiRequestTarget(
+            "gemini://\(endpoint.host):\(endpoint.port)\(GeminiFavicon.path)"
+        ) else { return }
+
+        let probe = await self.probeFavicon(probeTarget)
+        switch probe {
+        case .failed:
+            // A connection that never answered says nothing about whether a favicon
+            // exists, and caching that as "absent" would hide it for a week.
+            return
+        case .found(let emoji):
+            try? await store.record(emoji, for: endpoint)
+            applyFaviconIfStillCurrent(emoji, endpoint: endpoint)
+        case .absent:
+            try? await store.record(nil, for: endpoint)
+            applyFaviconIfStillCurrent(nil, endpoint: endpoint)
+        }
+    }
+
+    /// The probe outlives the navigation that started it, so a slow answer must not
+    /// decorate a page the reader has since left.
+    private func applyFaviconIfStillCurrent(_ emoji: String?, endpoint: CapsuleEndpoint) {
+        guard let current = committedURL.flatMap(CapsuleEndpoint.init(url:)),
+              current == endpoint else { return }
+        favicon = emoji
+    }
+
+    private func probeFavicon(_ target: GeminiRequestTarget) async -> FaviconProbe {
+        var body = Data()
+        var accepted = false
+        do {
+            let events = transport.events(
+                for: target,
+                // A favicon is one emoji. A capsule that answers this path with a large
+                // body is misbehaving, and there is no reason to read it.
+                configuration: GeminiTransportConfiguration(
+                    idleTimeout: .seconds(10),
+                    maximumResponseByteCount: 4 * 1_024
+                )
+            ) { [weak self] identity, _ in
+                guard let self else { return false }
+                return await self.authorize(identity)
+            }
+            for try await event in events {
+                switch event {
+                case .responseHeader(let header):
+                    // The RFC requires status 20 with a text/plain MIME type. Anything
+                    // else — most often 51 — means the capsule simply has no favicon,
+                    // which the RFC is explicit is not an error.
+                    let mime = header.meta.split(separator: ";", maxSplits: 1).first
+                        .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+                    guard header.isSuccess, mime == "text/plain" else { return .absent }
+                    accepted = true
+                case .body(let data):
+                    body.append(data)
+                default:
+                    break
+                }
+            }
+        } catch {
+            return .failed
+        }
+        guard accepted else { return .failed }
+        guard let emoji = GeminiFavicon.parse(String(decoding: body, as: UTF8.self)) else {
+            return .absent
+        }
+        return .found(emoji)
     }
 
     private func loadInlineImage(
