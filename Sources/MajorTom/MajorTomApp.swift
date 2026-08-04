@@ -36,6 +36,16 @@ struct MajorTomApp: App {
                 }
                 .keyboardShortcut("w", modifiers: .command)
 
+                Button("Close Window") {
+                    NotificationCenter.default.post(name: .majorTomCloseWindow, object: nil)
+                }
+                .keyboardShortcut("w", modifiers: [.command, .shift])
+
+                Button("Close All Windows") {
+                    NotificationCenter.default.post(name: .majorTomCloseAllWindows, object: nil)
+                }
+                .keyboardShortcut("w", modifiers: [.command, .option])
+
                 Divider()
 
                 Button("Open Location…") {
@@ -125,6 +135,26 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         DispatchQueue.main.async {
             NSApplication.shared.activate()
             NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
+            self.removeDuplicateCloseCommand()
+        }
+    }
+
+    /// Drops the standard File ▸ Close item that SwiftUI injects for a `WindowGroup`.
+    ///
+    /// It claims ⌘W, which this app gives to Close Tab, and two menu items sharing one
+    /// key equivalent resolve unpredictably. "Close" is also the wrong verb for a tabbed
+    /// browser: ⌘W closes the tab and ⇧⌘W closes the window. Matched on the action
+    /// selector rather than the title, since titles are localised.
+    ///
+    /// Deferred to the next run loop turn because SwiftUI builds the main menu after
+    /// applicationDidFinishLaunching returns.
+    @MainActor
+    private func removeDuplicateCloseCommand() {
+        guard let fileMenu = NSApplication.shared.mainMenu?.item(withTitle: "File")?.submenu else {
+            return
+        }
+        for item in fileMenu.items where item.action == #selector(NSWindow.performClose(_:)) {
+            fileMenu.removeItem(item)
         }
     }
 
@@ -229,6 +259,9 @@ private struct BrowserWindowView: View {
     @StateObject private var session: BrowserWindowSession
     @Environment(\.controlActiveState) private var controlActiveState
     @Environment(\.openWindow) private var openWindow
+    /// Close All Windows has to reach every browser window, not only the key one, so
+    /// each window needs a handle on the NSWindow it is hosted in.
+    @State private var hostWindow: NSWindow?
 
     init(initialURL: URL? = nil) {
         _session = StateObject(wrappedValue: BrowserWindowSession(initialURL: initialURL))
@@ -243,6 +276,7 @@ private struct BrowserWindowView: View {
             BrowserTabStrip(session: session)
         }
         .navigationTitle(session.selectedTab?.browser.title ?? "Major Tom")
+        .background(WindowAccessor(window: $hostWindow))
         .onAppear {
             session.openWindow = { url in
                 openWindow(value: BrowserWindowDestination(url: url))
@@ -258,6 +292,26 @@ private struct BrowserWindowView: View {
                 NSApplication.shared.keyWindow?.performClose(nil)
             }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomCloseWindow)) { _ in
+            guard hostWindow?.isKeyWindow == true else { return }
+            closeHostWindow()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomCloseAllWindows)) { _ in
+            // Deliberately not key-scoped: every browser window answers. Panels such as
+            // Settings and About are not browser windows, so they stay open, which is
+            // what Safari does.
+            closeHostWindow()
+        }
+    }
+
+    /// Stops each tab's network work before the window goes away.
+    ///
+    /// Closing the window tears down the SwiftUI scene without visiting the tabs, so
+    /// without this an in-flight request would keep streaming into a document nobody
+    /// can see. `closeSelectedTab()` already does this for one tab.
+    private func closeHostWindow() {
+        for tab in session.tabs { tab.browser.stop() }
+        hostWindow?.performClose(nil)
     }
 }
 
@@ -683,6 +737,29 @@ private struct BrowserTabView: View {
     }
 }
 
+/// Reports the `NSWindow` hosting a SwiftUI view.
+///
+/// SwiftUI gives a scene no handle on its own window, but Close Window and Close All
+/// Windows both need one: the first must act only when its window is key, and the
+/// second must act on every browser window at once.
+private struct WindowAccessor: NSViewRepresentable {
+    @Binding var window: NSWindow?
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        // A view has no window until it has joined the hierarchy, which has not
+        // happened yet at make time.
+        DispatchQueue.main.async { window = view.window }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        // Reassigning an unchanged value would republish state on every layout pass.
+        guard window !== nsView.window else { return }
+        DispatchQueue.main.async { window = nsView.window }
+    }
+}
+
 @available(macOS 26.0, *)
 final class ContextMenuTarget: NSObject {
     private let action: () -> Void
@@ -799,6 +876,8 @@ private extension View {
 private extension Notification.Name {
     static let majorTomNewTab = Notification.Name("MajorTomNewTab")
     static let majorTomCloseTab = Notification.Name("MajorTomCloseTab")
+    static let majorTomCloseWindow = Notification.Name("MajorTomCloseWindow")
+    static let majorTomCloseAllWindows = Notification.Name("MajorTomCloseAllWindows")
     static let majorTomFocusLocation = Notification.Name("MajorTomFocusLocation")
     static let majorTomReload = Notification.Name("MajorTomReload")
     static let majorTomStop = Notification.Name("MajorTomStop")
