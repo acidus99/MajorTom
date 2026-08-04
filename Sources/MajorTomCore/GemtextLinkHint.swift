@@ -42,6 +42,19 @@ public enum GemtextLinkHint: String, Equatable, Sendable {
         imageExtensions.contains(url.pathExtension.lowercased())
     }
 
+    /// Whether a link can be expanded in place when clicked.
+    ///
+    /// Restricted to gemini resources that look like images: a `data:image/` link is
+    /// already inline in the document, and fetching an http image would leave
+    /// Geminispace, which a click on a Gemtext link should never do silently.
+    public static func isInlineImageCandidate(destination: String, relativeTo baseURL: URL?) -> Bool {
+        let trimmed = destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let resolved = URL(string: trimmed, relativeTo: baseURL)?.absoluteURL,
+              resolved.scheme?.lowercased() == "gemini" else { return false }
+        return isProbableImage(resolved)
+    }
+
     /// Whether two URLs live on the same capsule, i.e. the same host *and* port.
     public static func isSameCapsule(_ lhs: URL, _ rhs: URL) -> Bool {
         guard let left = CapsuleEndpoint(url: lhs), let right = CapsuleEndpoint(url: rhs) else {

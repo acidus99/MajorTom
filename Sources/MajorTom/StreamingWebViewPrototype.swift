@@ -104,6 +104,54 @@ private final class LinkHoverScriptHandler: NSObject, WKScriptMessageHandler {
     }
 }
 
+/// Intercepts clicks on links the renderer marked as expandable images.
+///
+/// Page script is disabled, so this runs in the `.defaultClient` world like the context
+/// menu and hover handlers. It is the only way to learn *which* link element was clicked:
+/// a navigation action reports a URL, and the same image can be linked from several lines.
+///
+/// Modified clicks are deliberately left alone so Command-click still opens a new tab.
+@available(macOS 26.0, *)
+@MainActor
+private final class InlineImageScriptHandler: NSObject, WKScriptMessageHandler {
+    static let name = "majorTomInlineImage"
+
+    static let userScript = WKUserScript(
+        source: """
+        document.addEventListener('click', (event) => {
+            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) { return; }
+            if (event.button !== 0) { return; }
+            const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+            const anchor = target?.closest('a[href]');
+            if (!anchor) { return; }
+            const line = anchor.closest('.link-line[data-mt-expandable]');
+            if (!line || !line.id) { return; }
+            event.preventDefault();
+            event.stopPropagation();
+            window.webkit.messageHandlers.\(name).postMessage({ id: line.id, href: anchor.href });
+        }, true);
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: true,
+        in: .defaultClient
+    )
+
+    weak var browser: BrowserModel?
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        guard let body = message.body as? [String: Any],
+              let identifier = body["id"] as? String,
+              let href = body["href"] as? String,
+              let url = URL(string: href) else { return }
+        Task { @MainActor [weak browser] in
+            browser?.toggleInlineImage(lineIdentifier: identifier, url: url)
+        }
+    }
+}
+
 @available(macOS 26.0, *)
 @MainActor
 final class BrowserModel: ObservableObject {
@@ -186,6 +234,12 @@ final class BrowserModel: ObservableObject {
     private var pendingContextMenuLocation: NSPoint?
     private let contextMenuScriptHandler: ContextMenuScriptHandler
     private let linkHoverScriptHandler: LinkHoverScriptHandler
+    private let inlineImageScriptHandler: InlineImageScriptHandler
+    /// Numbers link lines within the current document so an expanded image can be
+    /// attached to the exact line that was clicked.
+    private var linkSequence = 0
+    /// Line identifiers whose image is currently expanded, for toggling back off.
+    private var expandedInlineImages: Set<String> = []
     private var contextSharingPicker: NSSharingServicePicker?
     private var lastPreferences: BrowserPreferences
 
@@ -195,6 +249,7 @@ final class BrowserModel: ObservableObject {
         let router = BrowserNavigationRouter()
         let contextMenuScriptHandler = ContextMenuScriptHandler()
         let linkHoverScriptHandler = LinkHoverScriptHandler()
+        let inlineImageScriptHandler = InlineImageScriptHandler()
         let userContentController = WKUserContentController()
         userContentController.addUserScript(ContextMenuScriptHandler.userScript)
         userContentController.add(
@@ -207,6 +262,12 @@ final class BrowserModel: ObservableObject {
             linkHoverScriptHandler,
             contentWorld: .defaultClient,
             name: LinkHoverScriptHandler.name
+        )
+        userContentController.addUserScript(InlineImageScriptHandler.userScript)
+        userContentController.add(
+            inlineImageScriptHandler,
+            contentWorld: .defaultClient,
+            name: InlineImageScriptHandler.name
         )
         var configuration = WebPage.Configuration()
         configuration.websiteDataStore = .nonPersistent()
@@ -226,6 +287,7 @@ final class BrowserModel: ObservableObject {
         self.router = router
         self.contextMenuScriptHandler = contextMenuScriptHandler
         self.linkHoverScriptHandler = linkHoverScriptHandler
+        self.inlineImageScriptHandler = inlineImageScriptHandler
         self.page = WebPage(
             configuration: configuration,
             navigationDecider: BrowserNavigationDecider(router: router)
@@ -258,6 +320,7 @@ final class BrowserModel: ObservableObject {
         }
         contextMenuScriptHandler.browser = self
         linkHoverScriptHandler.browser = self
+        inlineImageScriptHandler.browser = self
 
         router.openURL = { [weak self] url in
             self?.openLink(url)
@@ -1335,6 +1398,9 @@ final class BrowserModel: ObservableObject {
 
     private func beginDocument(at sourceURL: URL) -> AsyncThrowingStream<Data, any Error>.Continuation {
         documentContinuation?.finish()
+        // Line numbering restarts with each document, and no expansion survives it.
+        linkSequence = 0
+        expandedInlineImages.removeAll()
         let document = documentStore.createDocument()
         _ = page.load(document.url)
         return document.continuation
@@ -1599,15 +1665,28 @@ final class BrowserModel: ObservableObject {
             title = claimed
             documentTitle = claimed
         }
+        var linkIdentifier: String?
+        var isExpandableImage = false
+        if case .link(let destination, _) = event {
+            linkSequence += 1
+            linkIdentifier = "mt-link-\(linkSequence)"
+            // Offered only where automatic loading will not already have inlined the
+            // image, so a single link is never both auto-inlined and click-expandable.
+            isExpandableImage = !willAutoInline(destination: destination, baseURL: baseURL)
+                && GemtextLinkHint.isInlineImageCandidate(destination: destination, relativeTo: baseURL)
+        }
+
         documentContinuation?.yield(renderer.render(
             event,
             options: settings.preferences.renderingOptions,
-            baseURL: baseURL
+            baseURL: baseURL,
+            linkIdentifier: linkIdentifier,
+            isExpandableImage: isExpandableImage
         ))
-        guard case .link(let destination, let label) = event else { return }
+        guard case .link(let destination, let label) = event,
+              willAutoInline(destination: destination, baseURL: baseURL) else { return }
 
         if destination.lowercased().hasPrefix("data:image/"),
-           settings.preferences.automaticallyLoadsDataImages,
            let dataURL = URL(string: destination) {
             documentContinuation?.yield(renderer.renderInlineImage(
                 resourceURL: dataURL,
@@ -1616,10 +1695,7 @@ final class BrowserModel: ObservableObject {
             return
         }
 
-        guard settings.preferences.automaticallyLoadsSameCapsuleImages,
-              let url = URL(string: destination, relativeTo: baseURL)?.absoluteURL,
-              isProbableImage(url),
-              isSameCapsule(url, baseURL) else { return }
+        guard let url = URL(string: destination, relativeTo: baseURL)?.absoluteURL else { return }
 
         let resource = resourceStore.createResource()
         documentContinuation?.yield(renderer.renderInlineImage(
@@ -1633,6 +1709,104 @@ final class BrowserModel: ObservableObject {
             await self.imageLimiter.release()
         }
         imageTasks.append(task)
+    }
+
+    /// Whether this link's image will be loaded automatically, per the two Quality of
+    /// Life preferences.
+    ///
+    /// Click-to-expand consults the same predicate, so the two features can never both
+    /// claim the same link and stack two copies of one image.
+    private func willAutoInline(destination: String, baseURL: URL) -> Bool {
+        if destination.lowercased().hasPrefix("data:image/") {
+            return settings.preferences.automaticallyLoadsDataImages
+        }
+        guard settings.preferences.automaticallyLoadsSameCapsuleImages,
+              let url = URL(string: destination, relativeTo: baseURL)?.absoluteURL else {
+            return false
+        }
+        return isProbableImage(url) && isSameCapsule(url, baseURL)
+    }
+
+    /// Expands the image linked from one line beneath it, or collapses it again.
+    ///
+    /// Clicking the link a second time removes the image, which makes the gesture its own
+    /// undo and keeps a long page of image links from growing without bound.
+    func toggleInlineImage(lineIdentifier: String, url: URL) {
+        if expandedInlineImages.remove(lineIdentifier) != nil {
+            Task { await removeInlineImage(lineIdentifier: lineIdentifier) }
+            return
+        }
+
+        expandedInlineImages.insert(lineIdentifier)
+        let resource = resourceStore.createResource()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            // Markup first: the image element has to exist for WebKit to request the
+            // resource URL that the fetch below streams into.
+            await self.insertInlineImage(
+                lineIdentifier: lineIdentifier,
+                resourceURL: resource.url,
+                altText: url.lastPathComponent
+            )
+            await self.imageLimiter.acquire()
+            await self.loadInlineImage(url, continuation: resource.continuation, redirects: 0)
+            await self.imageLimiter.release()
+            await self.setLineLoading(lineIdentifier: lineIdentifier, isLoading: false)
+        }
+        imageTasks.append(task)
+    }
+
+    private func insertInlineImage(
+        lineIdentifier: String,
+        resourceURL: URL,
+        altText: String
+    ) async {
+        let figure = "<figure class=\"mt-inline\">"
+            + "<img src=\"\(HTMLDocumentStreamRenderer.escapeAttribute(resourceURL.absoluteString))\""
+            + " alt=\"\(HTMLDocumentStreamRenderer.escapeAttribute(altText))\">"
+            + "<figcaption>\(HTMLDocumentStreamRenderer.escape(altText))</figcaption>"
+            + "</figure>"
+        await runScript("""
+        (() => {
+          const line = document.getElementById(\(jsLiteral(lineIdentifier)));
+          if (!line) { return; }
+          line.classList.add('mt-loading');
+          if (!line.nextElementSibling?.classList.contains('mt-inline')) {
+            line.insertAdjacentHTML('afterend', \(jsLiteral(figure)));
+          }
+        })();
+        """)
+    }
+
+    private func removeInlineImage(lineIdentifier: String) async {
+        await runScript("""
+        (() => {
+          const line = document.getElementById(\(jsLiteral(lineIdentifier)));
+          if (!line) { return; }
+          line.classList.remove('mt-loading');
+          const figure = line.nextElementSibling;
+          if (figure?.classList.contains('mt-inline')) { figure.remove(); }
+        })();
+        """)
+    }
+
+    private func setLineLoading(lineIdentifier: String, isLoading: Bool) async {
+        let method = isLoading ? "add" : "remove"
+        await runScript(
+            "document.getElementById(\(jsLiteral(lineIdentifier)))?.classList.\(method)('mt-loading');"
+        )
+    }
+
+    private func runScript(_ source: String) async {
+        _ = try? await page.callJavaScript(source)
+    }
+
+    /// Encodes a Swift string as a JavaScript string literal, so page content can never
+    /// break out of the script being evaluated.
+    private func jsLiteral(_ value: String) -> String {
+        guard let data = try? JSONEncoder().encode(value),
+              let literal = String(data: data, encoding: .utf8) else { return "\"\"" }
+        return literal
     }
 
     private func loadInlineImage(

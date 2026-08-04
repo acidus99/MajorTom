@@ -63,10 +63,17 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     /// - Parameter baseURL: the document's own URL, used to tell a link that stays
     ///   inside the capsule from one that leaves it. Without it, link hints can still
     ///   report scheme but not locality.
+    /// - Parameter linkIdentifier: an `id` for this link's line, so the host can find it
+    ///   again to attach an expanded image beneath it.
+    /// - Parameter isExpandableImage: marks the line as opting in to click-to-expand.
+    ///   Only marked lines have their clicks intercepted, so ordinary links keep going
+    ///   through the navigation decider untouched.
     public func render(
         _ event: GemtextEvent,
         options: HTMLRenderingOptions = HTMLRenderingOptions(),
-        baseURL: URL? = nil
+        baseURL: URL? = nil,
+        linkIdentifier: String? = nil,
+        isExpandableImage: Bool = false
     ) -> Data {
         let html: String
         switch event {
@@ -85,7 +92,14 @@ public struct HTMLDocumentStreamRenderer: Sendable {
             let hintMarkup = hint.map {
                 "<span class=\"link-hint\" aria-hidden=\"true\">\(Self.escape($0.rawValue))</span>"
             } ?? ""
-            html = "<p class=\"link-line\">\(hintMarkup)<a href=\"\(Self.escapeAttribute(destination))\">\(Self.renderInline(visibleText, options: options))</a></p>"
+            var attributes = "class=\"link-line\""
+            if let linkIdentifier {
+                attributes += " id=\"\(Self.escapeAttribute(linkIdentifier))\""
+            }
+            if isExpandableImage {
+                attributes += " data-mt-expandable=\"1\""
+            }
+            html = "<p \(attributes)>\(hintMarkup)<a href=\"\(Self.escapeAttribute(destination))\">\(Self.renderInline(visibleText, options: options))</a></p>"
         case .listItem(let text):
             html = "<div class=\"list-item\"><span aria-hidden=\"true\">•</span><span>\(Self.renderInline(text, options: options))</span></div>"
         case .quote(let text):
@@ -233,6 +247,15 @@ public struct HTMLDocumentStreamRenderer: Sendable {
        x position, whether its glyph is a narrow arrow or a full-width emoji. */
     .link-line:has(.link-hint) { display: grid; grid-template-columns: 1.6rem 1fr; align-items: baseline; }
     .link-hint { opacity: .55; font-size: .9em; -webkit-user-select: none; user-select: none; }
+    /* Spinner while an image link is being expanded in place. Attached to the anchor
+       rather than the line so it sits inside the text column in both the hinted grid
+       layout and the plain one. */
+    @keyframes mt-spin { to { transform: rotate(360deg); } }
+    .link-line.mt-loading > a::after {
+      content: ""; display: inline-block; width: .72em; height: .72em; margin-left: .45em;
+      border: .12em solid currentColor; border-right-color: transparent; border-radius: 50%;
+      animation: mt-spin .75s linear infinite; opacity: .8; vertical-align: -.08em;
+    }
     .list-item { display: grid; grid-template-columns: 1.25rem 1fr; margin: .25rem 0; }
     blockquote { margin: 1rem 0; padding: .6rem 1rem; border-inline-start: .25rem solid AccentColor; }
     pre { overflow-x: auto; padding: 1rem; border-radius: .65rem; background: color-mix(in srgb, CanvasText 8%, Canvas); }
