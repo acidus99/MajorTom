@@ -89,6 +89,10 @@ struct CachedPage: Codable {
     var receivedAt: Date
     var title: String? = nil
     var documentTitle: String? = nil
+    /// The Gemini response header that produced this cached representation. Optional so
+    /// sessions written before these fields existed continue to decode.
+    var responseStatus: Int? = nil
+    var responseMeta: String? = nil
 }
 
 struct RestoredTabState: Codable {

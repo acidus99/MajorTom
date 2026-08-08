@@ -562,7 +562,9 @@ final class BrowserModel: ObservableObject {
                 completion: .stopped,
                 receivedAt: Date(),
                 title: title,
-                documentTitle: documentTitle
+                documentTitle: documentTitle,
+                responseStatus: responseStatus,
+                responseMeta: responseMeta
             )
         }
         isLoading = false
@@ -812,7 +814,9 @@ final class BrowserModel: ObservableObject {
             body: bytes,
             completion: .complete,
             receivedAt: Date(),
-            title: heading
+            title: heading,
+            responseStatus: responseStatus,
+            responseMeta: responseMeta
         )
         currentSourceBytes = bytes
         currentMIMEType = mimeType
@@ -1377,7 +1381,9 @@ final class BrowserModel: ObservableObject {
                         completion: .complete,
                         receivedAt: Date(),
                         title: title,
-                        documentTitle: documentTitle
+                        documentTitle: documentTitle,
+                        responseStatus: header.status,
+                        responseMeta: header.meta
                     )
                     statusText = "Loaded \(sourceBytes.count) bytes"
                     // Only now, once the reader has actually landed on this capsule: the
@@ -1411,7 +1417,9 @@ final class BrowserModel: ObservableObject {
                         mimeType: mimeType,
                         body: sourceBytes,
                         completion: .incomplete,
-                        receivedAt: Date()
+                        receivedAt: Date(),
+                        responseStatus: responseHeader?.status,
+                        responseMeta: responseHeader?.meta
                     )
                 }
                 isLoading = false
@@ -1651,10 +1659,19 @@ final class BrowserModel: ObservableObject {
         navigationTask?.cancel()
         internalPage = nil
         isLoading = false
+        // A restored/cached page has no live TLS connection. Leaving the previous
+        // identity here would make Page Info describe a different page's certificate.
+        serverIdentity = nil
         committedURL = cached.url
         locationText = cached.url.absoluteString
         currentSourceBytes = cached.body
         currentMIMEType = cached.mimeType
+        // Successful body-bearing cache entries from older releases predate persisted
+        // headers. Gemini defines 20 as the ordinary success response, so retain useful
+        // Page Info for those sessions while preserving exact 2x codes going forward.
+        responseStatus = cached.responseStatus
+            ?? (cached.url.scheme?.lowercased() == "gemini" ? 20 : nil)
+        responseMeta = cached.responseMeta ?? (responseStatus == nil ? "" : cached.mimeType)
         title = cached.title ?? displayTitle(for: cached.url)
         documentTitle = cached.documentTitle
         // Re-rendering a cached page replays its events, so seed the claim with the

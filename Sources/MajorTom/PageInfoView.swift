@@ -101,11 +101,22 @@ struct PageInfoView: View {
     /// separately from trust: a self-signed certificate for the wrong name is a signal no
     /// matter who signed it.
     private var domainMatches: CheckState {
-        guard let identity = information.identity,
-              let der = identity.certificateDER else { return .unknown }
-        return CertificateSubject.matches(host: identity.endpoint.host, certificateDER: der)
-            ? .passed
-            : .failed
+        if let identity = information.identity,
+           let der = identity.certificateDER {
+            return CertificateSubject.matches(host: identity.endpoint.host, certificateDER: der)
+                ? .passed
+                : .failed
+        }
+        // Restored pages have no live TLS identity, but the trust record retains the
+        // certificate most recently presented by this exact endpoint.
+        if let trusted = information.trusted,
+           let pem = trusted.certificatePEM,
+           let der = CertificateDetails.der(certificatePEM: pem) {
+            return CertificateSubject.matches(host: trusted.endpoint.host, certificateDER: der)
+                ? .passed
+                : .failed
+        }
+        return .unknown
     }
 
     private var notExpired: CheckState {

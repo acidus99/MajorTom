@@ -46,13 +46,18 @@ public enum CertificateDetails {
         notBefore: Date?,
         notAfter: Date?
     ) {
+        guard let certificateDER = der(certificatePEM: certificatePEM) else { return (nil, nil) }
+        return validityDates(certificateDER: certificateDER)
+    }
+
+    /// Converts a PEM certificate retained in the trust store back to its DER bytes.
+    public static func der(certificatePEM: String) -> Data? {
         let base64 = certificatePEM
             .replacingOccurrences(of: "-----BEGIN CERTIFICATE-----", with: "")
             .replacingOccurrences(of: "-----END CERTIFICATE-----", with: "")
             .components(separatedBy: .whitespacesAndNewlines)
             .joined()
-        guard let certificateDER = Data(base64Encoded: base64) else { return (nil, nil) }
-        return validityDates(certificateDER: certificateDER)
+        return Data(base64Encoded: base64)
     }
 
     /// SHA-256 of the entire certificate, lowercase hex.

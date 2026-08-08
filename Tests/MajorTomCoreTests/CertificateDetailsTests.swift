@@ -68,6 +68,7 @@ final class CertificateDetailsTests: XCTestCase {
             .dropLast()
             .joined()
         XCTAssertEqual(Data(base64Encoded: body), der)
+        XCTAssertEqual(CertificateDetails.der(certificatePEM: pem), der)
     }
 
     // MARK: - Trust record
