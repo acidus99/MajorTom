@@ -190,6 +190,8 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var internalPage: InternalPage?
     @Published private(set) var canSavePage = false
     @Published private(set) var canShowSource = false
+    @Published private(set) var canGoBack = false
+    @Published private(set) var canGoForward = false
     @Published var validationMessage: String?
     @Published var trustPrompt: TrustPrompt?
     @Published var inputPrompt: InputPrompt?
@@ -348,10 +350,9 @@ final class BrowserModel: ObservableObject {
             .dropFirst()
             .sink { [weak self] preferences in self?.preferencesChanged(to: preferences) }
             .store(in: &cancellables)
+        updateNavigationAvailability()
     }
 
-    var canGoBack: Bool { historyIndex > 0 }
-    var canGoForward: Bool { historyIndex >= 0 && historyIndex + 1 < history.count }
     var canReload: Bool {
         !isLoading && committedURL != nil && (retryNotBefore.map { Date() >= $0 } ?? true)
     }
@@ -572,12 +573,14 @@ final class BrowserModel: ObservableObject {
     func goBack() {
         guard canGoBack else { return }
         historyIndex -= 1
+        updateNavigationAvailability()
         navigateHistory(to: history[historyIndex])
     }
 
     func goForward() {
         guard canGoForward else { return }
         historyIndex += 1
+        updateNavigationAvailability()
         navigateHistory(to: history[historyIndex])
     }
 
@@ -1636,6 +1639,12 @@ final class BrowserModel: ObservableObject {
         case .reload, .traversal:
             break
         }
+        updateNavigationAvailability()
+    }
+
+    private func updateNavigationAvailability() {
+        canGoBack = historyIndex > 0
+        canGoForward = historyIndex >= 0 && historyIndex + 1 < history.count
     }
 
     private func displayCachedPage(_ cached: CachedPage) {

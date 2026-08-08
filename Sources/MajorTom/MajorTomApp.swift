@@ -594,6 +594,68 @@ private struct BrowserTabButton: View {
 }
 
 @available(macOS 26.0, *)
+private struct BrowserToolbarButton: View {
+    let title: String
+    let systemImage: String
+    var isEnabled = true
+    let action: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .frame(width: 38, height: 30)
+                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(SafariToolbarButtonStyle(isHovered: isHovered, isEnabled: isEnabled))
+        .disabled(!isEnabled)
+        .onHover { hovering in
+            isHovered = isEnabled && hovering
+        }
+        .onChange(of: isEnabled) { _, enabled in
+            if !enabled { isHovered = false }
+        }
+        .help(title)
+        .accessibilityLabel(title)
+    }
+}
+
+@available(macOS 26.0, *)
+private struct SafariToolbarButtonStyle: ButtonStyle {
+    let isHovered: Bool
+    let isEnabled: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(Color(nsColor: .labelColor))
+            .opacity(isEnabled ? 0.72 : 0.25)
+            .background {
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(
+                        Color(nsColor: .controlBackgroundColor)
+                            .opacity(isEnabled ? 0.72 : 0.4)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(Color.primary.opacity(interactionOpacity(isPressed: configuration.isPressed)))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .strokeBorder(Color(nsColor: .separatorColor).opacity(0.32), lineWidth: 0.5)
+                    }
+            }
+            .animation(.easeOut(duration: 0.1), value: isHovered)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+
+    private func interactionOpacity(isPressed: Bool) -> Double {
+        guard isEnabled else { return 0 }
+        if isPressed { return 0.12 }
+        return isHovered ? 0.05 : 0
+    }
+}
+
+@available(macOS 26.0, *)
 private struct BrowserTabView: View {
     @ObservedObject var browser: BrowserModel
     let chromeTopInset: CGFloat
@@ -695,48 +757,39 @@ private struct BrowserTabView: View {
 
             VStack(spacing: 0) {
             HStack(spacing: 8) {
-                // Safari joins Back and Forward into a single segmented control rather
-                // than two separate bordered buttons. `.navigation` is the AppKit
-                // control-group style that produces exactly that appearance.
-                ControlGroup {
-                    Button("Back", systemImage: "chevron.left") {
-                        browser.goBack()
-                    }
-                    .disabled(!browser.canGoBack)
-                    .help("Back")
-
-                    Button("Forward", systemImage: "chevron.right") {
-                        browser.goForward()
-                    }
-                    .disabled(!browser.canGoForward)
-                    .help("Forward")
+                // Safari's navigation glyphs gain a quiet rounded background only on
+                // hover. Disabled history directions stay visibly muted and never
+                // acquire that hover treatment.
+                HStack(spacing: 2) {
+                    BrowserToolbarButton(
+                        title: "Back",
+                        systemImage: "chevron.left",
+                        isEnabled: browser.canGoBack,
+                        action: browser.goBack
+                    )
+                    BrowserToolbarButton(
+                        title: "Forward",
+                        systemImage: "chevron.right",
+                        isEnabled: browser.canGoForward,
+                        action: browser.goForward
+                    )
                 }
-                .controlGroupStyle(.navigation)
-                .labelStyle(.iconOnly)
-                .controlSize(.large)
-                .foregroundStyle(.secondary)
                 .fixedSize()
 
-                Button("Home", systemImage: "house") { browser.goHome() }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 42)
-                    .help("Home")
+                BrowserToolbarButton(
+                    title: "Home",
+                    systemImage: "house",
+                    action: browser.goHome
+                )
 
                 // Safari puts page-level information behind a control at the leading edge
                 // of the address field; info.circle is the system's idiom for it.
-                Button("Page Information", systemImage: "info.circle") {
-                    browser.showPageInformation()
-                }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.bordered)
-                .controlSize(.large)
-                .foregroundStyle(.secondary)
-                .frame(minWidth: 42)
-                .disabled(browser.committedURL == nil)
-                .help("Page Information")
+                BrowserToolbarButton(
+                    title: "Page Information",
+                    systemImage: "info.circle",
+                    isEnabled: browser.committedURL != nil,
+                    action: browser.showPageInformation
+                )
 
                 // The capsule's favicon, immediately left of the address it belongs to.
                 if let favicon = browser.favicon {
@@ -761,26 +814,18 @@ private struct BrowserTabView: View {
                     .accessibilityLabel("Address and search")
 
                 if browser.isLoading {
-                    Button("Stop", systemImage: "xmark") {
-                        browser.stop()
-                    }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 42)
-                    .help("Stop Loading")
+                    BrowserToolbarButton(
+                        title: "Stop Loading",
+                        systemImage: "xmark",
+                        action: browser.stop
+                    )
                 } else {
-                    Button("Reload", systemImage: "arrow.clockwise") {
-                        browser.reload()
-                    }
-                    .labelStyle(.iconOnly)
-                    .buttonStyle(.bordered)
-                    .controlSize(.large)
-                    .foregroundStyle(.secondary)
-                    .frame(minWidth: 42)
-                    .disabled(!browser.canReload)
-                    .help("Reload Page")
+                    BrowserToolbarButton(
+                        title: "Reload Page",
+                        systemImage: "arrow.clockwise",
+                        isEnabled: browser.canReload,
+                        action: browser.reload
+                    )
                 }
             }
             .padding(.horizontal, 10)
