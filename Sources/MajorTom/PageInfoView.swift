@@ -56,7 +56,7 @@ struct PageInfoView: View {
                     .foregroundStyle(.tint)
 
                 check("Domain name matches", state: domainMatches)
-                check(expiryLabel, state: notExpired)
+                check("Not Expired", detail: expiryTimestamp, state: notExpired)
                 check(trustLabel, state: isTrusted)
 
                 Text(tofuExplanation)
@@ -109,16 +109,8 @@ struct PageInfoView: View {
     }
 
     private var notExpired: CheckState {
-        guard let identity = information.identity else {
-            // A cached page has no live certificate, but the stored expiry still says
-            // whether the last one seen has run out.
-            guard let expiry = information.trusted?.certificateNotAfter else { return .unknown }
-            return expiry > Date() ? .passed : .failed
-        }
-        guard identity.certificateNotBefore != nil || identity.certificateNotAfter != nil else {
-            return .unknown
-        }
-        return identity.dateIssue(at: Date()) == nil ? .passed : .failed
+        guard let certificateExpiry else { return .unknown }
+        return certificateExpiry > Date() ? .passed : .failed
     }
 
     private var isTrusted: CheckState {
@@ -129,11 +121,16 @@ struct PageInfoView: View {
             : .failed
     }
 
-    private var expiryLabel: String {
-        let expiry = information.identity?.certificateNotAfter
+    private var expiryTimestamp: String? {
+        certificateExpiry.map(Self.expiryFormatter.string(from:))
+    }
+
+    private var certificateExpiry: Date? {
+        information.identity?.certificateNotAfter
             ?? information.trusted?.certificateNotAfter
-        guard let expiry else { return "Not expired" }
-        return "Not expired (\(Self.expiryFormatter.string(from: expiry)))"
+            ?? information.trusted?.certificatePEM.flatMap {
+                CertificateDetails.validityDates(certificatePEM: $0).notAfter
+            }
     }
 
     private var trustLabel: String {
@@ -153,16 +150,23 @@ struct PageInfoView: View {
     }
 
     @ViewBuilder
-    private func check(_ label: String, state: CheckState) -> some View {
+    private func check(_ label: String, detail: String? = nil, state: CheckState) -> some View {
         HStack(spacing: 8) {
             Image(systemName: symbol(for: state))
                 .foregroundStyle(colour(for: state))
                 .accessibilityHidden(true)
             Text(label)
+            if let detail {
+                Text(detail)
+                    .italic()
+                    .foregroundStyle(.secondary)
+            }
             Spacer(minLength: 0)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(label): \(description(for: state))")
+        .accessibilityLabel(
+            "\(label)\(detail.map { ", \($0)" } ?? ""): \(description(for: state))"
+        )
     }
 
     private func symbol(for state: CheckState) -> String {
@@ -229,7 +233,10 @@ struct PageInfoView: View {
         let formatter = DateFormatter()
         // Fixed pattern rather than a localised style: this is a value someone compares
         // character by character against other tooling.
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss 'GMT'"
         return formatter
     }()
 }

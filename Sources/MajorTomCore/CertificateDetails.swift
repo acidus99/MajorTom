@@ -1,11 +1,60 @@
 import CryptoKit
 import Foundation
+import Security
 
 /// Facts derived from a server certificate for display and for the trust record.
 ///
 /// Kept separate from ``SubjectPublicKeyFingerprint``, which extracts the one value TOFU
 /// pins. These are the values a person compares against other tooling.
 public enum CertificateDetails {
+    /// Validity bounds from Security.framework's X.509 property dictionary.
+    ///
+    /// The values are CFAbsoluteTime numbers on current macOS releases, not `Date`
+    /// instances. Accept both representations because the Core Foundation API leaves
+    /// the bridged value type unspecified.
+    public static func validityDates(certificateDER: Data) -> (
+        notBefore: Date?,
+        notAfter: Date?
+    ) {
+        guard let certificate = SecCertificateCreateWithData(nil, certificateDER as CFData) else {
+            return (nil, nil)
+        }
+        let keys = [kSecOIDX509V1ValidityNotBefore, kSecOIDX509V1ValidityNotAfter] as CFArray
+        guard let values = SecCertificateCopyValues(certificate, keys, nil) as? [CFString: Any] else {
+            return (nil, nil)
+        }
+
+        func date(for key: CFString) -> Date? {
+            guard let property = values[key] as? [CFString: Any],
+                  let value = property[kSecPropertyKeyValue] else { return nil }
+            if let date = value as? Date { return date }
+            if let absoluteTime = value as? NSNumber {
+                return Date(timeIntervalSinceReferenceDate: absoluteTime.doubleValue)
+            }
+            return nil
+        }
+
+        return (
+            date(for: kSecOIDX509V1ValidityNotBefore),
+            date(for: kSecOIDX509V1ValidityNotAfter)
+        )
+    }
+
+    /// Reads validity bounds from a stored PEM certificate. This keeps records written
+    /// before validity extraction was fixed useful without requiring another connection.
+    public static func validityDates(certificatePEM: String) -> (
+        notBefore: Date?,
+        notAfter: Date?
+    ) {
+        let base64 = certificatePEM
+            .replacingOccurrences(of: "-----BEGIN CERTIFICATE-----", with: "")
+            .replacingOccurrences(of: "-----END CERTIFICATE-----", with: "")
+            .components(separatedBy: .whitespacesAndNewlines)
+            .joined()
+        guard let certificateDER = Data(base64Encoded: base64) else { return (nil, nil) }
+        return validityDates(certificateDER: certificateDER)
+    }
+
     /// SHA-256 of the entire certificate, lowercase hex.
     ///
     /// Deliberately *not* what trust is pinned to: a capsule that renews its certificate

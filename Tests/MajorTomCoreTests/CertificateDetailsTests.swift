@@ -31,6 +31,23 @@ final class CertificateDetailsTests: XCTestCase {
         )
     }
 
+    func testCertificateValidityDatesAreReadFromSecurityAbsoluteTimes() throws {
+        let dates = CertificateDetails.validityDates(certificateDER: try fixture())
+        let formatter = ISO8601DateFormatter()
+
+        XCTAssertEqual(dates.notBefore, formatter.date(from: "2026-08-01T18:40:12Z"))
+        XCTAssertEqual(dates.notAfter, formatter.date(from: "2036-07-29T18:40:12Z"))
+    }
+
+    func testCertificateValidityDatesCanBeRecoveredFromStoredPEM() throws {
+        let pem = CertificateDetails.pem(certificateDER: try fixture())
+        let dates = CertificateDetails.validityDates(certificatePEM: pem)
+        let formatter = ISO8601DateFormatter()
+
+        XCTAssertEqual(dates.notBefore, formatter.date(from: "2026-08-01T18:40:12Z"))
+        XCTAssertEqual(dates.notAfter, formatter.date(from: "2036-07-29T18:40:12Z"))
+    }
+
     func testPEMIsWrappedAndDelimited() throws {
         let pem = CertificateDetails.pem(certificateDER: try fixture())
         let lines = pem.split(separator: "\n", omittingEmptySubsequences: false)

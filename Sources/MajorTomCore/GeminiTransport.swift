@@ -118,7 +118,7 @@ private final class GeminiConnectionSession: @unchecked Sendable {
                     return
                 }
 
-                let dates = Self.certificateDates(certificate)
+                let dates = CertificateDetails.validityDates(certificateDER: certificateDER)
                 let identity = PresentedServerIdentity(
                     endpoint: target.endpoint,
                     publicKeySHA256: fingerprint,
@@ -258,25 +258,6 @@ private final class GeminiConnectionSession: @unchecked Sendable {
         }
     }
 
-    private static func certificateDates(_ certificate: SecCertificate) -> (
-        notBefore: Date?,
-        notAfter: Date?
-    ) {
-        let keys = [kSecOIDX509V1ValidityNotBefore, kSecOIDX509V1ValidityNotAfter] as CFArray
-        guard let values = SecCertificateCopyValues(certificate, keys, nil) as? [CFString: Any] else {
-            return (nil, nil)
-        }
-
-        func date(for key: CFString) -> Date? {
-            guard let property = values[key] as? [CFString: Any] else { return nil }
-            return property[kSecPropertyKeyValue] as? Date
-        }
-
-        return (
-            date(for: kSecOIDX509V1ValidityNotBefore),
-            date(for: kSecOIDX509V1ValidityNotAfter)
-        )
-    }
 }
 
 private final class TrustVerificationCompletion: @unchecked Sendable {
