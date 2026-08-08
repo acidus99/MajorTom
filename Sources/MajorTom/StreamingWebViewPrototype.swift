@@ -346,8 +346,7 @@ final class BrowserModel: ObservableObject {
         router.openInNewWindow = { [weak self] url in
             self?.openInNewWindow?(url)
         }
-        settings.$preferences
-            .dropFirst()
+        settings.preferencesDidChange
             .sink { [weak self] preferences in self?.preferencesChanged(to: preferences) }
             .store(in: &cancellables)
         updateNavigationAvailability()
@@ -628,11 +627,6 @@ final class BrowserModel: ObservableObject {
     func actualSize() {
         pageZoom = 1
         applyZoom()
-    }
-
-    func refreshContentTheme() {
-        guard committedURL != nil, canSavePage else { return }
-        applyThemeWithoutReload()
     }
 
     /// Prints the current document.

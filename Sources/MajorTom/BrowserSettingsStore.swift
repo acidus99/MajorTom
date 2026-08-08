@@ -7,12 +7,15 @@ import SwiftUI
 final class BrowserSettingsStore: ObservableObject {
     static let shared = BrowserSettingsStore()
 
+    /// `@Published` emits from `willSet`, while browser models need to read the fully
+    /// updated store when re-rendering. This post-update stream keeps every tab in sync
+    /// without making the selected tab a special case.
+    let preferencesDidChange = PassthroughSubject<BrowserPreferences, Never>()
+
     @Published var preferences: BrowserPreferences {
         didSet {
             persist()
-            if oldValue.contentTheme != preferences.contentTheme {
-                NotificationCenter.default.post(name: .majorTomContentThemeChanged, object: nil)
-            }
+            preferencesDidChange.send(preferences)
         }
     }
 
@@ -44,8 +47,4 @@ final class BrowserSettingsStore: ObservableObject {
             }
         )
     }
-}
-
-extension Notification.Name {
-    static let majorTomContentThemeChanged = Notification.Name("MajorTomContentThemeChanged")
 }

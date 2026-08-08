@@ -886,9 +886,6 @@ private struct BrowserTabView: View {
         .onCommand(.majorTomHome, when: isKeyWindow) { browser.goHome() }
         .onCommand(.majorTomUp, when: isKeyWindow) { browser.goUpOneLevel() }
         .onCommand(.majorTomRoot, when: isKeyWindow) { browser.goToCapsuleRoot() }
-        // Deliberately not window-scoped: a content-theme change must repaint every
-        // open document, not just the one in front (spec 6.3).
-        .onCommand(.majorTomContentThemeChanged, when: true) { browser.refreshContentTheme() }
         .sheet(item: $addBookmarkTarget) { target in
             AddBookmarkView(
                 url: target.url,
