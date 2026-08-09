@@ -281,6 +281,9 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var statusText = "Ready"
     /// Destination of the link under the pointer, or focused by keyboard (spec 18.4).
     @Published private(set) var hoveredLinkURL: String?
+    /// The unformatted destination retained so native modifier changes can refresh the
+    /// hover message without requiring another mouse-move event from WebKit.
+    private var hoveredLinkDestination: String?
     @Published private(set) var title = "New Tab"
     @Published private(set) var documentTitle: String?
     /// The current capsule's favicon emoji, when it offers one.
@@ -355,6 +358,7 @@ final class BrowserModel: ObservableObject {
     private var expandedInlineImages: Set<String> = []
     private var contextSharingPicker: NSSharingServicePicker?
     private var lastPreferences: BrowserPreferences
+    private var modifierFlagsMonitor: Any?
 
     init(restoredState: RestoredTabState? = nil, initialURL: URL? = nil) {
         let documentStore = BrowserDocumentStore()
@@ -462,6 +466,10 @@ final class BrowserModel: ObservableObject {
         settings.preferencesDidChange
             .sink { [weak self] preferences in self?.preferencesChanged(to: preferences) }
             .store(in: &cancellables)
+        modifierFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            self?.updateHoveredLinkModifiers(event.modifierFlags)
+            return event
+        }
         updateNavigationAvailability()
     }
 
@@ -1068,9 +1076,21 @@ final class BrowserModel: ObservableObject {
 
     fileprivate func updateHoveredLink(_ href: String?, modifiers: LinkModifierKeys = []) {
         guard let href, !href.isEmpty else {
+            hoveredLinkDestination = nil
             hoveredLinkURL = nil
             return
         }
+        hoveredLinkDestination = href
+        hoveredLinkURL = LinkHoverText.text(for: href, modifiers: modifiers)
+    }
+
+    private func updateHoveredLinkModifiers(_ flags: NSEvent.ModifierFlags) {
+        guard let href = hoveredLinkDestination else { return }
+        var modifiers: LinkModifierKeys = []
+        if flags.contains(.command) { modifiers.insert(.command) }
+        if flags.contains(.shift) { modifiers.insert(.shift) }
+        if flags.contains(.option) { modifiers.insert(.option) }
+        if flags.contains(.control) { modifiers.insert(.control) }
         hoveredLinkURL = LinkHoverText.text(for: href, modifiers: modifiers)
     }
 
