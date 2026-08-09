@@ -246,6 +246,9 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     /* A hinted link line becomes a two-column grid so every label starts at the same
        x position, whether its glyph is a narrow arrow or a full-width emoji. */
     .link-line:has(.link-hint) { display: grid; grid-template-columns: 1.6rem 1fr; align-items: baseline; }
+    /* Grid items stretch across their cell by default, which made the visually blank
+       space to the right of a label behave like part of the link. */
+    .link-line:has(.link-hint) > a { justify-self: start; }
     .link-hint { opacity: .55; font-size: .9em; -webkit-user-select: none; user-select: none; }
     /* Spinner while an image link is being expanded in place. Attached to the anchor
        rather than the line so it sits inside the text column in both the hinted grid

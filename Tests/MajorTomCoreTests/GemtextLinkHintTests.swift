@@ -175,6 +175,17 @@ final class GemtextLinkHintTests: XCTestCase {
         XCTAssertFalse(html.contains("\u{2192}"), html)
     }
 
+    /// A hinted link is a CSS Grid item. Without an explicit alignment it stretches
+    /// across the rest of its grid cell, making blank space behave like a link for
+    /// clicks, hover and context menus.
+    func testHintedLinkHitAreaStopsAtItsVisibleContent() {
+        XCTAssertTrue(
+            HTMLDocumentStreamRenderer.defaultThemeCSS.contains(
+                ".link-line:has(.link-hint) > a { justify-self: start; }"
+            )
+        )
+    }
+
     /// Adding the option must not discard a stored preference blob that predates it.
     func testDecodingOptionsWithoutTheNewKeyDefaultsToShowingHints() throws {
         let json = Data(#"{"recognizesEmphasis":false}"#.utf8)
