@@ -13,15 +13,17 @@ private final class ContextMenuScriptHandler: NSObject, WKScriptMessageHandler {
     static let userScript = WKUserScript(
         source: """
         document.addEventListener('contextmenu', (event) => {
+            const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+            const anchor = target?.closest('a[href]');
             const selection = window.getSelection();
-            if (selection && !selection.isCollapsed && selection.toString().trim() !== '') {
+            if (!anchor && selection && !selection.isCollapsed && selection.toString().trim() !== '') {
                 // Preserve WebKit's native selected-text menu: Copy, Look Up,
                 // Translate, Speech, and Services all depend on WebKit handling it.
+                // A right-click can itself select/highlight link text before this event,
+                // so a link under the pointer must take precedence over that selection.
                 return;
             }
             event.preventDefault();
-            const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-            const anchor = target?.closest('a[href]');
             window.webkit.messageHandlers.\(name).postMessage(anchor?.href ?? '');
         }, true);
         """,
@@ -846,9 +848,6 @@ final class BrowserModel: ObservableObject {
         let menu = NSMenu()
         menu.autoenablesItems = false
         contextMenuTargets.removeAll()
-        addContextMenuItem("Open Link", systemImage: "arrow.right", enabled: true, to: menu) { [weak self] in
-            self?.openLink(url)
-        }
         let opensInApp = canOpenInApp(url)
         addContextMenuItem("Open Link in New Tab", systemImage: "plus.rectangle.on.rectangle", enabled: opensInApp, to: menu) { [weak self] in
             self?.openInNewTab?(url, true)

@@ -23,7 +23,10 @@ struct MajorTomApp: App {
 
     var body: some Scene {
         WindowGroup(for: BrowserWindowDestination.self) { destination in
-            NativeFoundationView(initialURL: destination.wrappedValue.url)
+            NativeFoundationView(
+                initialURL: destination.wrappedValue.url,
+                destinationID: destination.wrappedValue.id
+            )
         } defaultValue: {
             BrowserWindowDestination()
         }
@@ -173,11 +176,18 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
     private var aboutObserver: (any NSObjectProtocol)?
     private var menuObserver: (any NSObjectProtocol)?
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // Native tab dragging is an AppKit window-tabbing feature. Opt in before the
+        // first SwiftUI WindowGroup window is created so a tab dragged from any Major
+        // Tom window can join another compatible Major Tom window.
+        NSWindow.allowsAutomaticWindowTabbing = true
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
         installCommandKeyMonitor()
-        // Observed here rather than in a window's view so About still opens when every
-        // browser window has been closed — the app deliberately keeps running.
+        // Observed here rather than in a window's view so About is handled consistently
+        // while the application is running.
         aboutObserver = NotificationCenter.default.addObserver(
             forName: .majorTomAbout,
             object: nil,
@@ -190,6 +200,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
             NSApplication.shared.activate()
             NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
             FileMenuCustomization.apply()
+            NativeTabMenuCustomization.install()
         }
 
         // SwiftUI rebuilds the main menu as scenes come and go, which would restore the
@@ -201,7 +212,10 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
             object: nil,
             queue: .main
         ) { _ in
-            MainActor.assumeIsolated { FileMenuCustomization.apply() }
+            MainActor.assumeIsolated {
+                FileMenuCustomization.apply()
+                NativeTabMenuCustomization.apply()
+            }
         }
     }
 
@@ -261,19 +275,278 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        false
+        // Major Tom has no useful background-only mode. Once the final native window
+        // (browser or panel) closes, terminate so a stale process cannot keep an old
+        // bundle loaded and confuse subsequent launches.
+        true
     }
 
+    /// AppKit sends this responder-chain action when the native tab bar's plus button
+    /// is clicked. SwiftUI's WindowGroup previously answered it by presenting a new
+    /// standalone scene, which is also the path that caused the visible window flash.
+    /// Route the native control through the same hidden-window attachment used by
+    /// Command-T and link activation instead.
+    @IBAction func newWindowForTab(_ sender: Any?) {
+        guard #available(macOS 26.0, *),
+              let parent = NSApplication.shared.keyWindow else { return }
+        NativeTabCoordinator.shared.openTab(url: nil, from: parent, inBackground: false)
+    }
+
+}
+
+@available(macOS 26.0, *)
+@MainActor
+private final class NativeTabCoordinator {
+    static let shared = NativeTabCoordinator()
+    static let tabbingIdentifier = "com.acidus.majortom.browser"
+
+    /// Windows created outside SwiftUI's WindowGroup need a retained controller.
+    /// Keeping the controller (rather than only the window) also gives AppKit the
+    /// normal ownership relationship it expects for a manually-created window.
+    private var windowControllers: [ObjectIdentifier: NSWindowController] = [:]
+    private var closeObservers: [ObjectIdentifier: any NSObjectProtocol] = [:]
+    private var tabDragMonitor: Any?
+    private var temporarilyShownTabBars: [NSWindow] = []
+    private var tabDragCleanupTask: Task<Void, Never>?
+
+    private init() {
+        tabDragMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.leftMouseDown, .leftMouseUp]
+        ) { [weak self] event in
+            self?.handleTabDragEvent(event)
+            return event
+        }
+    }
+
+    func configure(window: NSWindow) {
+        // AppKit uses a matching, non-empty identifier to decide whether windows can
+        // accept one another's tabs during a native tab drag.
+        window.tabbingIdentifier = Self.tabbingIdentifier
+        window.tabbingMode = .preferred
+    }
+
+    /// Makes a one-tab window a native drop destination while another native tab is
+    /// being dragged. AppKit only accepts a tab drop on a visible tab strip, so the
+    /// otherwise-hidden singleton strips are exposed for the duration of the drag.
+    private func handleTabDragEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown:
+            tabDragCleanupTask?.cancel()
+            tabDragCleanupTask = nil
+            if !temporarilyShownTabBars.isEmpty { finishTabDrag() }
+            guard let source = tabbedBrowserWindow(at: NSEvent.mouseLocation),
+                  isInNativeTabStrip(NSEvent.mouseLocation, of: source) else { return }
+
+            // AppKit enters a private tracking loop as soon as its native tab starts
+            // dragging, so leftMouseDragged may never reach an application event
+            // monitor. Prepare destination strips on mouse-down, before that loop owns
+            // the gesture.
+            exposeSingletonTabBars(except: source)
+            waitForTabDragToFinish()
+
+        case .leftMouseUp:
+            if !temporarilyShownTabBars.isEmpty {
+                scheduleTabBarCleanup()
+            }
+
+        default:
+            break
+        }
+    }
+
+    private func tabbedBrowserWindow(at screenPoint: NSPoint) -> NSWindow? {
+        NSApplication.shared.windows.first { window in
+            window.isVisible
+                && !window.isMiniaturized
+                && window.tabbingIdentifier == Self.tabbingIdentifier
+                && (window.tabGroup?.windows.count ?? 1) >= 2
+                && window.tabGroup?.isTabBarVisible == true
+                && window.frame.contains(screenPoint)
+        }
+    }
+
+    private func isInNativeTabStrip(_ screenPoint: NSPoint, of window: NSWindow) -> Bool {
+        guard window.tabbingIdentifier == Self.tabbingIdentifier,
+              window.tabGroup?.isTabBarVisible == true else { return false }
+
+        // Work in screen coordinates because AppKit's private tab controls may report
+        // their event through a different internal view/window. The tab strip is the
+        // lower row of the native chrome, immediately above unobscured content; the
+        // ordinary draggable title bar is the upper row.
+        let contentTop = window.convertPoint(toScreen: NSPoint(
+            x: window.contentLayoutRect.minX,
+            y: window.contentLayoutRect.maxY
+        )).y
+        let chromeHeight = window.frame.maxY - contentTop
+        let tabStripHeight = min(40, max(24, chromeHeight * 0.58))
+        let isInTabRow = screenPoint.y >= contentTop
+            && screenPoint.y <= contentTop + tabStripHeight
+        // The native plus button occupies the trailing end of the row and starts a new
+        // tab rather than a tab drag, so it must not expose other windows as targets.
+        let isBeforePlusButton = screenPoint.x < window.frame.maxX - 44
+        return isInTabRow && isBeforePlusButton
+    }
+
+    private func exposeSingletonTabBars(except source: NSWindow) {
+        for window in NSApplication.shared.windows where
+            window !== source
+                && window.isVisible
+                && !window.isMiniaturized
+                && window.tabbingIdentifier == Self.tabbingIdentifier
+        {
+            let tabCount = window.tabGroup?.windows.count ?? 1
+            guard tabCount == 1, window.tabGroup?.isTabBarVisible != true else { continue }
+            withoutTabBarAnimation { window.toggleTabBar(nil) }
+            window.contentView?.superview?.layoutSubtreeIfNeeded()
+            window.displayIfNeeded()
+            temporarilyShownTabBars.append(window)
+        }
+    }
+
+    private func waitForTabDragToFinish() {
+        tabDragCleanupTask?.cancel()
+        tabDragCleanupTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled, NSEvent.pressedMouseButtons & 1 != 0 {
+                try? await Task.sleep(for: .milliseconds(50))
+            }
+            guard !Task.isCancelled else { return }
+            // Let AppKit finish moving the NSWindow between tab groups before deciding
+            // which singleton strips need to disappear again.
+            try? await Task.sleep(for: .milliseconds(100))
+            self?.finishTabDrag()
+        }
+    }
+
+    private func scheduleTabBarCleanup() {
+        tabDragCleanupTask?.cancel()
+        tabDragCleanupTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled else { return }
+            self?.finishTabDrag()
+        }
+    }
+
+    private func finishTabDrag() {
+        tabDragCleanupTask = nil
+        temporarilyShownTabBars.removeAll()
+
+        // A successful destination now has 2+ tabs and keeps its native strip. All
+        // untouched targets, and a source reduced to one tab, return to the required
+        // one-tab/no-strip presentation.
+        for window in NSApplication.shared.windows where
+            window.isVisible && window.tabbingIdentifier == Self.tabbingIdentifier
+        {
+            let tabCount = window.tabGroup?.windows.count ?? 1
+            if tabCount <= 1, window.tabGroup?.isTabBarVisible == true {
+                withoutTabBarAnimation { window.toggleTabBar(nil) }
+            }
+        }
+    }
+
+    private func withoutTabBarAnimation(_ action: () -> Void) {
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        action()
+        NSAnimationContext.endGrouping()
+    }
+
+    /// Creates and attaches a tab without ever presenting it as a standalone window.
+    ///
+    /// SwiftUI's `openWindow` always orders a new WindowGroup scene onscreen before its
+    /// content can report the resulting NSWindow. Attaching at that point is inherently
+    /// too late and produces a visible blank-window/focus flash. Here the NSWindow is
+    /// constructed hidden, populated, and joined to the tab group before AppKit can draw
+    /// it independently.
+    func openTab(url: URL?, from parent: NSWindow, inBackground: Bool) {
+        let window = makeBrowserWindow(url: url, matching: parent)
+        parent.addTabbedWindow(window, ordered: .above)
+        parent.tabGroup?.selectedWindow = inBackground ? parent : window
+        if !inBackground {
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    func openWindow(url: URL?, from source: NSWindow? = nil) {
+        let source = source ?? NSApplication.shared.keyWindow
+        let window = makeBrowserWindow(url: url, matching: source)
+        if let source {
+            // Preserve the source window's dimensions but cascade the new window enough
+            // to make the separate-window result visually obvious.
+            window.setFrameTopLeftPoint(NSPoint(
+                x: source.frame.minX + 22,
+                y: source.frame.maxY - 22
+            ))
+        }
+        // This is an explicit request for a separate window (Shift-click or
+        // "Open Link in New Window"), so it must not be automatically absorbed into
+        // the current tab group when first shown. Once it is onscreen, restore the
+        // preferred mode so tabs can still be dragged into or out of this window.
+        window.tabbingMode = .disallowed
+        window.makeKeyAndOrderFront(nil)
+        window.tabbingMode = .preferred
+    }
+
+    private func makeBrowserWindow(url: URL?, matching source: NSWindow?) -> NSWindow {
+        let destination = BrowserWindowDestination(url: url)
+        let contentRect = source.map { $0.contentRect(forFrameRect: $0.frame) }
+            ?? NSRect(x: 0, y: 0, width: 1_100, height: 760)
+        let window = NSWindow(
+            contentRect: contentRect,
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        configure(window: window)
+        window.contentViewController = NSHostingController(
+            rootView: NativeFoundationView(
+                initialURL: destination.url,
+                destinationID: destination.id
+            )
+        )
+        if let source {
+            // Installing a hosting controller can apply its minimal fitting size.
+            // Reassert the source's outer frame after installation so new windows and
+            // hidden tab windows start with the exact dimensions of their parent.
+            window.setFrame(source.frame, display: false)
+        } else {
+            window.center()
+        }
+
+        let controller = NSWindowController(window: window)
+        let identifier = ObjectIdentifier(window)
+        windowControllers[identifier] = controller
+        closeObservers[identifier] = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.windowControllers.removeValue(forKey: identifier)
+                if let observer = self.closeObservers.removeValue(forKey: identifier) {
+                    NotificationCenter.default.removeObserver(observer)
+                }
+            }
+        }
+        return window
+    }
 }
 
 private struct NativeFoundationView: View {
     @ObservedObject private var settings = BrowserSettingsStore.shared
     let initialURL: URL?
+    let destinationID: UUID
+
+    init(initialURL: URL? = nil, destinationID: UUID = UUID()) {
+        self.initialURL = initialURL
+        self.destinationID = destinationID
+    }
 
     var body: some View {
         Group {
             if #available(macOS 26.0, *) {
-                BrowserWindowView(initialURL: initialURL)
+                BrowserWindowView(initialURL: initialURL, destinationID: destinationID)
             } else {
                 ContentUnavailableView {
                     Label("Major Tom requires macOS 26", systemImage: "sparkles")
@@ -297,41 +570,39 @@ private struct NativeFoundationView: View {
 
 @available(macOS 26.0, *)
 private struct BrowserWindowView: View {
-    @StateObject private var session: BrowserWindowSession
+    @StateObject private var browser: BrowserModel
     @Environment(\.controlActiveState) private var controlActiveState
-    @Environment(\.openWindow) private var openWindow
-    /// Close All Windows has to reach every browser window, not only the key one, so
-    /// each window needs a handle on the NSWindow it is hosted in.
     @State private var hostWindow: NSWindow?
+    let destinationID: UUID
 
-    init(initialURL: URL? = nil) {
-        _session = StateObject(wrappedValue: BrowserWindowSession(initialURL: initialURL))
+    init(initialURL: URL? = nil, destinationID: UUID = UUID()) {
+        _browser = StateObject(wrappedValue: BrowserModel(
+            restoredState: NativeTabRestorationState.next(initialURL: initialURL),
+            initialURL: initialURL
+        ))
+        self.destinationID = destinationID
     }
 
     var body: some View {
-        ZStack(alignment: .top) {
-            if let selectedTab = session.selectedTab {
-                BrowserTabView(browser: selectedTab.browser, chromeTopInset: 42)
-                    .id(selectedTab.id)
-            }
-            BrowserTabStrip(session: session)
-        }
-        .navigationTitle(session.selectedTab?.browser.title ?? "Major Tom")
+        BrowserTabView(browser: browser, chromeTopInset: 0)
+        .navigationTitle(browser.title)
         .background(WindowAccessor(window: $hostWindow))
         .onAppear {
-            session.openWindow = { url in
-                openWindow(value: BrowserWindowDestination(url: url))
+            configureNativeTab()
+            browser.openInNewTab = { url, background in
+                openNativeTab(url: url, inBackground: background)
+            }
+            browser.openInNewWindow = { url in
+                NativeTabCoordinator.shared.openWindow(url: url, from: hostWindow)
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomNewTab)) { _ in
             guard controlActiveState == .key else { return }
-            session.newTab()
+            openNativeTab(url: nil, inBackground: false)
         }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomCloseTab)) { _ in
             guard controlActiveState == .key else { return }
-            if session.closeSelectedTab() {
-                NSApplication.shared.keyWindow?.performClose(nil)
-            }
+            hostWindow?.performClose(nil)
         }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomCloseWindow)) { _ in
             guard hostWindow?.isKeyWindow == true else { return }
@@ -343,6 +614,14 @@ private struct BrowserWindowView: View {
             // what Safari does.
             closeHostWindow()
         }
+        .onChange(of: browser.title) { _, _ in configureNativeTab() }
+        .onChange(of: browser.favicon) { _, _ in configureNativeTab() }
+        .onChange(of: browser.committedURL) { _, _ in configureNativeTab() }
+        .onChange(of: hostWindow) { _, window in
+            guard let window else { return }
+            NativeTabCoordinator.shared.configure(window: window)
+            configureNativeTab()
+        }
     }
 
     /// Stops each tab's network work before the window goes away.
@@ -351,8 +630,52 @@ private struct BrowserWindowView: View {
     /// without this an in-flight request would keep streaming into a document nobody
     /// can see. `closeSelectedTab()` already does this for one tab.
     private func closeHostWindow() {
-        for tab in session.tabs { tab.browser.stop() }
+        browser.stop()
         hostWindow?.performClose(nil)
+    }
+
+    private func configureNativeTab() {
+        guard let hostWindow else { return }
+        NativeTabCoordinator.shared.configure(window: hostWindow)
+        hostWindow.title = browser.title
+        // Favicons are Unicode glyphs, not bitmap assets. Keeping the favicon and page
+        // title in one native string gives both the same font metrics and baseline.
+        // NSTextAttachment uses image-cell metrics and pushed the page title visibly
+        // below titles on tabs without a favicon.
+        hostWindow.tab.attributedTitle = nil
+        if let favicon = browser.favicon {
+            hostWindow.tab.title = "\(favicon)  \(browser.title)"
+        } else {
+            hostWindow.tab.title = browser.title
+        }
+        hostWindow.tab.toolTip = browser.committedURL?.absoluteString ?? browser.title
+    }
+
+    private func openNativeTab(url: URL?, inBackground: Bool) {
+        guard let hostWindow else {
+            NativeTabCoordinator.shared.openWindow(url: url)
+            return
+        }
+        NativeTabCoordinator.shared.openTab(
+            url: url,
+            from: hostWindow,
+            inBackground: inBackground
+        )
+    }
+
+}
+
+@MainActor
+private enum NativeTabRestorationState {
+    private static var consumed = false
+
+    static func next(initialURL: URL?) -> RestoredTabState? {
+        guard initialURL == nil, !consumed else { return nil }
+        consumed = true
+        guard let restored = SessionRestorationStore.shared.load(),
+              !restored.tabs.isEmpty,
+              restored.tabs.indices.contains(restored.selectedIndex) else { return nil }
+        return restored.tabs[restored.selectedIndex]
     }
 }
 
@@ -984,6 +1307,60 @@ private enum FileMenuCustomization {
             item.keyEquivalent = "w"
             item.keyEquivalentModifierMask = [.command]
         }
+    }
+}
+
+/// Major Tom uses AppKit's native window tabs exclusively. The native tab bar itself
+/// remains available when multiple tabs exist, but the user should not be able to toggle
+/// it into a second, competing presentation from the View menu.
+@MainActor
+private enum NativeTabMenuCustomization {
+    private static let observer = NativeTabMenuObserver()
+    private static var isInstalled = false
+
+    static func install() {
+        apply()
+        guard !isInstalled else { return }
+        isInstalled = true
+
+        // SwiftUI and AppKit can rebuild or mutate standard menu items after launch.
+        // Filter additions/changes immediately, and filter once more before a menu is
+        // tracked so neither title can ever become visible to the user.
+        for name in [
+            NSMenu.didAddItemNotification,
+            NSMenu.didChangeItemNotification,
+            NSMenu.didBeginTrackingNotification
+        ] {
+            NotificationCenter.default.addObserver(
+                observer,
+                selector: #selector(NativeTabMenuObserver.menuChanged(_:)),
+                name: name,
+                object: nil
+            )
+        }
+    }
+
+    static func apply() {
+        guard let viewMenu = NSApplication.shared.mainMenu?.item(withTitle: "View")?.submenu else {
+            return
+        }
+        removeTabBarToggle(from: viewMenu)
+    }
+
+    fileprivate static func removeTabBarToggle(from menu: NSMenu) {
+        // The selector is stable across Show/Hide state and localisation; matching the
+        // visible English title was why the old one-shot removal kept losing this race.
+        for item in menu.items where item.action == #selector(NSWindow.toggleTabBar(_:)) {
+            menu.removeItem(item)
+        }
+    }
+}
+
+@MainActor
+private final class NativeTabMenuObserver: NSObject {
+    @objc func menuChanged(_ notification: Notification) {
+        guard let menu = notification.object as? NSMenu else { return }
+        NativeTabMenuCustomization.removeTabBarToggle(from: menu)
     }
 }
 
