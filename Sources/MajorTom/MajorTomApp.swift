@@ -319,6 +319,9 @@ private final class NativeTabCoordinator {
     private var registeredTabs: [ObjectIdentifier: RegisteredTab] = [:]
     private var hasAttemptedSessionRestore = false
     private var tabDragMonitor: Any?
+    private weak var tabDragCandidateWindow: NSWindow?
+    private var tabDragStartPoint: NSPoint?
+    private var tabDragTrackingTimer: Timer?
     private var temporarilyShownTabBars: [NSWindow] = []
     private var tabDragCleanupTask: Task<Void, Never>?
 
@@ -368,18 +371,17 @@ private final class NativeTabCoordinator {
         case .leftMouseDown:
             tabDragCleanupTask?.cancel()
             tabDragCleanupTask = nil
+            stopTabDragTracking()
             if !temporarilyShownTabBars.isEmpty { finishTabDrag() }
             guard let source = tabbedBrowserWindow(at: NSEvent.mouseLocation),
                   isInNativeTabStrip(NSEvent.mouseLocation, of: source) else { return }
 
-            // AppKit enters a private tracking loop as soon as its native tab starts
-            // dragging, so leftMouseDragged may never reach an application event
-            // monitor. Prepare destination strips on mouse-down, before that loop owns
-            // the gesture.
-            exposeSingletonTabBars(except: source)
-            waitForTabDragToFinish()
+            tabDragCandidateWindow = source
+            tabDragStartPoint = NSEvent.mouseLocation
+            beginTabDragTracking()
 
         case .leftMouseUp:
+            stopTabDragTracking()
             if !temporarilyShownTabBars.isEmpty {
                 scheduleTabBarCleanup()
             }
@@ -387,6 +389,38 @@ private final class NativeTabCoordinator {
         default:
             break
         }
+    }
+
+    private func beginTabDragTracking() {
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pollTabDrag() }
+        }
+        tabDragTrackingTimer = timer
+        // Native tab controls enter AppKit's private event-tracking run-loop mode. A
+        // common-mode timer keeps observing pointer movement there even though AppKit
+        // consumes the ordinary leftMouseDragged events.
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func pollTabDrag() {
+        guard NSEvent.pressedMouseButtons & 1 != 0 else {
+            stopTabDragTracking()
+            if !temporarilyShownTabBars.isEmpty { scheduleTabBarCleanup() }
+            return
+        }
+        guard temporarilyShownTabBars.isEmpty,
+              let source = tabDragCandidateWindow,
+              let start = tabDragStartPoint else { return }
+        let current = NSEvent.mouseLocation
+        guard hypot(current.x - start.x, current.y - start.y) >= 5 else { return }
+        exposeSingletonTabBars(except: source)
+    }
+
+    private func stopTabDragTracking() {
+        tabDragTrackingTimer?.invalidate()
+        tabDragTrackingTimer = nil
+        tabDragCandidateWindow = nil
+        tabDragStartPoint = nil
     }
 
     private func tabbedBrowserWindow(at screenPoint: NSPoint) -> NSWindow? {
@@ -438,20 +472,6 @@ private final class NativeTabCoordinator {
         }
     }
 
-    private func waitForTabDragToFinish() {
-        tabDragCleanupTask?.cancel()
-        tabDragCleanupTask = Task { @MainActor [weak self] in
-            while !Task.isCancelled, NSEvent.pressedMouseButtons & 1 != 0 {
-                try? await Task.sleep(for: .milliseconds(50))
-            }
-            guard !Task.isCancelled else { return }
-            // Let AppKit finish moving the NSWindow between tab groups before deciding
-            // which singleton strips need to disappear again.
-            try? await Task.sleep(for: .milliseconds(100))
-            self?.finishTabDrag()
-        }
-    }
-
     private func scheduleTabBarCleanup() {
         tabDragCleanupTask?.cancel()
         tabDragCleanupTask = Task { @MainActor [weak self] in
@@ -463,6 +483,7 @@ private final class NativeTabCoordinator {
 
     private func finishTabDrag() {
         tabDragCleanupTask = nil
+        stopTabDragTracking()
         temporarilyShownTabBars.removeAll()
 
         // A successful destination now has 2+ tabs and keeps its native strip. All
