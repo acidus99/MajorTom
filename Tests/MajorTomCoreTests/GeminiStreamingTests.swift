@@ -95,6 +95,23 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertFalse(HTMLDocumentStreamRenderer.defaultThemeCSS.contains("text-wrap: balance"))
     }
 
+    func testContentThemePaletteSelectionDoesNotDependOnUIThemeForExplicitThemes() {
+        XCTAssertFalse(ContentTheme.draculaLight.usesDarkPalette(effectiveDarkAppearance: true))
+        XCTAssertTrue(ContentTheme.draculaDark.usesDarkPalette(effectiveDarkAppearance: false))
+        XCTAssertFalse(ContentTheme.automatic.usesDarkPalette(effectiveDarkAppearance: false))
+        XCTAssertTrue(ContentTheme.automatic.usesDarkPalette(effectiveDarkAppearance: true))
+    }
+
+    func testContentThemeCSSUsesItsResolvedPaletteBackground() {
+        for theme in ContentTheme.allCases {
+            for effectiveDarkAppearance in [false, true] {
+                let palette = theme.palette(effectiveDarkAppearance: effectiveDarkAppearance)
+                let css = theme.css(effectiveDarkAppearance: effectiveDarkAppearance)
+                XCTAssertTrue(css.contains("--background: \(palette.background.cssHex)"))
+            }
+        }
+    }
+
     func testPrintThemeOverridesDarkScreenTheme() {
         let css = ContentTheme.draculaDark.css(effectiveDarkAppearance: true)
         guard let darkBody = css.range(of: "body { color: var(--foreground); background: var(--background); }"),

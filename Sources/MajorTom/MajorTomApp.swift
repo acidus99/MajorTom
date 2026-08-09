@@ -281,6 +281,12 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         true
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        if #available(macOS 26.0, *) {
+            NativeTabCoordinator.shared.persistSession()
+        }
+    }
+
     /// AppKit sends this responder-chain action when the native tab bar's plus button
     /// is clicked. SwiftUI's WindowGroup previously answered it by presenting a new
     /// standalone scene, which is also the path that caused the visible window flash.
@@ -300,11 +306,18 @@ private final class NativeTabCoordinator {
     static let shared = NativeTabCoordinator()
     static let tabbingIdentifier = "com.acidus.majortom.browser"
 
+    private struct RegisteredTab {
+        weak var window: NSWindow?
+        weak var browser: BrowserModel?
+    }
+
     /// Windows created outside SwiftUI's WindowGroup need a retained controller.
     /// Keeping the controller (rather than only the window) also gives AppKit the
     /// normal ownership relationship it expects for a manually-created window.
     private var windowControllers: [ObjectIdentifier: NSWindowController] = [:]
     private var closeObservers: [ObjectIdentifier: any NSObjectProtocol] = [:]
+    private var registeredTabs: [ObjectIdentifier: RegisteredTab] = [:]
+    private var hasAttemptedSessionRestore = false
     private var tabDragMonitor: Any?
     private var temporarilyShownTabBars: [NSWindow] = []
     private var tabDragCleanupTask: Task<Void, Never>?
@@ -323,6 +336,20 @@ private final class NativeTabCoordinator {
         // accept one another's tabs during a native tab drag.
         window.tabbingIdentifier = Self.tabbingIdentifier
         window.tabbingMode = .preferred
+    }
+
+    func register(window: NSWindow, browser: BrowserModel) {
+        configure(window: window)
+        let identifier = ObjectIdentifier(window)
+        registeredTabs[identifier] = RegisteredTab(window: window, browser: browser)
+        installCloseObserver(for: window)
+
+        guard !hasAttemptedSessionRestore else { return }
+        hasAttemptedSessionRestore = true
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window else { return }
+            self.restorePendingSession(from: window)
+        }
     }
 
     /// Makes a one-tab window a native drop destination while another native tab is
@@ -450,6 +477,132 @@ private final class NativeTabCoordinator {
         NSAnimationContext.endGrouping()
     }
 
+    func persistSession() {
+        let liveTabs = registeredTabs.filter { $0.value.window != nil && $0.value.browser != nil }
+        registeredTabs = liveTabs
+
+        let registeredWindows = liveTabs.values.compactMap(\.window)
+        let orderedWindows = NSApplication.shared.orderedWindows
+            + registeredWindows.filter { candidate in
+                !NSApplication.shared.orderedWindows.contains(where: { $0 === candidate })
+            }
+        var seenGroups = Set<ObjectIdentifier>()
+        var windows: [RestoredBrowserWindowState] = []
+        var groupKeys: [ObjectIdentifier] = []
+
+        for candidate in orderedWindows where candidate.tabbingIdentifier == Self.tabbingIdentifier {
+            let tabWindows = candidate.tabGroup?.windows ?? [candidate]
+            let groupKey = candidate.tabGroup.map(ObjectIdentifier.init)
+                ?? ObjectIdentifier(candidate)
+            guard seenGroups.insert(groupKey).inserted else { continue }
+
+            let states: [(window: NSWindow, state: RestoredTabState)] = tabWindows.compactMap { window in
+                guard let browser = registeredTabs[ObjectIdentifier(window)]?.browser else { return nil }
+                return (window, browser.restorationState)
+            }
+            guard !states.isEmpty else { continue }
+            let selectedWindow = candidate.tabGroup?.selectedWindow ?? candidate
+            let selectedIndex = states.firstIndex { $0.window === selectedWindow } ?? 0
+            windows.append(RestoredBrowserWindowState(
+                frame: selectedWindow.frame,
+                tabs: states.map(\.state),
+                selectedIndex: selectedIndex
+            ))
+            groupKeys.append(groupKey)
+        }
+
+        let keyWindow = NSApplication.shared.keyWindow
+        let keyGroup = keyWindow.map { window in
+            window.tabGroup.map(ObjectIdentifier.init) ?? ObjectIdentifier(window)
+        }
+        let keyWindowIndex = keyGroup.flatMap { groupKeys.firstIndex(of: $0) } ?? 0
+        SessionRestorationStore.shared.saveApplication(RestoredApplicationState(
+            windows: windows,
+            keyWindowIndex: keyWindowIndex
+        ))
+    }
+
+    private func restorePendingSession(from rootWindow: NSWindow) {
+        guard let session = NativeTabRestorationState.takePendingApplicationState(),
+              !session.windows.isEmpty else { return }
+
+        let first = session.windows[0]
+        applySavedFrame(first.frame, to: rootWindow)
+        restoreTabs(in: first, around: rootWindow)
+
+        var restoredRoots = [rootWindow]
+        for savedWindow in session.windows.dropFirst() where !savedWindow.tabs.isEmpty {
+            let selectedIndex = min(max(savedWindow.selectedIndex, 0), savedWindow.tabs.count - 1)
+            let window = makeBrowserWindow(
+                url: nil,
+                matching: nil,
+                restoredState: savedWindow.tabs[selectedIndex]
+            )
+            applySavedFrame(savedWindow.frame, to: window)
+            restoreTabs(in: savedWindow, around: window)
+            // Explicitly keep each restored group separate while it is first ordered;
+            // afterward it remains fully compatible with native tab dragging.
+            window.tabbingMode = .disallowed
+            window.orderFront(nil)
+            window.tabbingMode = .preferred
+            restoredRoots.append(window)
+        }
+
+        let keyIndex = min(max(session.keyWindowIndex, 0), restoredRoots.count - 1)
+        restoredRoots[keyIndex].makeKeyAndOrderFront(nil)
+    }
+
+    private func restoreTabs(in savedWindow: RestoredBrowserWindowState, around root: NSWindow) {
+        guard !savedWindow.tabs.isEmpty else { return }
+        let selectedIndex = min(max(savedWindow.selectedIndex, 0), savedWindow.tabs.count - 1)
+        var indexedWindows: [(index: Int, window: NSWindow)] = [(selectedIndex, root)]
+        for index in savedWindow.tabs.indices where index != selectedIndex {
+            let tabWindow = makeBrowserWindow(
+                url: nil,
+                matching: root,
+                restoredState: savedWindow.tabs[index]
+            )
+            indexedWindows.append((index, tabWindow))
+        }
+        guard indexedWindows.count > 1 else { return }
+
+        // Adding the first peer creates AppKit's lazy tab group. Reinsert every member
+        // at its saved index afterward so a selected tab from the middle of the strip
+        // does not disturb the original ordering.
+        root.addTabbedWindow(indexedWindows[1].window, ordered: .above)
+        guard let group = root.tabGroup else { return }
+        group.selectedWindow = root
+        for entry in indexedWindows.sorted(by: { $0.index < $1.index }) {
+            group.insertWindow(entry.window, at: entry.index)
+        }
+        group.selectedWindow = root
+    }
+
+    private func applySavedFrame(_ frame: CGRect?, to window: NSWindow) {
+        guard let frame, frame.width > 0, frame.height > 0 else { return }
+        window.setFrame(frame, display: false)
+    }
+
+    private func installCloseObserver(for window: NSWindow) {
+        let identifier = ObjectIdentifier(window)
+        guard closeObservers[identifier] == nil else { return }
+        closeObservers[identifier] = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.registeredTabs.removeValue(forKey: identifier)
+                self.windowControllers.removeValue(forKey: identifier)
+                if let observer = self.closeObservers.removeValue(forKey: identifier) {
+                    NotificationCenter.default.removeObserver(observer)
+                }
+                DispatchQueue.main.async { [weak self] in self?.persistSession() }
+            }
+        }
+    }
+
     /// Creates and attaches a tab without ever presenting it as a standalone window.
     ///
     /// SwiftUI's `openWindow` always orders a new WindowGroup scene onscreen before its
@@ -486,8 +639,15 @@ private final class NativeTabCoordinator {
         window.tabbingMode = .preferred
     }
 
-    private func makeBrowserWindow(url: URL?, matching source: NSWindow?) -> NSWindow {
+    private func makeBrowserWindow(
+        url: URL?,
+        matching source: NSWindow?,
+        restoredState: RestoredTabState? = nil
+    ) -> NSWindow {
         let destination = BrowserWindowDestination(url: url)
+        if let restoredState {
+            NativeTabRestorationState.enqueue(restoredState, for: destination.id)
+        }
         let contentRect = source.map { $0.contentRect(forFrameRect: $0.frame) }
             ?? NSRect(x: 0, y: 0, width: 1_100, height: 760)
         let window = NSWindow(
@@ -516,19 +676,7 @@ private final class NativeTabCoordinator {
         let controller = NSWindowController(window: window)
         let identifier = ObjectIdentifier(window)
         windowControllers[identifier] = controller
-        closeObservers[identifier] = NotificationCenter.default.addObserver(
-            forName: NSWindow.willCloseNotification,
-            object: window,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.windowControllers.removeValue(forKey: identifier)
-                if let observer = self.closeObservers.removeValue(forKey: identifier) {
-                    NotificationCenter.default.removeObserver(observer)
-                }
-            }
-        }
+        installCloseObserver(for: window)
         return window
     }
 }
@@ -577,7 +725,10 @@ private struct BrowserWindowView: View {
 
     init(initialURL: URL? = nil, destinationID: UUID = UUID()) {
         _browser = StateObject(wrappedValue: BrowserModel(
-            restoredState: NativeTabRestorationState.next(initialURL: initialURL),
+            restoredState: NativeTabRestorationState.next(
+                destinationID: destinationID,
+                initialURL: initialURL
+            ),
             initialURL: initialURL
         ))
         self.destinationID = destinationID
@@ -588,6 +739,9 @@ private struct BrowserWindowView: View {
         .navigationTitle(browser.title)
         .background(WindowAccessor(window: $hostWindow))
         .onAppear {
+            if let hostWindow {
+                NativeTabCoordinator.shared.register(window: hostWindow, browser: browser)
+            }
             configureNativeTab()
             browser.openInNewTab = { url, background in
                 openNativeTab(url: url, inBackground: background)
@@ -619,7 +773,7 @@ private struct BrowserWindowView: View {
         .onChange(of: browser.committedURL) { _, _ in configureNativeTab() }
         .onChange(of: hostWindow) { _, window in
             guard let window else { return }
-            NativeTabCoordinator.shared.configure(window: window)
+            NativeTabCoordinator.shared.register(window: window, browser: browser)
             configureNativeTab()
         }
     }
@@ -667,15 +821,29 @@ private struct BrowserWindowView: View {
 
 @MainActor
 private enum NativeTabRestorationState {
-    private static var consumed = false
+    private static var consumedInitialTab = false
+    private static var pendingApplicationState: RestoredApplicationState?
+    private static var queuedTabs: [UUID: RestoredTabState] = [:]
 
-    static func next(initialURL: URL?) -> RestoredTabState? {
-        guard initialURL == nil, !consumed else { return nil }
-        consumed = true
-        guard let restored = SessionRestorationStore.shared.load(),
-              !restored.tabs.isEmpty,
-              restored.tabs.indices.contains(restored.selectedIndex) else { return nil }
-        return restored.tabs[restored.selectedIndex]
+    static func next(destinationID: UUID, initialURL: URL?) -> RestoredTabState? {
+        if let queued = queuedTabs.removeValue(forKey: destinationID) { return queued }
+        guard initialURL == nil, !consumedInitialTab else { return nil }
+        consumedInitialTab = true
+        guard let restored = SessionRestorationStore.shared.loadApplication(),
+              let firstWindow = restored.windows.first,
+              !firstWindow.tabs.isEmpty else { return nil }
+        let selectedIndex = min(max(firstWindow.selectedIndex, 0), firstWindow.tabs.count - 1)
+        pendingApplicationState = restored
+        return firstWindow.tabs[selectedIndex]
+    }
+
+    static func enqueue(_ state: RestoredTabState, for destinationID: UUID) {
+        queuedTabs[destinationID] = state
+    }
+
+    static func takePendingApplicationState() -> RestoredApplicationState? {
+        defer { pendingApplicationState = nil }
+        return pendingApplicationState
     }
 }
 
@@ -1013,7 +1181,13 @@ private struct BrowserTabView: View {
                     .padding(.top, chromeHeight)
                 }
             } else {
-                StreamingWebViewPrototype(browser: browser, findNavigatorIsPresented: $showsFind)
+                ZStack {
+                    contentThemeBackground
+                        .ignoresSafeArea()
+
+                    StreamingWebViewPrototype(browser: browser, findNavigatorIsPresented: $showsFind)
+                        .opacity(browser.hasPresentedInitialDocument ? 1 : 0)
+                }
                 // WebKit anchors the find bar to the top of the web view. The web view
                 // deliberately extends up underneath the floating chrome, so the bar was
                 // landing on top of the tab strip and toolbar. Insetting the web view
@@ -1247,6 +1421,21 @@ private struct BrowserTabView: View {
         }
         browser.locationText = url.absoluteString
         browser.submitLocation()
+    }
+
+    private var contentThemeBackground: Color {
+        let theme = settings.preferences.contentTheme
+        let effectiveDarkAppearance = NSApplication.shared.effectiveAppearance.bestMatch(
+            from: [.darkAqua, .aqua]
+        ) == .darkAqua
+        let background = theme.palette(
+            effectiveDarkAppearance: effectiveDarkAppearance
+        ).background
+        return Color(
+            red: Double(background.red) / 255,
+            green: Double(background.green) / 255,
+            blue: Double(background.blue) / 255
+        )
     }
 
     private func installContextMenuMonitor() {

@@ -308,6 +308,10 @@ final class BrowserModel: ObservableObject {
     @Published var inputValidationMessage: String?
     @Published private(set) var pageZoom = 1.0
     @Published private(set) var retryNotBefore: Date?
+    /// False until WebKit has completely presented this tab's first document. The view
+    /// keeps WebKit transparent over a content-theme placeholder until then, preventing
+    /// its default white/black backing from flashing during creation or restoration.
+    @Published private(set) var hasPresentedInitialDocument = false
 
     let page: WebPage
 
@@ -1697,7 +1701,20 @@ final class BrowserModel: ObservableObject {
         linkSequence = 0
         expandedInlineImages.removeAll()
         let document = documentStore.createDocument()
-        _ = page.load(document.url)
+        let navigation = page.load(document.url)
+        if !hasPresentedInitialDocument {
+            Task { @MainActor [weak self] in
+                do {
+                    for try await event in navigation where event == .finished {
+                        self?.hasPresentedInitialDocument = true
+                        break
+                    }
+                } catch {
+                    // A superseding navigation owns the placeholder now. Its own
+                    // beginDocument call will remove it after that document is shown.
+                }
+            }
+        }
         return document.continuation
     }
 

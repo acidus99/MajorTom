@@ -24,29 +24,82 @@ public enum ApplicationAppearance: String, CaseIterable, Codable, Sendable {
     case dark
 }
 
+public struct ContentThemeColor: Equatable, Sendable {
+    public let red: UInt8
+    public let green: UInt8
+    public let blue: UInt8
+
+    public init(red: UInt8, green: UInt8, blue: UInt8) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+    }
+
+    public var cssHex: String {
+        String(format: "#%02x%02x%02x", red, green, blue)
+    }
+}
+
+public struct ContentThemePalette: Equatable, Sendable {
+    public let isDark: Bool
+    public let background: ContentThemeColor
+    public let foreground: ContentThemeColor
+    public let muted: ContentThemeColor
+    public let accent: ContentThemeColor
+    public let link: ContentThemeColor
+    public let blockquote: ContentThemeColor
+    public let codeBackground: ContentThemeColor
+}
+
 public enum ContentTheme: String, CaseIterable, Codable, Sendable {
     case automatic
     case draculaLight
     case draculaDark
 
-    public func css(effectiveDarkAppearance: Bool) -> String {
-        let dark = self == .draculaDark || (self == .automatic && effectiveDarkAppearance)
-        let appearanceCSS: String
-        if dark {
-            appearanceCSS = """
-            :root { color-scheme: dark; --background: #282a36; --foreground: #f8f8f2; --muted: #6272a4; --accent: #bd93f9; }
-            body { color: var(--foreground); background: var(--background); }
-            a { color: #8be9fd; } blockquote { border-color: var(--accent); color: #f1fa8c; }
-            pre, code { background: #343746; } .details { background: #343746 !important; }
-            """
-        } else {
-            appearanceCSS = """
-            :root { color-scheme: light; --background: #f8f8f2; --foreground: #282a36; --muted: #6272a4; --accent: #7c4dbe; }
-            body { color: var(--foreground); background: var(--background); }
-            a { color: #006a83; } blockquote { border-color: var(--accent); color: #5a3d00; }
-            pre, code { background: #ececf0; } .details { background: #ececf0 !important; }
-            """
+    public func palette(effectiveDarkAppearance: Bool) -> ContentThemePalette {
+        let useDarkPalette: Bool
+        switch self {
+        case .automatic: useDarkPalette = effectiveDarkAppearance
+        case .draculaLight: useDarkPalette = false
+        case .draculaDark: useDarkPalette = true
         }
+
+        if useDarkPalette {
+            return ContentThemePalette(
+                isDark: true,
+                background: ContentThemeColor(red: 0x28, green: 0x2a, blue: 0x36),
+                foreground: ContentThemeColor(red: 0xf8, green: 0xf8, blue: 0xf2),
+                muted: ContentThemeColor(red: 0x62, green: 0x72, blue: 0xa4),
+                accent: ContentThemeColor(red: 0xbd, green: 0x93, blue: 0xf9),
+                link: ContentThemeColor(red: 0x8b, green: 0xe9, blue: 0xfd),
+                blockquote: ContentThemeColor(red: 0xf1, green: 0xfa, blue: 0x8c),
+                codeBackground: ContentThemeColor(red: 0x34, green: 0x37, blue: 0x46)
+            )
+        }
+        return ContentThemePalette(
+            isDark: false,
+            background: ContentThemeColor(red: 0xf8, green: 0xf8, blue: 0xf2),
+            foreground: ContentThemeColor(red: 0x28, green: 0x2a, blue: 0x36),
+            muted: ContentThemeColor(red: 0x62, green: 0x72, blue: 0xa4),
+            accent: ContentThemeColor(red: 0x7c, green: 0x4d, blue: 0xbe),
+            link: ContentThemeColor(red: 0x00, green: 0x6a, blue: 0x83),
+            blockquote: ContentThemeColor(red: 0x5a, green: 0x3d, blue: 0x00),
+            codeBackground: ContentThemeColor(red: 0xec, green: 0xec, blue: 0xf0)
+        )
+    }
+
+    public func usesDarkPalette(effectiveDarkAppearance: Bool) -> Bool {
+        palette(effectiveDarkAppearance: effectiveDarkAppearance).isDark
+    }
+
+    public func css(effectiveDarkAppearance: Bool) -> String {
+        let palette = palette(effectiveDarkAppearance: effectiveDarkAppearance)
+        let appearanceCSS = """
+        :root { color-scheme: \(palette.isDark ? "dark" : "light"); --background: \(palette.background.cssHex); --foreground: \(palette.foreground.cssHex); --muted: \(palette.muted.cssHex); --accent: \(palette.accent.cssHex); }
+        body { color: var(--foreground); background: var(--background); }
+        a { color: \(palette.link.cssHex); } blockquote { border-color: var(--accent); color: \(palette.blockquote.cssHex); }
+        pre, code { background: \(palette.codeBackground.cssHex); } .details { background: \(palette.codeBackground.cssHex) !important; }
+        """
 
         // Print rules must follow appearance rules in the cascade so dark screen
         // colors cannot win when WebKit switches to print media.

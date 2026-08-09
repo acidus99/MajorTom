@@ -109,11 +109,23 @@ struct RestoredWindowState: Codable {
     var selectedIndex: Int
 }
 
+struct RestoredBrowserWindowState: Codable {
+    var frame: CGRect?
+    var tabs: [RestoredTabState]
+    var selectedIndex: Int
+}
+
+struct RestoredApplicationState: Codable {
+    var windows: [RestoredBrowserWindowState]
+    var keyWindowIndex: Int
+}
+
 @MainActor
 final class SessionRestorationStore {
     static let shared = SessionRestorationStore()
     private let defaults = UserDefaults.standard
     private let key = "last-window-session-v1"
+    private let applicationKey = "last-application-session-v2"
 
     func load() -> RestoredWindowState? {
         guard let data = defaults.data(forKey: key) else { return nil }
@@ -125,8 +137,31 @@ final class SessionRestorationStore {
         defaults.set(data, forKey: key)
     }
 
+    func loadApplication() -> RestoredApplicationState? {
+        if let data = defaults.data(forKey: applicationKey),
+           let state = try? JSONDecoder().decode(RestoredApplicationState.self, from: data) {
+            return state
+        }
+        // Migrate the old single-window format instead of discarding its tab caches.
+        guard let legacy = load() else { return nil }
+        return RestoredApplicationState(
+            windows: [RestoredBrowserWindowState(
+                frame: nil,
+                tabs: legacy.tabs,
+                selectedIndex: legacy.selectedIndex
+            )],
+            keyWindowIndex: 0
+        )
+    }
+
+    func saveApplication(_ state: RestoredApplicationState) {
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        defaults.set(data, forKey: applicationKey)
+    }
+
     func clear() {
         defaults.removeObject(forKey: key)
+        defaults.removeObject(forKey: applicationKey)
     }
 }
 
