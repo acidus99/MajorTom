@@ -337,8 +337,8 @@ final class BrowserModel: ObservableObject {
     private var currentSourceBytes = Data()
     private var currentMIMEType = ""
     /// Tracks what has named the current document while the opening Gemtext lines stream
-    /// in. A heading can replace an earlier preformatted caption; ordinary content closes
-    /// the claim window and leaves the URL-derived fallback in place.
+    /// in. A heading can replace an earlier preformatted caption; discovery is limited to
+    /// the first fifteen Gemtext lines.
     private var titleClaim = GemtextTitleClaim()
     private var imageTasks: [Task<Void, Never>] = []
     private let imageLimiter = AsyncSemaphore(limit: 4)

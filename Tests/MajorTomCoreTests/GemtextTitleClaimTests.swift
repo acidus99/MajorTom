@@ -51,20 +51,27 @@ final class GemtextTitleClaimTests: XCTestCase {
         XCTAssertEqual(result.source, .none)
     }
 
-    func testNonTitleContentBeforeHeadingClosesTheClaimWindow() {
+    func testNonTitleContentBeforeHeadingDoesNotCloseTheClaimWindow() {
         let result = claim([.text("introductory prose"), .heading(level: 1, text: "Later")])
+        XCTAssertEqual(result.title, "Later")
+        XCTAssertEqual(result.source, .heading)
+    }
+
+    func testHeadingAfterTheFifteenthLineIsIgnored() {
+        let firstFourteen = Array(repeating: GemtextEvent.text("prose"), count: 14)
+        let result = claim(firstFourteen + [.blank, .heading(level: 1, text: "Too Late")])
         XCTAssertNil(result.title)
         XCTAssertEqual(result.source, .none)
     }
 
-    func testNonEmptyPreformattedContentWithoutCaptionClosesTheClaimWindow() {
+    func testNonEmptyPreformattedContentWithoutCaptionDoesNotCloseTheClaimWindow() {
         let result = claim([
             .beginPreformatted(altText: nil),
             .preformattedLine("ASCII art"),
             .heading(level: 1, text: "Later")
         ])
-        XCTAssertNil(result.title)
-        XCTAssertEqual(result.source, .none)
+        XCTAssertEqual(result.title, "Later")
+        XCTAssertEqual(result.source, .heading)
     }
 
     func testOnlyTheFirstPreformattedCaptionIsUsed() {

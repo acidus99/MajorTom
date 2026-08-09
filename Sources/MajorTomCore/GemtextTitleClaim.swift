@@ -2,10 +2,10 @@ import Foundation
 
 /// Picks a document's title out of the events streaming from a Gemtext document.
 ///
-/// The first non-empty heading names the document, regardless of heading level. If a
-/// preformatted block opens first, its non-empty fence caption may name the document
-/// provisionally; a later heading takes precedence. Any other non-empty content closes
-/// the title-claim window, leaving the caller's URL-derived fallback in place.
+/// Within the first fifteen Gemtext lines, the first non-empty heading names the
+/// document, regardless of heading level. If a preformatted block opens first, its
+/// non-empty fence caption may name the document provisionally; a later heading takes
+/// precedence. Other content does not prevent a later heading from being found.
 ///
 /// A heading always outranks fence text even when the preformatted block arrives first,
 /// which matters because titles are claimed while the response is still streaming and
@@ -20,7 +20,9 @@ public struct GemtextTitleClaim: Equatable, Sendable {
 
     public private(set) var source: Source = .none
     public private(set) var title: String?
-    private var stoppedLooking = false
+    private var linesSeen = 0
+
+    private static let maximumTitleLines = 15
 
     /// - Parameter existingTitle: a title already known for this document, e.g. one
     ///   restored from cache. Treated as a heading-strength claim so that re-rendering
@@ -37,26 +39,18 @@ public struct GemtextTitleClaim: Equatable, Sendable {
     /// - Returns: `true` when `title` changed, so a caller can republish state only
     ///   when there is something new to publish.
     public mutating func receive(_ event: GemtextEvent) -> Bool {
+        guard linesSeen < Self.maximumTitleLines else { return false }
+        linesSeen += 1
+
         switch event {
         case .heading(level: _, text: let heading):
             // The first non-empty heading wins; later headings are section titles.
-            guard !stoppedLooking, source != .heading else { return false }
+            guard source != .heading else { return false }
             return adopt(heading, as: .heading)
         case .beginPreformatted(let altText):
-            guard !stoppedLooking, source == .none, let altText else { return false }
+            guard source == .none, let altText else { return false }
             return adopt(altText, as: .preformattedAlt)
-        case .preformattedLine(let line):
-            if !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                stoppedLooking = true
-            }
-            return false
-        case .text(let text), .listItem(let text), .quote(let text):
-            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                stoppedLooking = true
-            }
-            return false
-        case .link:
-            stoppedLooking = true
+        case .preformattedLine, .text, .link, .listItem, .quote:
             return false
         default:
             return false
