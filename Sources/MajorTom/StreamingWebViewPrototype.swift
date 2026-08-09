@@ -819,15 +819,15 @@ final class BrowserModel: ObservableObject {
         // available on a fresh tab and did nothing when clicked (spec 18.3).
         menu.autoenablesItems = false
         contextMenuTargets.removeAll()
-        addContextMenuItem("Back", systemImage: "chevron.left", enabled: canGoBack, to: menu) { [weak self] in self?.goBack() }
-        addContextMenuItem("Forward", systemImage: "chevron.right", enabled: canGoForward, to: menu) { [weak self] in self?.goForward() }
+        addContextMenuItem("Back", systemImage: BrowserMenuIcon.back, enabled: canGoBack, to: menu) { [weak self] in self?.goBack() }
+        addContextMenuItem("Forward", systemImage: BrowserMenuIcon.forward, enabled: canGoForward, to: menu) { [weak self] in self?.goForward() }
         menu.addItem(.separator())
-        addContextMenuItem("Reload Page", systemImage: "arrow.clockwise", enabled: canReload, to: menu) { [weak self] in self?.reload() }
+        addContextMenuItem("Reload Page", systemImage: BrowserMenuIcon.reload, enabled: canReload, to: menu) { [weak self] in self?.reload() }
         menu.addItem(.separator())
-        addContextMenuItem("Show Page Source", systemImage: "doc.text.magnifyingglass", enabled: canShowSource, to: menu) { [weak self] in self?.showPageSource() }
-        addContextMenuItem("Check for Previous Versions", systemImage: "clock.arrow.circlepath", enabled: canCheckArchive, to: menu) { [weak self] in self?.openArchive() }
-        addContextMenuItem("Save Page As…", systemImage: "square.and.arrow.down", enabled: canSavePage, to: menu) { [weak self] in Task { await self?.savePage() } }
-        addContextMenuItem("Print Page…", systemImage: "printer", enabled: true, to: menu) { [weak self] in self?.printPage() }
+        addContextMenuItem("Show Page Source", systemImage: BrowserMenuIcon.showSource, enabled: canShowSource, to: menu) { [weak self] in self?.showPageSource() }
+        addContextMenuItem("Check for Previous Versions", systemImage: BrowserMenuIcon.archive, enabled: canCheckArchive, to: menu) { [weak self] in self?.openArchive() }
+        addContextMenuItem("Save Page As…", systemImage: BrowserMenuIcon.save, enabled: canSavePage, to: menu) { [weak self] in Task { await self?.savePage() } }
+        addContextMenuItem("Print Page…", systemImage: BrowserMenuIcon.print, enabled: true, to: menu) { [weak self] in self?.printPage() }
         menu.popUp(positioning: nil, at: location, in: view)
     }
 
@@ -853,16 +853,16 @@ final class BrowserModel: ObservableObject {
         menu.autoenablesItems = false
         contextMenuTargets.removeAll()
         let opensInApp = canOpenInApp(url)
-        addContextMenuItem("Open Link in New Tab", systemImage: "plus.rectangle.on.rectangle", enabled: opensInApp, to: menu) { [weak self] in
+        addContextMenuItem("Open Link in New Tab", systemImage: BrowserMenuIcon.newTab, enabled: opensInApp, to: menu) { [weak self] in
             self?.openInNewTab?(url, true)
         }
-        addContextMenuItem("Open Link in New Window", systemImage: "macwindow.badge.plus", enabled: opensInApp, to: menu) { [weak self] in
+        addContextMenuItem("Open Link in New Window", systemImage: BrowserMenuIcon.newWindow, enabled: opensInApp, to: menu) { [weak self] in
             self?.openInNewWindow?(url)
         }
         menu.addItem(.separator())
-        addContextMenuItem("Download Linked File As…", systemImage: "arrow.down.circle", enabled: !url.isFileURL, to: menu) { [weak self] in self?.download(url) }
+        addContextMenuItem("Download Linked File As…", systemImage: BrowserMenuIcon.download, enabled: !url.isFileURL, to: menu) { [weak self] in self?.download(url) }
         menu.addItem(.separator())
-        addContextMenuItem("Copy Link", systemImage: "doc.on.doc", enabled: true, to: menu) {
+        addContextMenuItem("Copy Link", systemImage: BrowserMenuIcon.copyLink, enabled: true, to: menu) {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(url.absoluteString, forType: .string)
         }
@@ -2459,6 +2459,10 @@ struct StreamingWebViewPrototype: View {
             .webViewTextSelection(.enabled)
             .webViewMagnificationGestures(.enabled)
             .findNavigator(isPresented: $findNavigatorIsPresented)
+            // Capsule documents are read-only. This removes the native find
+            // navigator's replacement controls while preserving Find, match count,
+            // next/previous navigation, and Command-G.
+            .replaceDisabled()
     }
 }
 

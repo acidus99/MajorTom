@@ -200,6 +200,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
             NSApplication.shared.activate()
             NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
             FileMenuCustomization.apply()
+            MenuBarIconCustomization.install()
             NativeTabMenuCustomization.install()
         }
 
@@ -214,6 +215,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         ) { _ in
             MainActor.assumeIsolated {
                 FileMenuCustomization.apply()
+                MenuBarIconCustomization.apply()
                 NativeTabMenuCustomization.apply()
             }
         }
@@ -1525,6 +1527,52 @@ private enum FileMenuCustomization {
             item.keyEquivalent = "w"
             item.keyEquivalentModifierMask = [.command]
         }
+    }
+}
+
+/// Adds the same SF Symbols used by page/link context menus to their menu-bar
+/// counterparts. SwiftUI recreates command items as scenes change, so this observes menu
+/// construction and also reapplies immediately before a menu begins tracking.
+@MainActor
+private enum MenuBarIconCustomization {
+    private static let observer = MenuBarIconObserver()
+    private static var isInstalled = false
+
+    static func install() {
+        apply()
+        guard !isInstalled else { return }
+        isInstalled = true
+        for name in [NSMenu.didAddItemNotification, NSMenu.didBeginTrackingNotification] {
+            NotificationCenter.default.addObserver(
+                observer,
+                selector: #selector(MenuBarIconObserver.menuChanged(_:)),
+                name: name,
+                object: nil
+            )
+        }
+    }
+
+    static func apply() {
+        guard let mainMenu = NSApplication.shared.mainMenu else { return }
+        applyIcons(to: mainMenu)
+    }
+
+    fileprivate static func applyIcons(to menu: NSMenu) {
+        for item in menu.items {
+            if item.image == nil,
+               let symbol = BrowserMenuIcon.menuBarSymbolByTitle[item.title] {
+                item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: item.title)
+            }
+            if let submenu = item.submenu { applyIcons(to: submenu) }
+        }
+    }
+}
+
+@MainActor
+private final class MenuBarIconObserver: NSObject {
+    @objc func menuChanged(_ notification: Notification) {
+        guard let menu = notification.object as? NSMenu else { return }
+        MenuBarIconCustomization.applyIcons(to: menu)
     }
 }
 
