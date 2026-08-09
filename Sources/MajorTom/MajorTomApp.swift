@@ -334,6 +334,14 @@ private final class NativeTabCoordinator {
     func configure(window: NSWindow) {
         // AppKit uses a matching, non-empty identifier to decide whether windows can
         // accept one another's tabs during a native tab drag.
+        // Every tab is its own NSWindow. SwiftUI gives its initial scene a full-size
+        // content view automatically, but manually-created tab/window peers do not get
+        // that style unless it is applied explicitly. Without it, AppKit composites the
+        // native title and tab bars over the default window background instead of the
+        // content-theme color, losing the Liquid Glass continuation seen on the first
+        // tab.
+        window.styleMask.insert(.fullSizeContentView)
+        window.titlebarAppearsTransparent = true
         window.tabbingIdentifier = Self.tabbingIdentifier
         window.tabbingMode = .preferred
     }
