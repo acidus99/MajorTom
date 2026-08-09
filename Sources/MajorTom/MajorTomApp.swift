@@ -252,11 +252,9 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         _ sender: NSApplication,
         hasVisibleWindows flag: Bool
     ) -> Bool {
-        if !flag {
-            DispatchQueue.main.async { [weak self] in
-                self?.openFreshBrowserWindow()
-            }
-        }
+        // When no browser window is visible, let SwiftUI's WindowGroup handle the
+        // reopen event and create its single default scene. Calling New Window here as
+        // well races that scene restoration and produces two windows from one Dock click.
         return true
     }
 
@@ -264,13 +262,6 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         false
     }
 
-    @MainActor
-    private func openFreshBrowserWindow() {
-        guard let fileMenu = NSApplication.shared.mainMenu?.item(withTitle: "File")?.submenu,
-              let newWindow = fileMenu.items.first(where: { $0.title == "New Window" }),
-              let action = newWindow.action else { return }
-        NSApplication.shared.sendAction(action, to: newWindow.target, from: newWindow)
-    }
 }
 
 private struct NativeFoundationView: View {
