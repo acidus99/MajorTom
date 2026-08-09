@@ -215,12 +215,14 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         commandKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let keyCode = event.keyCode
-            if modifiers == .command, event.charactersIgnoringModifiers == "=" {
+            let hasCommandOnly = modifiers.contains(.command)
+                && modifiers.isDisjoint(with: [.shift, .option, .control])
+            if hasCommandOnly, event.charactersIgnoringModifiers == "=" {
                 // Accept Command-= in addition to the standard Command-+ menu shortcut.
                 NotificationCenter.default.post(name: .majorTomZoomIn, object: nil)
                 return nil
             }
-            guard modifiers == .command, keyCode == 123 || keyCode == 124 else { return event }
+            guard hasCommandOnly, keyCode == 123 || keyCode == 124 else { return event }
 
             // Command-Left/Right are "move to beginning/end of line" while editing.
             // Swallowing them there broke standard Mac text editing in the address
