@@ -59,11 +59,21 @@ private final class LinkHoverScriptHandler: NSObject, WKScriptMessageHandler {
         source: """
         (() => {
             var last = null;
-            const post = (href) => {
+            var hoveredAnchor = null;
+            const post = (anchor, event) => {
+                const href = anchor ? anchor.href : '';
                 const value = href || '';
-                if (value === last) { return; }
-                last = value;
-                window.webkit.messageHandlers.\(name).postMessage(value);
+                const modifiers = event ? [event.metaKey, event.shiftKey, event.altKey, event.ctrlKey] : [false, false, false, false];
+                const signature = value + '|' + modifiers.join(',');
+                if (signature === last) { return; }
+                last = signature;
+                window.webkit.messageHandlers.\(name).postMessage({
+                    href: value,
+                    command: modifiers[0],
+                    shift: modifiers[1],
+                    option: modifiers[2],
+                    control: modifiers[3]
+                });
             };
             const anchorFor = (node) => {
                 const element = node instanceof Element ? node : node?.parentElement;
@@ -72,18 +82,32 @@ private final class LinkHoverScriptHandler: NSObject, WKScriptMessageHandler {
             // `.href` is already absolute, resolved against the document's <base>.
             document.addEventListener('mouseover', (event) => {
                 const anchor = anchorFor(event.target);
-                post(anchor ? anchor.href : '');
+                hoveredAnchor = anchor;
+                post(anchor, event);
+            }, true);
+            document.addEventListener('mousemove', (event) => {
+                const anchor = anchorFor(event.target);
+                if (anchor) { post(anchor, event); }
             }, true);
             document.addEventListener('mouseout', (event) => {
-                if (!anchorFor(event.relatedTarget)) { post(''); }
+                if (!anchorFor(event.relatedTarget)) {
+                    hoveredAnchor = null;
+                    post(null, event);
+                }
+            }, true);
+            document.addEventListener('keydown', (event) => {
+                if (hoveredAnchor) { post(hoveredAnchor, event); }
+            }, true);
+            document.addEventListener('keyup', (event) => {
+                if (hoveredAnchor) { post(hoveredAnchor, event); }
             }, true);
             // Spec 18.4 covers focus as well as hover.
             document.addEventListener('focusin', (event) => {
                 const anchor = anchorFor(event.target);
-                post(anchor ? anchor.href : '');
+                post(anchor, null);
             }, true);
-            document.addEventListener('focusout', () => post(''), true);
-            window.addEventListener('blur', () => post(''));
+            document.addEventListener('focusout', () => post(null, null), true);
+            window.addEventListener('blur', () => post(null, null));
         })();
         """,
         injectionTime: .atDocumentStart,
@@ -97,9 +121,84 @@ private final class LinkHoverScriptHandler: NSObject, WKScriptMessageHandler {
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        let href = message.body as? String
         Task { @MainActor [weak browser] in
-            browser?.updateHoveredLink(href)
+            guard let payload = message.body as? [String: Any] else { return }
+            var modifiers: LinkModifierKeys = []
+            if payload["command"] as? Bool == true { modifiers.insert(.command) }
+            if payload["shift"] as? Bool == true { modifiers.insert(.shift) }
+            if payload["option"] as? Bool == true { modifiers.insert(.option) }
+            if payload["control"] as? Bool == true { modifiers.insert(.control) }
+            browser?.updateHoveredLink(payload["href"] as? String, modifiers: modifiers)
+        }
+    }
+}
+
+/// Handles link activations whose modifier state is not reliably preserved in
+/// WebKit's navigation action (notably Shift-Command-click and middle-click).
+@available(macOS 26.0, *)
+@MainActor
+private final class LinkActivationScriptHandler: NSObject, WKScriptMessageHandler {
+    static let name = "majorTomLinkActivation"
+
+    static let userScript = WKUserScript(
+        source: """
+        (() => {
+        let suppressNextClick = false;
+        document.addEventListener('mousedown', (event) => {
+            const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+            const anchor = target?.closest('a[href]');
+            if (!anchor) { return; }
+            // DOM button numbers are left=0, middle=1, right=2. Control-click is
+            // deliberately left to the context-menu handler.
+            const middle = event.button === 1;
+            const foregroundTab = event.button === 0 && event.metaKey && event.shiftKey;
+            if (!middle && !foregroundTab) { return; }
+            event.preventDefault();
+            event.stopPropagation();
+            suppressNextClick = true;
+            window.webkit.messageHandlers.\(name).postMessage({
+                href: anchor.href,
+                activation: middle ? 'newBackgroundTab' : 'newForegroundTab'
+            });
+        }, true);
+        document.addEventListener('click', (event) => {
+            if (!suppressNextClick && !(event.button === 0 && event.metaKey && event.shiftKey)) { return; }
+            event.preventDefault();
+            event.stopPropagation();
+            suppressNextClick = false;
+        }, true);
+        document.addEventListener('auxclick', (event) => {
+            if (event.button !== 1) { return; }
+            event.preventDefault();
+            event.stopPropagation();
+            suppressNextClick = false;
+        }, true);
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: true,
+        in: .defaultClient
+    )
+
+    weak var browser: BrowserModel?
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        guard let payload = message.body as? [String: Any],
+              let href = payload["href"] as? String,
+              let url = URL(string: href),
+              let activation = payload["activation"] as? String else { return }
+        Task { @MainActor [weak browser] in
+            switch activation {
+            case "newBackgroundTab":
+                browser?.activateLink(url, activation: .newBackgroundTab)
+            case "newForegroundTab":
+                browser?.activateLink(url, activation: .newForegroundTab)
+            default:
+                break
+            }
         }
     }
 }
@@ -246,6 +345,7 @@ final class BrowserModel: ObservableObject {
     private var pendingContextMenuLocation: NSPoint?
     private let contextMenuScriptHandler: ContextMenuScriptHandler
     private let linkHoverScriptHandler: LinkHoverScriptHandler
+    private let linkActivationScriptHandler: LinkActivationScriptHandler
     private let inlineImageScriptHandler: InlineImageScriptHandler
     /// Numbers link lines within the current document so an expanded image can be
     /// attached to the exact line that was clicked.
@@ -261,6 +361,7 @@ final class BrowserModel: ObservableObject {
         let router = BrowserNavigationRouter()
         let contextMenuScriptHandler = ContextMenuScriptHandler()
         let linkHoverScriptHandler = LinkHoverScriptHandler()
+        let linkActivationScriptHandler = LinkActivationScriptHandler()
         let inlineImageScriptHandler = InlineImageScriptHandler()
         let userContentController = WKUserContentController()
         userContentController.addUserScript(ContextMenuScriptHandler.userScript)
@@ -274,6 +375,12 @@ final class BrowserModel: ObservableObject {
             linkHoverScriptHandler,
             contentWorld: .defaultClient,
             name: LinkHoverScriptHandler.name
+        )
+        userContentController.addUserScript(LinkActivationScriptHandler.userScript)
+        userContentController.add(
+            linkActivationScriptHandler,
+            contentWorld: .defaultClient,
+            name: LinkActivationScriptHandler.name
         )
         userContentController.addUserScript(InlineImageScriptHandler.userScript)
         userContentController.add(
@@ -299,6 +406,7 @@ final class BrowserModel: ObservableObject {
         self.router = router
         self.contextMenuScriptHandler = contextMenuScriptHandler
         self.linkHoverScriptHandler = linkHoverScriptHandler
+        self.linkActivationScriptHandler = linkActivationScriptHandler
         self.inlineImageScriptHandler = inlineImageScriptHandler
         self.page = WebPage(
             configuration: configuration,
@@ -332,6 +440,7 @@ final class BrowserModel: ObservableObject {
         }
         contextMenuScriptHandler.browser = self
         linkHoverScriptHandler.browser = self
+        linkActivationScriptHandler.browser = self
         inlineImageScriptHandler.browser = self
 
         router.openURL = { [weak self] url in
@@ -345,6 +454,9 @@ final class BrowserModel: ObservableObject {
         }
         router.openInNewWindow = { [weak self] url in
             self?.openInNewWindow?(url)
+        }
+        router.canOpenInApp = { [weak self] url in
+            self?.canOpenInApp(url) ?? false
         }
         settings.preferencesDidChange
             .sink { [weak self] preferences in self?.preferencesChanged(to: preferences) }
@@ -725,10 +837,10 @@ final class BrowserModel: ObservableObject {
         let menu = NSMenu()
         menu.autoenablesItems = false
         contextMenuTargets.removeAll()
-        // Safari's link menu leads with "Open Link in New Tab" and has no plain
-        // "Open Link" at all — a plain click already does that. Spec 18.2 lists
-        // "Open Link"; Safari parity was chosen over it deliberately.
-        let opensInApp = url.scheme?.lowercased() == "gemini" || url.isFileURL
+        addContextMenuItem("Open Link", systemImage: "arrow.right", enabled: true, to: menu) { [weak self] in
+            self?.openLink(url)
+        }
+        let opensInApp = canOpenInApp(url)
         addContextMenuItem("Open Link in New Tab", systemImage: "plus.rectangle.on.rectangle", enabled: opensInApp, to: menu) { [weak self] in
             self?.openInNewTab?(url, true)
         }
@@ -953,12 +1065,39 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    fileprivate func updateHoveredLink(_ href: String?) {
+    fileprivate func updateHoveredLink(_ href: String?, modifiers: LinkModifierKeys = []) {
         guard let href, !href.isEmpty else {
             hoveredLinkURL = nil
             return
         }
-        hoveredLinkURL = href
+        hoveredLinkURL = LinkHoverText.text(for: href, modifiers: modifiers)
+    }
+
+    fileprivate func activateLink(_ url: URL, activation: LinkActivation) {
+        switch activation {
+        case .newBackgroundTab:
+            if canOpenInApp(url) {
+                openInNewTab?(url, true)
+            } else {
+                openLink(url)
+            }
+        case .newForegroundTab:
+            if canOpenInApp(url) {
+                openInNewTab?(url, false)
+            } else {
+                openLink(url)
+            }
+        case .newWindow:
+            if canOpenInApp(url) {
+                openInNewWindow?(url)
+            } else {
+                openLink(url)
+            }
+        case .download:
+            download(url)
+        case .currentTab, .contextMenu:
+            openLink(url)
+        }
     }
 
     /// Shows one of Major Tom's own pages, such as the bookmark manager.
@@ -1495,6 +1634,10 @@ final class BrowserModel: ObservableObject {
         default:
             return nil
         }
+    }
+
+    private func canOpenInApp(_ url: URL) -> Bool {
+        url.isFileURL || makeTarget(for: url) != nil
     }
 
     private func openLink(_ url: URL) {
@@ -2289,6 +2432,7 @@ private final class BrowserNavigationRouter {
     var downloadURL: ((URL) -> Void)?
     var openInNewTab: ((URL, _ inBackground: Bool) -> Void)?
     var openInNewWindow: ((URL) -> Void)?
+    var canOpenInApp: ((URL) -> Bool)?
 }
 
 @available(macOS 26.0, *)
@@ -2303,24 +2447,41 @@ private struct BrowserNavigationDecider: WebPage.NavigationDeciding {
         guard let url = action.request.url else { return .cancel }
         preferences.allowsContentJavaScript = false
         if url.scheme == BrowserDocumentSchemeHandler.scheme { return .allow }
-        if action.shouldPerformDownload {
+        let modifiers = action.modifierFlags
+        var linkModifiers: LinkModifierKeys = []
+        if modifiers.contains(.command) { linkModifiers.insert(.command) }
+        if modifiers.contains(.shift) { linkModifiers.insert(.shift) }
+        if modifiers.contains(.option) { linkModifiers.insert(.option) }
+        if modifiers.contains(.control) { linkModifiers.insert(.control) }
+
+        var activation = LinkActivationPolicy.activation(
+            buttonNumber: action.buttonNumber,
+            modifiers: linkModifiers
+        )
+        if action.shouldPerformDownload, activation == .currentTab {
+            activation = .download
+        }
+        switch activation {
+        case .contextMenu:
+            // The injected contextmenu handler presents the native link menu.
+            return .cancel
+        case .download:
             router.downloadURL?(url)
             return .cancel
-        }
-
-        // Safari's conventions: Command-click opens a background tab,
-        // Command-Shift-click opens it in front, plain Shift-click opens a window,
-        // and middle-click behaves like Command-click. Check .command before .shift.
-        let modifiers = action.modifierFlags
-        if url.scheme?.lowercased() == "gemini" {
-            if modifiers.contains(.command) || action.buttonNumber == 2 {
-                router.openInNewTab?(url, !modifiers.contains(.shift))
-                return .cancel
-            }
-            if modifiers.contains(.shift) {
-                router.openInNewWindow?(url)
-                return .cancel
-            }
+        case .newBackgroundTab:
+            guard router.canOpenInApp?(url) == true else { break }
+            router.openInNewTab?(url, true)
+            return .cancel
+        case .newForegroundTab:
+            guard router.canOpenInApp?(url) == true else { break }
+            router.openInNewTab?(url, false)
+            return .cancel
+        case .newWindow:
+            guard router.canOpenInApp?(url) == true else { break }
+            router.openInNewWindow?(url)
+            return .cancel
+        case .currentTab:
+            break
         }
 
         router.openURL?(url)

@@ -459,9 +459,13 @@ Copying presented text should copy the human-readable text without synthetic vis
 
 ### 18.1 Primary link behavior
 
-- Opening a Gemini link normally navigates the current tab.
-- Command-click opens a Gemini link in a new background tab.
-- Shift-click opens a Gemini link in a new window.
+- Click opens a link in the current tab.
+- Command-click opens a link in a new background tab.
+- Shift-Command-click opens a link in a new foreground tab.
+- Shift-click opens a link in a new window.
+- Option-click downloads the linked resource.
+- Control-click shows the link context menu.
+- Middle-click opens a link in a new background tab.
 - Explicit external schemes are handed to the corresponding macOS application.
 
 Relative Gemini links are resolved against the response URL that produced the containing document.

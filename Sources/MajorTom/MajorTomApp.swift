@@ -734,7 +734,7 @@ private struct BrowserTabView: View {
                             .padding(8)
                             .frame(maxWidth: 620, alignment: .leading)
                             .transition(.opacity)
-                            .accessibilityLabel("Link destination: \(hovered)")
+                            .accessibilityLabel(hovered)
                     }
                 }
                 .overlay(alignment: .bottomTrailing) {
