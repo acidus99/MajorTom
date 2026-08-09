@@ -333,8 +333,9 @@ final class BrowserModel: ObservableObject {
     private var trustWasDeclined = false
     private var currentSourceBytes = Data()
     private var currentMIMEType = ""
-    /// Tracks what has named the current document, so a level-one heading can still
-    /// take the title from a preformatted block's caption that streamed in earlier.
+    /// Tracks what has named the current document while the opening Gemtext lines stream
+    /// in. A heading can replace an earlier preformatted caption; ordinary content closes
+    /// the claim window and leaves the URL-derived fallback in place.
     private var titleClaim = GemtextTitleClaim()
     private var imageTasks: [Task<Void, Never>] = []
     private let imageLimiter = AsyncSemaphore(limit: 4)
@@ -612,7 +613,7 @@ final class BrowserModel: ObservableObject {
         canShowSource = mimeType.hasPrefix("text/")
 
         // commit() first: it sets committedURL, which renderCurrentContent() reads, and
-        // resets the title so a level-one heading in the document can claim it.
+        // resets the title so an opening heading or preformatted caption can claim it.
         commit(url, disposition: disposition)
         renderCurrentContent()
 

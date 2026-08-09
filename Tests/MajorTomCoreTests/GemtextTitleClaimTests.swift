@@ -21,9 +21,10 @@ final class GemtextTitleClaimTests: XCTestCase {
         XCTAssertEqual(result.source, .heading)
     }
 
-    func testDeeperHeadingsDoNotClaimTheTitle() {
+    func testFirstHeadingOfAnyLevelClaimsTheTitle() {
         let result = claim([.heading(level: 2, text: "Section"), .heading(level: 3, text: "Sub")])
-        XCTAssertNil(result.title)
+        XCTAssertEqual(result.title, "Section")
+        XCTAssertEqual(result.source, .heading)
     }
 
     func testFirstHeadingWinsOverLaterHeadings() {
@@ -46,6 +47,22 @@ final class GemtextTitleClaimTests: XCTestCase {
 
     func testUnlabelledPreformattedBlockClaimsNothing() {
         let result = claim([.beginPreformatted(altText: nil), .endPreformatted])
+        XCTAssertNil(result.title)
+        XCTAssertEqual(result.source, .none)
+    }
+
+    func testNonTitleContentBeforeHeadingClosesTheClaimWindow() {
+        let result = claim([.text("introductory prose"), .heading(level: 1, text: "Later")])
+        XCTAssertNil(result.title)
+        XCTAssertEqual(result.source, .none)
+    }
+
+    func testNonEmptyPreformattedContentWithoutCaptionClosesTheClaimWindow() {
+        let result = claim([
+            .beginPreformatted(altText: nil),
+            .preformattedLine("ASCII art"),
+            .heading(level: 1, text: "Later")
+        ])
         XCTAssertNil(result.title)
         XCTAssertEqual(result.source, .none)
     }

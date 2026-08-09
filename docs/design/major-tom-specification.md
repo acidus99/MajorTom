@@ -437,7 +437,7 @@ Unsupported content does not trigger an unsolicited download dialog or write a f
 
 ### 16.5 Titles
 
-For Gemtext, the first nonempty level-one heading is the document title. When no document title exists, Major Tom derives a concise display title from the resource filename or capsule hostname without treating that fallback as author-provided content.
+For Gemtext, the first nonempty heading of any level is the document title. If a preformatted block appears before a heading and its opening fence has a nonempty, non-whitespace caption, that caption is used provisionally and is replaced by a later heading. Title discovery stops when other nonempty, non-whitespace content appears first; in that case Major Tom uses the concise display-title fallback derived from the resource filename or capsule hostname, without treating that fallback as author-provided content.
 
 Document titles, display-title fallbacks, tab titles, window titles, and save-filename suggestions are distinct concepts even when they contain the same text.
 
