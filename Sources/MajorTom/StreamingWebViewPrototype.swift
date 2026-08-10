@@ -309,6 +309,91 @@ private enum InlineImagePresentationScript {
     )
 }
 
+/// Makes only multiline preformatted blocks collapsible.
+///
+/// The document itself contains no executable script. This runs in WebKit's isolated
+/// client world, outside capsule content and its CSP, and progressively enhances the
+/// native details/summary markup as streamed lines arrive.
+@available(macOS 26.0, *)
+@MainActor
+private enum PreformattedBlockPresentationScript {
+    static let userScript = WKUserScript(
+        source: """
+        (() => {
+          const enhance = (block) => {
+            if (!(block instanceof HTMLDetailsElement) || !block.matches('.pre-block')) { return; }
+            const pre = block.querySelector(':scope > pre');
+            if (!pre) { return; }
+            const multiline = block.querySelectorAll('.pre-line').length > 1;
+            block.classList.toggle('multiline', multiline);
+            if (multiline) {
+              pre.tabIndex = 0;
+              pre.setAttribute('role', 'button');
+              pre.setAttribute('aria-label', 'Collapse preformatted text');
+            } else {
+              pre.removeAttribute('tabindex');
+              pre.removeAttribute('role');
+              pre.removeAttribute('aria-label');
+            }
+          };
+
+          const containingBlocks = (node) => {
+            if (!(node instanceof Element)) { return []; }
+            const blocks = Array.from(node.querySelectorAll?.('.pre-block') || []);
+            const containing = node.closest?.('.pre-block');
+            if (containing) { blocks.push(containing); }
+            return blocks;
+          };
+
+          new MutationObserver((records) => {
+            const blocks = new Set();
+            for (const record of records) {
+              containingBlocks(record.target).forEach((block) => blocks.add(block));
+              for (const node of record.addedNodes) {
+                containingBlocks(node).forEach((block) => blocks.add(block));
+              }
+            }
+            blocks.forEach(enhance);
+          }).observe(document, { childList: true, subtree: true });
+
+          document.addEventListener('DOMContentLoaded', () => {
+            document.querySelectorAll('.pre-block').forEach(enhance);
+          });
+
+          const expandedMultilineBlockFor = (target) => {
+            const element = target instanceof Element ? target : target?.parentElement;
+            const pre = element?.closest('pre');
+            const block = pre?.parentElement;
+            return block?.matches('details.pre-block.multiline[open]') ? block : null;
+          };
+
+          const collapse = (block) => {
+            block.open = false;
+            block.querySelector(':scope > summary')?.focus({ preventScroll: true });
+          };
+
+          document.addEventListener('click', (event) => {
+            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) { return; }
+            const block = expandedMultilineBlockFor(event.target);
+            if (!block || !window.getSelection()?.isCollapsed) { return; }
+            collapse(block);
+          }, true);
+
+          document.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') { return; }
+            const block = expandedMultilineBlockFor(event.target);
+            if (!block) { return; }
+            event.preventDefault();
+            collapse(block);
+          }, true);
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: true,
+        in: .defaultClient
+    )
+}
+
 @available(macOS 26.0, *)
 @MainActor
 final class BrowserModel: ObservableObject {
@@ -455,6 +540,7 @@ final class BrowserModel: ObservableObject {
         )
         userContentController.addUserScript(LinkActivationScriptHandler.userScript)
         userContentController.addUserScript(InlineImagePresentationScript.userScript)
+        userContentController.addUserScript(PreformattedBlockPresentationScript.userScript)
         userContentController.add(
             linkActivationScriptHandler,
             contentWorld: .defaultClient,

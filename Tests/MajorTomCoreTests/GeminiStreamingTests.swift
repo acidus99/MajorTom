@@ -95,6 +95,38 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertFalse(HTMLDocumentStreamRenderer.defaultThemeCSS.contains("text-wrap: balance"))
     }
 
+    func testPreformattedLinesCarryStreamingMultilineMarkers() {
+        let renderer = HTMLDocumentStreamRenderer()
+        let first = String(decoding: renderer.render(.preformattedLine("one")), as: UTF8.self)
+        let second = String(decoding: renderer.render(.preformattedLine("<two>")), as: UTF8.self)
+
+        XCTAssertEqual(first, "<span class=\"pre-line\">one</span>\n")
+        XCTAssertEqual(second, "<span class=\"pre-line\">&lt;two&gt;</span>\n")
+    }
+
+    func testExpandedPreformattedBlocksHideTheirPlaceholder() {
+        XCTAssertTrue(
+            HTMLDocumentStreamRenderer.defaultThemeCSS.contains(
+                ".pre-block[open] > summary { display: none; }"
+            )
+        )
+    }
+
+    func testPreformattedAltTextBecomesAnEscapedHoverTooltip() {
+        let renderer = HTMLDocumentStreamRenderer()
+        let labelled = String(
+            decoding: renderer.render(.beginPreformatted(altText: "diagram \"one\" <wide>")),
+            as: UTF8.self
+        )
+        let unlabelled = String(
+            decoding: renderer.render(.beginPreformatted(altText: nil)),
+            as: UTF8.self
+        )
+
+        XCTAssertTrue(labelled.contains("<pre title=\"diagram &quot;one&quot; &lt;wide&gt;\">"))
+        XCTAssertFalse(unlabelled.contains("<pre title="))
+    }
+
     func testContentThemePaletteSelectionDoesNotDependOnUIThemeForExplicitThemes() {
         XCTAssertFalse(ContentTheme.draculaLight.usesDarkPalette(effectiveDarkAppearance: true))
         XCTAssertTrue(ContentTheme.draculaDark.usesDarkPalette(effectiveDarkAppearance: false))

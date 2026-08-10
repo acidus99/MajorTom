@@ -114,9 +114,15 @@ public struct HTMLDocumentStreamRenderer: Sendable {
             // the block is collapsed. Open by default.
             let summary = altText.map(Self.escape) ?? "Preformatted text"
             let unlabelled = altText == nil ? " class=\"unlabelled\"" : ""
-            html = "<details class=\"pre-block\" open><summary\(unlabelled)>\(summary)</summary><pre><code>"
+            let tooltip = altText.map {
+                " title=\"\(Self.escapeAttribute($0))\""
+            } ?? ""
+            html = "<details class=\"pre-block\" open><summary\(unlabelled)>\(summary)</summary><pre\(tooltip)><code>"
         case .preformattedLine(let text):
-            html = Self.escape(text) + "\n"
+            // One element per source line lets CSS and the host-side interaction script
+            // distinguish a genuinely multiline block without buffering streamed input.
+            // The newline remains outside the span so copied text is unchanged.
+            html = "<span class=\"pre-line\">\(Self.escape(text))</span>\n"
         case .endPreformatted:
             html = "</code></pre></details>"
         }
@@ -290,12 +296,16 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     pre { overflow-x: auto; padding: 1rem; border-radius: .65rem; background: color-mix(in srgb, CanvasText 8%, Canvas); }
     .pre-block { margin: 1rem 0; }
     .pre-block > summary { display: flex; align-items: center; gap: .4rem; cursor: pointer; list-style: none; color: SecondaryLabelColor; font-size: .82rem; padding: .1rem 0; }
+    /* Expanded blocks show only their content. The summary becomes the placeholder
+       again as soon as a multiline block is collapsed. */
+    .pre-block[open] > summary { display: none; }
     .pre-block > summary::-webkit-details-marker { display: none; }
-    .pre-block > summary::before { content: "\\25BE"; font-size: .8em; line-height: 1; }
-    .pre-block:not([open]) > summary::before { content: "\\25B8"; }
+    .pre-block > summary::before { content: "\\25B8"; font-size: .8em; line-height: 1; }
     .pre-block > summary.unlabelled { font-style: italic; opacity: .65; }
     .pre-block > summary:hover { color: CanvasText; }
-    .pre-block > pre { margin: .3rem 0 0; }
+    .pre-block > pre { margin: 0; }
+    .pre-block.multiline[open] > pre { cursor: pointer; }
+    .pre-block.multiline[open] > pre:focus-visible { outline: 3px solid AccentColor; outline-offset: 2px; }
     code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; background: color-mix(in srgb, CanvasText 8%, Canvas); border-radius: .25rem; padding: .08em .28em; }
     /* The author's * and ` characters, kept in the document but de-emphasised so the
        styled text still reads cleanly. Upright and regular weight inside em/strong. */
@@ -320,6 +330,8 @@ public struct HTMLDocumentStreamRenderer: Sendable {
       a { color: #000 !important; text-decoration: underline; }
       blockquote { color: #222 !important; border-color: #777 !important; }
       pre, code, .details { color: #000 !important; background: #f2f2f2 !important; }
+      .pre-block > summary { display: none !important; }
+      .pre-block:not([open]) > pre { display: block !important; }
       figcaption { color: #444 !important; }
       h1, h2, h3 { break-after: avoid-page; }
       pre, blockquote, figure { break-inside: avoid-page; }
