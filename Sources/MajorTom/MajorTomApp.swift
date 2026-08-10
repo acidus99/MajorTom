@@ -1189,7 +1189,8 @@ private struct BrowserTabView: View {
         let url: URL
         let title: String
     }
-    /// Measured height of the floating chrome, used to keep the find bar clear of it.
+    /// Measured height of the floating chrome, used to position WebKit's native Find
+    /// bar immediately below it.
     /// Measured rather than hard-coded because the chrome grows when a validation
     /// message appears beneath the toolbar.
     @State private var chromeHeight: CGFloat = 0
@@ -1216,15 +1217,17 @@ private struct BrowserTabView: View {
                     contentThemeBackground
                         .ignoresSafeArea()
 
-                    StreamingWebViewPrototype(browser: browser, findNavigatorIsPresented: $showsFind)
+                    StreamingWebViewPrototype(
+                        browser: browser,
+                        findNavigatorIsPresented: $showsFind
+                    )
                         .opacity(browser.hasPresentedInitialDocument ? 1 : 0)
+                        // Move WebKit and its native Find bar below the floating chrome,
+                        // but leave the content-theme background in place underneath the
+                        // title bar and tabs so Liquid Glass continues sampling it.
+                        .padding(.top, showsFind ? chromeHeight : 0)
+                        .animation(.easeOut(duration: 0.15), value: showsFind)
                 }
-                // WebKit anchors the find bar to the top of the web view. The web view
-                // deliberately extends up underneath the floating chrome, so the bar was
-                // landing on top of the tab strip and toolbar. Insetting the web view
-                // while the bar is open drops it just below the toolbar instead.
-                .padding(.top, showsFind ? chromeHeight : 0)
-                .animation(.easeOut(duration: 0.15), value: showsFind)
                 .dropDestination(for: URL.self) { urls, _ in
                     // A dropped file becomes a file:// page, as in Safari. A dropped
                     // gemini address is navigated to, which is what dragging a link

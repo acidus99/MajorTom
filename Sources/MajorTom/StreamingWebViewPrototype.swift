@@ -2449,9 +2449,8 @@ private actor AsyncSemaphore {
 @available(macOS 26.0, *)
 struct StreamingWebViewPrototype: View {
     @ObservedObject var browser: BrowserModel
-    /// Drives the system find bar. WebKit owns the matching, highlighting, match
-    /// count, wrap behaviour and Command-G, so Major Tom does not reimplement any
-    /// of it.
+    /// Drives WebKit's native find bar, including its system matching, highlighting,
+    /// match count, wrap behavior, and keyboard navigation.
     @Binding var findNavigatorIsPresented: Bool
 
     var body: some View {
@@ -2459,10 +2458,6 @@ struct StreamingWebViewPrototype: View {
             .webViewTextSelection(.enabled)
             .webViewMagnificationGestures(.enabled)
             .findNavigator(isPresented: $findNavigatorIsPresented)
-            // Capsule documents are read-only. This removes the native find
-            // navigator's replacement controls while preserving Find, match count,
-            // next/previous navigation, and Command-G.
-            .replaceDisabled()
     }
 }
 
