@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import MajorTomAppKitSupport
 import MajorTomCore
 import SwiftUI
 
@@ -375,11 +376,13 @@ private final class NativeTabCoordinator {
             tabDragCleanupTask = nil
             stopTabDragTracking()
             if !temporarilyShownTabBars.isEmpty { finishTabDrag() }
-            guard let source = tabbedBrowserWindow(at: NSEvent.mouseLocation),
-                  isInNativeTabStrip(NSEvent.mouseLocation, of: source) else { return }
+            let screenPoint = event.window?.convertPoint(toScreen: event.locationInWindow)
+                ?? NSEvent.mouseLocation
+            guard let source = tabbedBrowserWindow(for: event, at: screenPoint),
+                  isOnNativeTabButton(screenPoint, of: source) else { return }
 
             tabDragCandidateWindow = source
-            tabDragStartPoint = NSEvent.mouseLocation
+            tabDragStartPoint = screenPoint
             beginTabDragTracking()
 
         case .leftMouseUp:
@@ -425,37 +428,50 @@ private final class NativeTabCoordinator {
         tabDragStartPoint = nil
     }
 
-    private func tabbedBrowserWindow(at screenPoint: NSPoint) -> NSWindow? {
-        NSApplication.shared.windows.first { window in
-            window.isVisible
-                && !window.isMiniaturized
-                && window.tabbingIdentifier == Self.tabbingIdentifier
-                && (window.tabGroup?.windows.count ?? 1) >= 2
-                && window.tabGroup?.isTabBarVisible == true
-                && window.frame.contains(screenPoint)
+    private func tabbedBrowserWindow(for event: NSEvent, at screenPoint: NSPoint) -> NSWindow? {
+        // Ordinary content and chrome events identify their owning browser window.
+        // Treat that answer as authoritative even when it is not a valid source: if a
+        // one-tab foreground window overlaps a multi-tab window, falling through to a
+        // frame search would incorrectly start a drag from the obscured window.
+        if let eventWindow = event.window,
+           eventWindow.tabbingIdentifier == Self.tabbingIdentifier {
+            return isValidTabDragSource(eventWindow) ? eventWindow : nil
         }
+
+        // AppKit's private native-tab controls can deliver an event through an
+        // auxiliary window. In that case resolve only the frontmost window hit at the
+        // pointer, never an arbitrary overlapping browser window farther back.
+        let frontmostNumber = NSWindow.windowNumber(
+            at: screenPoint,
+            belowWindowWithWindowNumber: 0
+        )
+        guard let frontmost = NSApplication.shared.windows.first(where: {
+            $0.windowNumber == frontmostNumber
+        }) else { return nil }
+        return isValidTabDragSource(frontmost) ? frontmost : nil
     }
 
-    private func isInNativeTabStrip(_ screenPoint: NSPoint, of window: NSWindow) -> Bool {
-        guard window.tabbingIdentifier == Self.tabbingIdentifier,
-              window.tabGroup?.isTabBarVisible == true else { return false }
+    private func isValidTabDragSource(_ window: NSWindow) -> Bool {
+        guard window.isVisible,
+              !window.isMiniaturized,
+              window.tabbingIdentifier == Self.tabbingIdentifier,
+              let tabbedWindows = window.tabbedWindows else { return false }
 
-        // Work in screen coordinates because AppKit's private tab controls may report
-        // their event through a different internal view/window. The tab strip is the
-        // lower row of the native chrome, immediately above unobscured content; the
-        // ordinary draggable title bar is the upper row.
-        let contentTop = window.convertPoint(toScreen: NSPoint(
-            x: window.contentLayoutRect.minX,
-            y: window.contentLayoutRect.maxY
-        )).y
-        let chromeHeight = window.frame.maxY - contentTop
-        let tabStripHeight = min(40, max(24, chromeHeight * 0.58))
-        let isInTabRow = screenPoint.y >= contentTop
-            && screenPoint.y <= contentTop + tabStripHeight
-        // The native plus button occupies the trailing end of the row and starts a new
-        // tab rather than a tab drag, so it must not expose other windows as targets.
-        let isBeforePlusButton = screenPoint.x < window.frame.maxX - 44
-        return isInTabRow && isBeforePlusButton
+        // Keep passive mouse-event hit testing away from the lazily-created `tabGroup`.
+        // AppKit documents `tabbedWindows` as nil when no tab bar is being shown, which
+        // is exactly the distinction needed here without requesting a group object.
+        return tabbedWindows.count >= 2
+    }
+
+    private func isOnNativeTabButton(_ screenPoint: NSPoint, of window: NSWindow) -> Bool {
+        guard window.tabbingIdentifier == Self.tabbingIdentifier else { return false }
+
+        // Do not infer the native tab row from title-bar geometry. Full-size content
+        // extends behind the title bar, and that made ordinary page clicks look like
+        // tab clicks. Compare against the actual on-screen frames of AppKit's native
+        // NSTabButton views. Unlike `hitTest`, this remains reliable while AppKit is
+        // transferring the press into its private tab-drag tracking loop.
+        return NativeTabHitTesting.isOnTabButton(screenPoint: screenPoint, in: window)
     }
 
     private func exposeSingletonTabBars(except source: NSWindow) {
@@ -465,8 +481,9 @@ private final class NativeTabCoordinator {
                 && !window.isMiniaturized
                 && window.tabbingIdentifier == Self.tabbingIdentifier
         {
-            let tabCount = window.tabGroup?.windows.count ?? 1
-            guard tabCount == 1, window.tabGroup?.isTabBarVisible != true else { continue }
+            // A nil `tabbedWindows` means this is currently a no-strip singleton. Keep
+            // this passive scan from requesting AppKit's lazily-created `tabGroup`.
+            guard window.tabbedWindows == nil else { continue }
             withoutTabBarAnimation { window.toggleTabBar(nil) }
             window.contentView?.superview?.layoutSubtreeIfNeeded()
             window.displayIfNeeded()
@@ -494,8 +511,7 @@ private final class NativeTabCoordinator {
         for window in NSApplication.shared.windows where
             window.isVisible && window.tabbingIdentifier == Self.tabbingIdentifier
         {
-            let tabCount = window.tabGroup?.windows.count ?? 1
-            if tabCount <= 1, window.tabGroup?.isTabBarVisible == true {
+            if let tabbedWindows = window.tabbedWindows, tabbedWindows.count <= 1 {
                 withoutTabBarAnimation { window.toggleTabBar(nil) }
             }
         }

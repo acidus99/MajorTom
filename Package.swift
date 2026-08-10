@@ -13,13 +13,18 @@ let package = Package(
     ],
     targets: [
         .target(name: "MajorTomCore"),
+        .target(name: "MajorTomAppKitSupport"),
         .executableTarget(
             name: "MajorTom",
-            dependencies: ["MajorTomCore"]
+            dependencies: ["MajorTomCore", "MajorTomAppKitSupport"]
         ),
         .testTarget(
             name: "MajorTomCoreTests",
             dependencies: ["MajorTomCore"]
+        ),
+        .testTarget(
+            name: "MajorTomAppKitTests",
+            dependencies: ["MajorTomAppKitSupport"]
         )
     ]
 )
