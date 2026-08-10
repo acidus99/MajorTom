@@ -18,6 +18,7 @@ enum AboutWindowPresenter {
 
     static func show() {
         if let window {
+            applyAppearance(to: window)
             window.makeKeyAndOrderFront(nil)
             return
         }
@@ -25,12 +26,26 @@ enum AboutWindowPresenter {
         let created = NSWindow(contentViewController: NSHostingController(rootView: AboutView()))
         created.title = "About Major Tom"
         created.styleMask = [.titled, .closable]
+        applyAppearance(to: created)
         // The window outlives this call; without this it is deallocated on close and the
         // next About would reach a freed object.
         created.isReleasedWhenClosed = false
         created.center()
         created.makeKeyAndOrderFront(nil)
         window = created
+    }
+
+    static func refreshAppearance() {
+        guard let window else { return }
+        applyAppearance(to: window)
+    }
+
+    private static func applyAppearance(to window: NSWindow) {
+        window.appearance = switch BrowserSettingsStore.shared.preferences.applicationAppearance {
+        case .system: nil
+        case .light: NSAppearance(named: .aqua)
+        case .dark: NSAppearance(named: .darkAqua)
+        }
     }
 }
 
@@ -41,6 +56,7 @@ enum AboutWindowPresenter {
 /// version — `2026.8.4 (231)` — with the full build identity beneath it. That second line
 /// is the one worth quoting in a bug report, so it is selectable and monospaced.
 struct AboutView: View {
+    @ObservedObject private var settings = BrowserSettingsStore.shared
     @State private var midiPlayer = AboutMIDILooper()
     @State private var isMIDIPlaying = false
     @State private var isIconHovered = false
@@ -107,6 +123,10 @@ struct AboutView: View {
         .padding(.top, 26)
         .padding(.bottom, 30)
         .frame(width: 420)
+        .preferredColorScheme(preferredColorScheme)
+        .onReceive(settings.preferencesDidChange) { _ in
+            AboutWindowPresenter.refreshAppearance()
+        }
         .onDisappear {
             midiPlayer.stop()
             isMIDIPlaying = false
@@ -123,6 +143,14 @@ struct AboutView: View {
             }
         } message: {
             Text(playbackError ?? "Unknown error")
+        }
+    }
+
+    private var preferredColorScheme: ColorScheme? {
+        switch settings.preferences.applicationAppearance {
+        case .system: nil
+        case .light: .light
+        case .dark: .dark
         }
     }
 }
