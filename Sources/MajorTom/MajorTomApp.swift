@@ -575,54 +575,54 @@ private final class NativeTabCoordinator {
 
         let first = session.windows[0]
         applySavedFrame(first.frame, to: rootWindow)
-        restoreTabs(in: first, around: rootWindow)
+        let firstSelectedWindow = restoreTabs(in: first, around: rootWindow)
 
-        var restoredRoots = [rootWindow]
+        var restoredSelections = [firstSelectedWindow]
         for savedWindow in session.windows.dropFirst() where !savedWindow.tabs.isEmpty {
-            let selectedIndex = min(max(savedWindow.selectedIndex, 0), savedWindow.tabs.count - 1)
             let window = makeBrowserWindow(
                 url: nil,
                 matching: nil,
-                restoredState: savedWindow.tabs[selectedIndex]
+                restoredState: savedWindow.tabs[0]
             )
             applySavedFrame(savedWindow.frame, to: window)
-            restoreTabs(in: savedWindow, around: window)
+            let selectedWindow = restoreTabs(in: savedWindow, around: window)
             // Explicitly keep each restored group separate while it is first ordered;
             // afterward it remains fully compatible with native tab dragging.
-            window.tabbingMode = .disallowed
-            window.orderFront(nil)
-            window.tabbingMode = .preferred
-            restoredRoots.append(window)
+            selectedWindow.tabbingMode = .disallowed
+            selectedWindow.orderFront(nil)
+            selectedWindow.tabbingMode = .preferred
+            restoredSelections.append(selectedWindow)
         }
 
-        let keyIndex = min(max(session.keyWindowIndex, 0), restoredRoots.count - 1)
-        restoredRoots[keyIndex].makeKeyAndOrderFront(nil)
+        let keyIndex = min(max(session.keyWindowIndex, 0), restoredSelections.count - 1)
+        restoredSelections[keyIndex].makeKeyAndOrderFront(nil)
     }
 
-    private func restoreTabs(in savedWindow: RestoredBrowserWindowState, around root: NSWindow) {
-        guard !savedWindow.tabs.isEmpty else { return }
+    private func restoreTabs(
+        in savedWindow: RestoredBrowserWindowState,
+        around root: NSWindow
+    ) -> NSWindow {
+        guard !savedWindow.tabs.isEmpty else { return root }
         let selectedIndex = min(max(savedWindow.selectedIndex, 0), savedWindow.tabs.count - 1)
-        var indexedWindows: [(index: Int, window: NSWindow)] = [(selectedIndex, root)]
-        for index in savedWindow.tabs.indices where index != selectedIndex {
-            let tabWindow = makeBrowserWindow(
+        var windows = [root]
+        for state in savedWindow.tabs.dropFirst() {
+            windows.append(makeBrowserWindow(
                 url: nil,
                 matching: root,
-                restoredState: savedWindow.tabs[index]
-            )
-            indexedWindows.append((index, tabWindow))
+                restoredState: state
+            ))
         }
-        guard indexedWindows.count > 1 else { return }
+        guard windows.count > 1 else { return root }
 
-        // Adding the first peer creates AppKit's lazy tab group. Reinsert every member
-        // at its saved index afterward so a selected tab from the middle of the strip
-        // does not disturb the original ordering.
-        root.addTabbedWindow(indexedWindows[1].window, ordered: .above)
-        guard let group = root.tabGroup else { return }
-        group.selectedWindow = root
-        for entry in indexedWindows.sorted(by: { $0.index < $1.index }) {
-            group.insertWindow(entry.window, at: entry.index)
+        // addTabbedWindow inserts immediately after the receiver. Add peers from the
+        // saved trailing edge back toward the root to obtain the saved A/B/C order
+        // without moving or reinserting any already-hosted NSWindow.
+        for window in windows.dropFirst().reversed() {
+            root.addTabbedWindow(window, ordered: .above)
         }
-        group.selectedWindow = root
+        let selectedWindow = windows[selectedIndex]
+        root.tabGroup?.selectedWindow = selectedWindow
+        return selectedWindow
     }
 
     private func applySavedFrame(_ frame: CGRect?, to window: NSWindow) {
@@ -766,7 +766,6 @@ private struct NativeFoundationView: View {
 @available(macOS 26.0, *)
 private struct BrowserWindowView: View {
     @StateObject private var browser: BrowserModel
-    @Environment(\.controlActiveState) private var controlActiveState
     @State private var hostWindow: NSWindow?
     let destinationID: UUID
 
@@ -782,7 +781,7 @@ private struct BrowserWindowView: View {
     }
 
     var body: some View {
-        BrowserTabView(browser: browser, chromeTopInset: 0)
+        BrowserTabView(browser: browser, chromeTopInset: 0, hostWindow: hostWindow)
         .navigationTitle(browser.title)
         .background(WindowAccessor(window: $hostWindow))
         .onAppear {
@@ -798,11 +797,11 @@ private struct BrowserWindowView: View {
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomNewTab)) { _ in
-            guard controlActiveState == .key else { return }
+            guard isCommandTarget else { return }
             openNativeTab(url: nil, inBackground: false)
         }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomCloseTab)) { _ in
-            guard controlActiveState == .key else { return }
+            guard isCommandTarget else { return }
             hostWindow?.performClose(nil)
         }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomCloseWindow)) { _ in
@@ -823,6 +822,13 @@ private struct BrowserWindowView: View {
             NativeTabCoordinator.shared.register(window: window, browser: browser)
             configureNativeTab()
         }
+    }
+
+    private var isCommandTarget: Bool {
+        NativeTabCommandTarget.isSelectedTab(
+            hostWindow,
+            keyWindow: NSApplication.shared.keyWindow
+        )
     }
 
     /// Stops each tab's network work before the window goes away.
@@ -879,9 +885,8 @@ private enum NativeTabRestorationState {
         guard let restored = SessionRestorationStore.shared.loadApplication(),
               let firstWindow = restored.windows.first,
               !firstWindow.tabs.isEmpty else { return nil }
-        let selectedIndex = min(max(firstWindow.selectedIndex, 0), firstWindow.tabs.count - 1)
         pendingApplicationState = restored
-        return firstWindow.tabs[selectedIndex]
+        return firstWindow.tabs[0]
     }
 
     static func enqueue(_ state: RestoredTabState, for destinationID: UUID) {
@@ -1190,7 +1195,7 @@ private struct SafariToolbarButtonStyle: ButtonStyle {
 private struct BrowserTabView: View {
     @ObservedObject var browser: BrowserModel
     let chromeTopInset: CGFloat
-    @Environment(\.controlActiveState) private var controlActiveState
+    let hostWindow: NSWindow?
     @ObservedObject private var bookmarks = BookmarksModel.shared
     @ObservedObject private var settings = BrowserSettingsStore.shared
     @FocusState private var locationIsFocused: Bool
@@ -1211,10 +1216,16 @@ private struct BrowserTabView: View {
     /// message appears beneath the toolbar.
     @State private var chromeHeight: CGFloat = 0
 
-    /// Menu commands are broadcast application-wide, so every window's selected tab
-    /// receives them. Only the key window's tab may act, or one Command-R reloads
-    /// every open window and one Command-S opens a save panel per window.
-    private var isKeyWindow: Bool { controlActiveState == .key }
+    /// Menu commands are broadcast application-wide. Native AppKit tabs are separate
+    /// NSWindows, while SwiftUI reports every member of the key tab group as `.key`.
+    /// Compare window identity and native selection at delivery time so exactly one tab
+    /// handles each command.
+    private var isCommandTarget: Bool {
+        NativeTabCommandTarget.isSelectedTab(
+            hostWindow,
+            keyWindow: NSApplication.shared.keyWindow
+        )
+    }
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -1404,28 +1415,28 @@ private struct BrowserTabView: View {
         .task { await browser.releaseWebViewDragTypes() }
         .onAppear { installContextMenuMonitor() }
         .onDisappear { removeContextMenuMonitor() }
-        .onCommand(.majorTomFocusLocation, when: isKeyWindow) { locationIsFocused = true }
-        .onCommand(.majorTomReload, when: isKeyWindow) { browser.reload() }
-        .onCommand(.majorTomStop, when: isKeyWindow) { browser.stop() }
-        .onCommand(.majorTomShowSource, when: isKeyWindow) { browser.showPageSource() }
-        .onCommand(.majorTomArchive, when: isKeyWindow) { browser.openArchive() }
-        .onCommand(.majorTomAddBookmark, when: isKeyWindow) { requestAddBookmark() }
-        .onCommand(.majorTomShowBookmarks, when: isKeyWindow) { browser.showInternalPage(.bookmarks) }
+        .onCommand(.majorTomFocusLocation, when: { isCommandTarget }) { locationIsFocused = true }
+        .onCommand(.majorTomReload, when: { isCommandTarget }) { browser.reload() }
+        .onCommand(.majorTomStop, when: { isCommandTarget }) { browser.stop() }
+        .onCommand(.majorTomShowSource, when: { isCommandTarget }) { browser.showPageSource() }
+        .onCommand(.majorTomArchive, when: { isCommandTarget }) { browser.openArchive() }
+        .onCommand(.majorTomAddBookmark, when: { isCommandTarget }) { requestAddBookmark() }
+        .onCommand(.majorTomShowBookmarks, when: { isCommandTarget }) { browser.showInternalPage(.bookmarks) }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomOpenBookmark)) { notification in
-            guard isKeyWindow, let url = notification.object as? URL else { return }
+            guard isCommandTarget, let url = notification.object as? URL else { return }
             openBookmark(url, inNewTab: false)
         }
-        .onCommand(.majorTomSavePage, when: isKeyWindow) { Task { await browser.savePage() } }
-        .onCommand(.majorTomPrint, when: isKeyWindow) { browser.printPage() }
-        .onCommand(.majorTomFind, when: isKeyWindow) { showsFind = true }
-        .onCommand(.majorTomZoomIn, when: isKeyWindow) { browser.zoomIn() }
-        .onCommand(.majorTomZoomOut, when: isKeyWindow) { browser.zoomOut() }
-        .onCommand(.majorTomActualSize, when: isKeyWindow) { browser.actualSize() }
-        .onCommand(.majorTomBack, when: isKeyWindow) { browser.goBack() }
-        .onCommand(.majorTomForward, when: isKeyWindow) { browser.goForward() }
-        .onCommand(.majorTomHome, when: isKeyWindow) { browser.goHome() }
-        .onCommand(.majorTomUp, when: isKeyWindow) { browser.goUpOneLevel() }
-        .onCommand(.majorTomRoot, when: isKeyWindow) { browser.goToCapsuleRoot() }
+        .onCommand(.majorTomSavePage, when: { isCommandTarget }) { Task { await browser.savePage() } }
+        .onCommand(.majorTomPrint, when: { isCommandTarget }) { browser.printPage() }
+        .onCommand(.majorTomFind, when: { isCommandTarget }) { showsFind = true }
+        .onCommand(.majorTomZoomIn, when: { isCommandTarget }) { browser.zoomIn() }
+        .onCommand(.majorTomZoomOut, when: { isCommandTarget }) { browser.zoomOut() }
+        .onCommand(.majorTomActualSize, when: { isCommandTarget }) { browser.actualSize() }
+        .onCommand(.majorTomBack, when: { isCommandTarget }) { browser.goBack() }
+        .onCommand(.majorTomForward, when: { isCommandTarget }) { browser.goForward() }
+        .onCommand(.majorTomHome, when: { isCommandTarget }) { browser.goHome() }
+        .onCommand(.majorTomUp, when: { isCommandTarget }) { browser.goUpOneLevel() }
+        .onCommand(.majorTomRoot, when: { isCommandTarget }) { browser.goToCapsuleRoot() }
         .sheet(item: $addBookmarkTarget) { target in
             AddBookmarkView(
                 url: target.url,
@@ -1841,11 +1852,11 @@ private extension View {
     /// tab. `condition` restricts the action to the window that should own it.
     func onCommand(
         _ name: Notification.Name,
-        when condition: Bool,
+        when condition: @escaping () -> Bool,
         perform action: @escaping () -> Void
     ) -> some View {
         onReceive(NotificationCenter.default.publisher(for: name)) { _ in
-            guard condition else { return }
+            guard condition() else { return }
             action()
         }
     }
