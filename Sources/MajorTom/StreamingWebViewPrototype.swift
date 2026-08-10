@@ -253,6 +253,62 @@ private final class InlineImageScriptHandler: NSObject, WKScriptMessageHandler {
     }
 }
 
+/// Enriches inline-image captions once WebKit has decoded the image and therefore knows
+/// its intrinsic dimensions. Metadata supplied after a streamed Gemini response finishes
+/// can call the same function, and the resize observer keeps the `scaled` marker accurate
+/// when the window changes size.
+@available(macOS 26.0, *)
+@MainActor
+private enum InlineImagePresentationScript {
+    static let userScript = WKUserScript(
+        source: """
+        (() => {
+          const enhance = (image) => {
+            if (!(image instanceof HTMLImageElement) || !image.matches('[data-mt-inline-image]')) { return; }
+            const figure = image.closest('figure');
+            const caption = figure?.querySelector('figcaption');
+            if (!figure || !caption) { return; }
+
+            const update = () => {
+              if (!image.naturalWidth || !image.naturalHeight) { return; }
+              const parts = [image.dataset.mtFilename || image.alt || 'Image'];
+              if (image.dataset.mtMime) { parts.push(image.dataset.mtMime); }
+              if (image.dataset.mtSize) { parts.push(image.dataset.mtSize); }
+              parts.push(`${image.naturalWidth} x ${image.naturalHeight}`);
+              const rendered = image.getBoundingClientRect();
+              if (rendered.width + 0.5 < image.naturalWidth || rendered.height + 0.5 < image.naturalHeight) {
+                parts.push('scaled');
+              }
+              caption.textContent = parts.join(' - ');
+            };
+
+            if (image.complete) { update(); }
+            image.decode?.().then(update).catch(() => {});
+            if (!image._majorTomResizeObserver && typeof ResizeObserver !== 'undefined') {
+              image._majorTomResizeObserver = new ResizeObserver(update);
+              image._majorTomResizeObserver.observe(image);
+            }
+          };
+
+          window.majorTomEnhanceInlineImage = enhance;
+          document.addEventListener('load', (event) => enhance(event.target), true);
+          new MutationObserver((records) => {
+            for (const record of records) {
+              for (const node of record.addedNodes) {
+                if (!(node instanceof Element)) { continue; }
+                if (node.matches?.('[data-mt-inline-image]')) { enhance(node); }
+                node.querySelectorAll?.('[data-mt-inline-image]').forEach(enhance);
+              }
+            }
+          }).observe(document, { childList: true, subtree: true });
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: true,
+        in: .defaultClient
+    )
+}
+
 @available(macOS 26.0, *)
 @MainActor
 final class BrowserModel: ObservableObject {
@@ -266,6 +322,16 @@ final class BrowserModel: ObservableObject {
         let explanation: String
         let identity: PresentedServerIdentity
         let previousFingerprint: String?
+    }
+
+    private struct LoadedInlineImage {
+        let mimeType: String
+        let byteCount: Int
+    }
+
+    private struct DecodedDataImage {
+        let data: Data
+        let mimeType: String
     }
 
     struct InputPrompt: Identifiable {
@@ -388,6 +454,7 @@ final class BrowserModel: ObservableObject {
             name: LinkHoverScriptHandler.name
         )
         userContentController.addUserScript(LinkActivationScriptHandler.userScript)
+        userContentController.addUserScript(InlineImagePresentationScript.userScript)
         userContentController.add(
             linkActivationScriptHandler,
             contentWorld: .defaultClient,
@@ -538,7 +605,7 @@ final class BrowserModel: ObservableObject {
             case .internalPage(let page):
                 showInternalPage(page)
             case .external(let url):
-                openExternalURL(url)
+                openLink(url)
             }
         } catch AddressInputError.empty {
             validationMessage = "Enter a capsule address or search query."
@@ -569,6 +636,10 @@ final class BrowserModel: ObservableObject {
         }
         if let committedURL, committedURL.isFileURL {
             openFile(committedURL, disposition: .reload)
+            return
+        }
+        if let committedURL, decodedDataImage(committedURL.absoluteString) != nil {
+            openDataImage(committedURL, disposition: .reload)
             return
         }
         guard let committedURL, let target = makeTarget(for: committedURL) else { return }
@@ -1230,6 +1301,10 @@ final class BrowserModel: ObservableObject {
             openFile(url, disposition: .traversal)
             return
         }
+        if decodedDataImage(url.absoluteString) != nil {
+            openDataImage(url, disposition: .traversal)
+            return
+        }
         // A view-source entry whose cached bytes are gone. makeTarget cannot build a
         // request for the view-source scheme, so without this the entry would be
         // unreachable and Back would appear to do nothing.
@@ -1661,7 +1736,9 @@ final class BrowserModel: ObservableObject {
     }
 
     private func canOpenInApp(_ url: URL) -> Bool {
-        url.isFileURL || makeTarget(for: url) != nil
+        url.isFileURL
+            || makeTarget(for: url) != nil
+            || decodedDataImage(url.absoluteString) != nil
     }
 
     private func openLink(_ url: URL) {
@@ -1671,9 +1748,40 @@ final class BrowserModel: ObservableObject {
         } else if url.isFileURL {
             // Relative links inside a local document resolve to file URLs.
             openFile(url)
+        } else if decodedDataImage(url.absoluteString) != nil {
+            openDataImage(url)
         } else {
             openExternalURL(url)
         }
+    }
+
+    private func openDataImage(
+        _ url: URL,
+        disposition: HistoryDisposition = .new
+    ) {
+        guard let decoded = decodedDataImage(url.absoluteString) else { return }
+
+        navigationTask?.cancel()
+        navigationTask = nil
+        imageTasks.forEach { $0.cancel() }
+        imageTasks.removeAll()
+        slowDownTask?.cancel()
+        slowDownTask = nil
+        retryNotBefore = nil
+        validationMessage = nil
+        internalPage = nil
+        isLoading = false
+        currentSourceBytes = decoded.data
+        currentMIMEType = decoded.mimeType
+        canSavePage = true
+        canShowSource = false
+        showImagePage(
+            data: decoded.data,
+            mimeType: decoded.mimeType,
+            url: url,
+            disposition: disposition
+        )
+        statusText = "Inline image • \(formattedByteCount(decoded.data.count))"
     }
 
     private func openExternalURL(_ url: URL) {
@@ -2077,25 +2185,47 @@ final class BrowserModel: ObservableObject {
 
         if destination.lowercased().hasPrefix("data:image/"),
            let dataURL = URL(string: destination) {
+            let fileName = label ?? "Inline image"
+            let metadata = inlineDataImageMetadata(destination)
             documentContinuation?.yield(renderer.renderInlineImage(
                 resourceURL: dataURL,
-                altText: label ?? "Inline image"
+                linkURL: dataURL,
+                altText: fileName,
+                figureIdentifier: "mt-inline-\(linkIdentifier ?? String(linkSequence))",
+                fileName: fileName,
+                mimeType: metadata?.mimeType,
+                sizeDescription: metadata.map { formattedByteCount($0.byteCount) }
             ))
             return
         }
 
         guard let url = URL(string: destination, relativeTo: baseURL)?.absoluteURL else { return }
 
+        let figureIdentifier = "mt-inline-\(linkIdentifier ?? String(linkSequence))"
+        let fileName = inlineImageFileName(for: url, fallback: label)
         let resource = resourceStore.createResource()
         documentContinuation?.yield(renderer.renderInlineImage(
             resourceURL: resource.url,
-            altText: label ?? url.lastPathComponent
+            linkURL: url,
+            altText: label ?? fileName,
+            figureIdentifier: figureIdentifier,
+            fileName: fileName
         ))
         let task = Task { [weak self] in
             guard let self else { return }
             await self.imageLimiter.acquire()
-            await self.loadInlineImage(url, continuation: resource.continuation, redirects: 0)
+            let metadata = await self.loadInlineImage(
+                url,
+                continuation: resource.continuation,
+                redirects: 0
+            )
             await self.imageLimiter.release()
+            if let metadata {
+                await self.updateInlineImageMetadata(
+                    figureIdentifier: figureIdentifier,
+                    metadata: metadata
+                )
+            }
         }
         imageTasks.append(task)
     }
@@ -2127,6 +2257,8 @@ final class BrowserModel: ObservableObject {
         }
 
         expandedInlineImages.insert(lineIdentifier)
+        let figureIdentifier = "mt-inline-\(lineIdentifier)"
+        let fileName = inlineImageFileName(for: url, fallback: nil)
         let resource = resourceStore.createResource()
         let task = Task { [weak self] in
             guard let self else { return }
@@ -2135,11 +2267,23 @@ final class BrowserModel: ObservableObject {
             await self.insertInlineImage(
                 lineIdentifier: lineIdentifier,
                 resourceURL: resource.url,
-                altText: url.lastPathComponent
+                linkURL: url,
+                figureIdentifier: figureIdentifier,
+                fileName: fileName
             )
             await self.imageLimiter.acquire()
-            await self.loadInlineImage(url, continuation: resource.continuation, redirects: 0)
+            let metadata = await self.loadInlineImage(
+                url,
+                continuation: resource.continuation,
+                redirects: 0
+            )
             await self.imageLimiter.release()
+            if let metadata {
+                await self.updateInlineImageMetadata(
+                    figureIdentifier: figureIdentifier,
+                    metadata: metadata
+                )
+            }
             await self.setLineLoading(lineIdentifier: lineIdentifier, isLoading: false)
         }
         imageTasks.append(task)
@@ -2148,13 +2292,18 @@ final class BrowserModel: ObservableObject {
     private func insertInlineImage(
         lineIdentifier: String,
         resourceURL: URL,
-        altText: String
+        linkURL: URL,
+        figureIdentifier: String,
+        fileName: String
     ) async {
-        let figure = "<figure class=\"mt-inline\">"
-            + "<img src=\"\(HTMLDocumentStreamRenderer.escapeAttribute(resourceURL.absoluteString))\""
-            + " alt=\"\(HTMLDocumentStreamRenderer.escapeAttribute(altText))\">"
-            + "<figcaption>\(HTMLDocumentStreamRenderer.escape(altText))</figcaption>"
-            + "</figure>"
+        let figure = String(decoding: renderer.renderInlineImage(
+            resourceURL: resourceURL,
+            linkURL: linkURL,
+            altText: fileName,
+            figureIdentifier: figureIdentifier,
+            fileName: fileName,
+            figureClass: "mt-inline"
+        ), as: UTF8.self)
         await runScript("""
         (() => {
           const line = document.getElementById(\(jsLiteral(lineIdentifier)));
@@ -2184,6 +2333,55 @@ final class BrowserModel: ObservableObject {
         await runScript(
             "document.getElementById(\(jsLiteral(lineIdentifier)))?.classList.\(method)('mt-loading');"
         )
+    }
+
+    private func updateInlineImageMetadata(
+        figureIdentifier: String,
+        metadata: LoadedInlineImage
+    ) async {
+        let size = formattedByteCount(metadata.byteCount)
+        await runScript("""
+        (() => {
+          const image = document.getElementById(\(jsLiteral(figureIdentifier)))
+            ?.querySelector('img[data-mt-inline-image]');
+          if (!image) { return; }
+          image.dataset.mtMime = \(jsLiteral(metadata.mimeType));
+          image.dataset.mtSize = \(jsLiteral(size));
+          window.majorTomEnhanceInlineImage?.(image);
+        })();
+        """)
+    }
+
+    private func inlineImageFileName(for url: URL, fallback: String?) -> String {
+        if !url.lastPathComponent.isEmpty { return url.lastPathComponent }
+        if let fallback, !fallback.isEmpty { return fallback }
+        return url.host ?? "Image"
+    }
+
+    private func formattedByteCount(_ byteCount: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
+    }
+
+    private func inlineDataImageMetadata(_ source: String) -> LoadedInlineImage? {
+        guard let decoded = decodedDataImage(source) else { return nil }
+        return LoadedInlineImage(mimeType: decoded.mimeType, byteCount: decoded.data.count)
+    }
+
+    private func decodedDataImage(_ source: String) -> DecodedDataImage? {
+        guard let comma = source.firstIndex(of: ",") else { return nil }
+        let header = String(source[..<comma])
+        guard header.lowercased().hasPrefix("data:image/") else { return nil }
+        let mimeType = header.dropFirst("data:".count).split(separator: ";", maxSplits: 1)
+            .first.map(String.init)?.lowercased() ?? "image/*"
+        let payload = String(source[source.index(after: comma)...])
+        let data: Data?
+        if header.lowercased().contains(";base64") {
+            data = Data(base64Encoded: payload, options: .ignoreUnknownCharacters)
+        } else {
+            data = payload.removingPercentEncoding?.data(using: .utf8)
+        }
+        guard let data else { return nil }
+        return DecodedDataImage(data: data, mimeType: mimeType)
     }
 
     private func runScript(_ source: String) async {
@@ -2310,11 +2508,11 @@ final class BrowserModel: ObservableObject {
         _ url: URL,
         continuation: AsyncThrowingStream<URLSchemeTaskResult, any Error>.Continuation,
         redirects: Int
-    ) async {
+    ) async -> LoadedInlineImage? {
         guard redirects <= 5,
               let target = try? GeminiRequestTarget(url.absoluteString) else {
             continuation.finish(throwing: URLError(.badURL))
-            return
+            return nil
         }
         do {
             let events = transport.events(
@@ -2327,22 +2525,28 @@ final class BrowserModel: ObservableObject {
                 return await self.authorize(identity)
             }
             var accepted = false
+            var mimeType = ""
+            var byteCount = 0
             for try await event in events {
                 switch event {
                 case .responseHeader(let header):
                     if header.isRedirect,
                        let redirected = URL(string: header.meta, relativeTo: url)?.absoluteURL,
                        isSameCapsule(redirected, url) {
-                        await loadInlineImage(redirected, continuation: continuation, redirects: redirects + 1)
-                        return
+                        return await loadInlineImage(
+                            redirected,
+                            continuation: continuation,
+                            redirects: redirects + 1
+                        )
                     }
                     let mime = header.meta.split(separator: ";", maxSplits: 1).first
                         .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
                     guard header.isSuccess, mime.hasPrefix("image/") else {
                         continuation.finish(throwing: URLError(.cannotDecodeContentData))
-                        return
+                        return nil
                     }
                     accepted = true
+                    mimeType = mime
                     continuation.yield(.response(URLResponse(
                         url: url,
                         mimeType: mime,
@@ -2350,15 +2554,24 @@ final class BrowserModel: ObservableObject {
                         textEncodingName: nil
                     )))
                 case .body(let data) where accepted:
+                    byteCount += data.count
                     continuation.yield(.data(data))
                 case .completed:
                     continuation.finish()
+                    return accepted
+                        ? LoadedInlineImage(mimeType: mimeType, byteCount: byteCount)
+                        : nil
                 default:
                     break
                 }
             }
+            continuation.finish()
+            return accepted
+                ? LoadedInlineImage(mimeType: mimeType, byteCount: byteCount)
+                : nil
         } catch {
             continuation.finish(throwing: error)
+            return nil
         }
     }
 

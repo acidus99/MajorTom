@@ -107,3 +107,46 @@ final class ExpandableLinkRenderingTests: XCTestCase {
         XCTAssertTrue(rendered.contains("id=\"mt-link-2\""))
     }
 }
+
+final class InlineImageRenderingTests: XCTestCase {
+    private let renderer = HTMLDocumentStreamRenderer()
+
+    func testInlineImageIsLinkedToItsOriginalURLAndCarriesCaptionMetadata() {
+        let resource = URL(string: "majortom-resource://image/1")!
+        let destination = URL(string: "gemini://example.com/photos/launch.png")!
+        let html = String(decoding: renderer.renderInlineImage(
+            resourceURL: resource,
+            linkURL: destination,
+            altText: "Rocket launch",
+            figureIdentifier: "mt-inline-1",
+            fileName: "launch.png",
+            mimeType: "image/png",
+            sizeDescription: "1.2 MB"
+        ), as: UTF8.self)
+
+        XCTAssertTrue(html.contains("id=\"mt-inline-1\""))
+        XCTAssertTrue(html.contains("href=\"gemini://example.com/photos/launch.png\""))
+        XCTAssertTrue(html.contains("src=\"majortom-resource://image/1\""))
+        XCTAssertTrue(html.contains("data-mt-inline-image=\"1\""))
+        XCTAssertTrue(html.contains("data-mt-filename=\"launch.png\""))
+        XCTAssertTrue(html.contains("data-mt-mime=\"image/png\""))
+        XCTAssertTrue(html.contains("data-mt-size=\"1.2 MB\""))
+        XCTAssertTrue(html.contains("<figcaption>launch.png</figcaption>"))
+    }
+
+    func testInlineImageAttributesAreEscaped() {
+        let resource = URL(string: "majortom-resource://image/1")!
+        let destination = URL(string: "gemini://example.com/photo.png")!
+        let html = String(decoding: renderer.renderInlineImage(
+            resourceURL: resource,
+            linkURL: destination,
+            altText: "<unsafe>",
+            figureIdentifier: "image\" onclick=\"bad",
+            fileName: "<photo>.png"
+        ), as: UTF8.self)
+
+        XCTAssertFalse(html.contains("<unsafe>"))
+        XCTAssertFalse(html.contains("onclick=\"bad\""))
+        XCTAssertTrue(html.contains("&lt;photo&gt;.png"))
+    }
+}

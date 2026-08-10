@@ -130,8 +130,34 @@ public struct HTMLDocumentStreamRenderer: Sendable {
         return Data("\(notice)</main></body></html>".utf8)
     }
 
-    public func renderInlineImage(resourceURL: URL, altText: String) -> Data {
-        Data("<figure><img src=\"\(Self.escapeAttribute(resourceURL.absoluteString))\" alt=\"\(Self.escapeAttribute(altText))\" loading=\"eager\"><figcaption>\(Self.escape(altText))</figcaption></figure>".utf8)
+    public func renderInlineImage(
+        resourceURL: URL,
+        linkURL: URL,
+        altText: String,
+        figureIdentifier: String,
+        fileName: String,
+        mimeType: String? = nil,
+        sizeDescription: String? = nil,
+        figureClass: String? = nil
+    ) -> Data {
+        let classAttribute = figureClass.map {
+            " class=\"\(Self.escapeAttribute($0))\""
+        } ?? ""
+        let mimeAttribute = mimeType.map {
+            " data-mt-mime=\"\(Self.escapeAttribute($0))\""
+        } ?? ""
+        let sizeAttribute = sizeDescription.map {
+            " data-mt-size=\"\(Self.escapeAttribute($0))\""
+        } ?? ""
+        let html = "<figure id=\"\(Self.escapeAttribute(figureIdentifier))\"\(classAttribute)>"
+            + "<a href=\"\(Self.escapeAttribute(linkURL.absoluteString))\">"
+            + "<img src=\"\(Self.escapeAttribute(resourceURL.absoluteString))\""
+            + " alt=\"\(Self.escapeAttribute(altText))\" loading=\"eager\""
+            + " data-mt-inline-image=\"1\""
+            + " data-mt-filename=\"\(Self.escapeAttribute(fileName))\""
+            + mimeAttribute + sizeAttribute + "></a>"
+            + "<figcaption>\(Self.escape(fileName))</figcaption></figure>"
+        return Data(html.utf8)
     }
 
     public static func escape(_ value: String) -> String {
@@ -276,7 +302,7 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     .delimiter { opacity: .4; font-style: normal; font-weight: normal; }
     pre code { font-size: inherit; background: transparent; padding: 0; }
     img { display: block; max-width: 100%; height: auto; margin: 1rem 0; border-radius: .5rem; }
-    figure { margin: 1rem 0; } figure img { margin-bottom: .35rem; } figcaption { color: SecondaryLabelColor; font-size: .82rem; }
+    figure { margin: 1rem 0; } figure a { display: inline-block; max-width: 100%; } figure img { margin-bottom: .35rem; } figcaption { color: SecondaryLabelColor; font-size: .82rem; }
     .blank { height: .7rem; }
     .incomplete { margin-top: 2rem; padding: .8rem 1rem; border: 1px solid #d08a00; border-radius: .6rem; }
     .browser-generated main { max-width: 44rem; }
