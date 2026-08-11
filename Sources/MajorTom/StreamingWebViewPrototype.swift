@@ -135,6 +135,48 @@ private final class LinkHoverScriptHandler: NSObject, WKScriptMessageHandler {
     }
 }
 
+/// Keeps the current document's vertical offset on the native side of the WebKit
+/// boundary. Major Tom owns navigation history itself, so WebKit cannot restore this
+/// state for us when a cached response is rendered into a new document.
+@available(macOS 26.0, *)
+@MainActor
+private final class ScrollPositionScriptHandler: NSObject, WKScriptMessageHandler {
+    static let name = "majorTomScrollPosition"
+
+    static let userScript = WKUserScript(
+        source: """
+        (() => {
+          var scheduled = false;
+          const report = () => {
+            scheduled = false;
+            window.webkit.messageHandlers.\(name).postMessage(Math.max(0, window.scrollY));
+          };
+          const schedule = () => {
+            if (scheduled) { return; }
+            scheduled = true;
+            requestAnimationFrame(report);
+          };
+          addEventListener('scroll', schedule, { passive: true });
+          addEventListener('pagehide', report);
+          addEventListener('DOMContentLoaded', schedule);
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: true,
+        in: .defaultClient
+    )
+
+    weak var browser: BrowserModel?
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        guard let offset = message.body as? Double, offset.isFinite else { return }
+        browser?.recordScrollPosition(offset, from: message.frameInfo.request.url)
+    }
+}
+
 /// Handles link activations whose modifier state is not reliably preserved in
 /// WebKit's navigation action (notably Shift-Command-click and middle-click).
 @available(macOS 26.0, *)
@@ -463,6 +505,9 @@ final class BrowserModel: ObservableObject {
     /// keeps WebKit transparent over a content-theme placeholder until then, preventing
     /// its default white/black backing from flashing during creation or restoration.
     @Published private(set) var hasPresentedInitialDocument = false
+    /// Keeps a history entry that needs a nonzero offset behind the same placeholder
+    /// until WebKit has laid it out and the offset has been applied.
+    @Published private(set) var isRestoringHistoryScroll = false
 
     let page: WebPage
 
@@ -485,6 +530,17 @@ final class BrowserModel: ObservableObject {
     private var trustContinuation: CheckedContinuation<Bool, Never>?
     private var history: [URL] = []
     private var historyIndex = -1
+    /// Session-only page offsets, keyed by history entry rather than URL so two visits to
+    /// the same address can retain different reading positions. Deliberately excluded
+    /// from `RestoredTabState`: quitting the app starts these positions over at the top.
+    private var historyScrollPositions: [Int: Double] = [:]
+    /// While a traversal's replacement document is loading, its initial scroll events
+    /// must not overwrite the offset we are about to restore.
+    private var pendingScrollRestoration: (historyIndex: Int, offset: Double)?
+    /// The opaque URL of the document currently hosted by WebKit. Script messages from
+    /// a page being replaced can arrive just after the next entry commits; checking this
+    /// identity prevents that late message from being filed under the new history entry.
+    private var activeWebDocumentURL: URL?
     private var cachedPages: [URL: CachedPage] = [:]
     /// Answers typed but not submitted, so cancelling a prompt and returning to it does
     /// not lose the work. Sensitive prompts are deliberately never recorded here.
@@ -508,6 +564,7 @@ final class BrowserModel: ObservableObject {
     private let linkHoverScriptHandler: LinkHoverScriptHandler
     private let linkActivationScriptHandler: LinkActivationScriptHandler
     private let inlineImageScriptHandler: InlineImageScriptHandler
+    private let scrollPositionScriptHandler: ScrollPositionScriptHandler
     /// Numbers link lines within the current document so an expanded image can be
     /// attached to the exact line that was clicked.
     private var linkSequence = 0
@@ -525,6 +582,7 @@ final class BrowserModel: ObservableObject {
         let linkHoverScriptHandler = LinkHoverScriptHandler()
         let linkActivationScriptHandler = LinkActivationScriptHandler()
         let inlineImageScriptHandler = InlineImageScriptHandler()
+        let scrollPositionScriptHandler = ScrollPositionScriptHandler()
         let userContentController = WKUserContentController()
         userContentController.addUserScript(ContextMenuScriptHandler.userScript)
         userContentController.add(
@@ -552,6 +610,12 @@ final class BrowserModel: ObservableObject {
             contentWorld: .defaultClient,
             name: InlineImageScriptHandler.name
         )
+        userContentController.addUserScript(ScrollPositionScriptHandler.userScript)
+        userContentController.add(
+            scrollPositionScriptHandler,
+            contentWorld: .defaultClient,
+            name: ScrollPositionScriptHandler.name
+        )
         var configuration = WebPage.Configuration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.userContentController = userContentController
@@ -572,6 +636,7 @@ final class BrowserModel: ObservableObject {
         self.linkHoverScriptHandler = linkHoverScriptHandler
         self.linkActivationScriptHandler = linkActivationScriptHandler
         self.inlineImageScriptHandler = inlineImageScriptHandler
+        self.scrollPositionScriptHandler = scrollPositionScriptHandler
         self.page = WebPage(
             configuration: configuration,
             navigationDecider: BrowserNavigationDecider(router: router)
@@ -606,6 +671,7 @@ final class BrowserModel: ObservableObject {
         linkHoverScriptHandler.browser = self
         linkActivationScriptHandler.browser = self
         inlineImageScriptHandler.browser = self
+        scrollPositionScriptHandler.browser = self
 
         router.openURL = { [weak self] url in
             self?.openLink(url)
@@ -739,6 +805,7 @@ final class BrowserModel: ObservableObject {
     /// behave identically. Nothing is fetched over the network.
     func openFile(_ url: URL, disposition: HistoryDisposition = .new) {
         guard url.isFileURL else { return }
+        abandonScrollRestoration(for: disposition)
 
         navigationTask?.cancel()
         navigationTask = nil
@@ -857,6 +924,7 @@ final class BrowserModel: ObservableObject {
 
     func goBack() {
         guard canGoBack else { return }
+        prepareScrollRestoration(for: historyIndex - 1)
         historyIndex -= 1
         updateNavigationAvailability()
         navigateHistory(to: history[historyIndex])
@@ -864,9 +932,26 @@ final class BrowserModel: ObservableObject {
 
     func goForward() {
         guard canGoForward else { return }
+        prepareScrollRestoration(for: historyIndex + 1)
         historyIndex += 1
         updateNavigationAvailability()
         navigateHistory(to: history[historyIndex])
+    }
+
+    fileprivate func recordScrollPosition(_ offset: Double, from documentURL: URL?) {
+        guard history.indices.contains(historyIndex),
+              documentURL == activeWebDocumentURL,
+              pendingScrollRestoration?.historyIndex != historyIndex else { return }
+        historyScrollPositions[historyIndex] = max(0, offset)
+    }
+
+    private func prepareScrollRestoration(for index: Int) {
+        let offset = historyScrollPositions[index] ?? 0
+        pendingScrollRestoration = (
+            historyIndex: index,
+            offset: offset
+        )
+        isRestoringHistoryScroll = offset > 0
     }
 
     func goHome() {
@@ -1079,6 +1164,7 @@ final class BrowserModel: ObservableObject {
         disposition: HistoryDisposition
     ) {
         guard let sourceURL = ViewSourceURL.wrap(resourceURL) else { return }
+        abandonScrollRestoration(for: disposition)
         renderSourceDocument(bytes, at: sourceURL)
         let heading = "Source: \(displayTitle(for: resourceURL))"
         // commit() resets the title, so the heading is applied after it.
@@ -1307,6 +1393,12 @@ final class BrowserModel: ObservableObject {
         canSavePage = false
         canShowSource = false
         internalPage = page
+        activeWebDocumentURL = nil
+
+        // Internal pages use native SwiftUI views, not the WebKit document whose scroll
+        // reporter drives this state. There is therefore nothing to restore here.
+        pendingScrollRestoration = nil
+        isRestoringHistoryScroll = false
 
         commit(page.url, disposition: disposition)
         title = page.title
@@ -1407,6 +1499,7 @@ final class BrowserModel: ObservableObject {
         disposition: HistoryDisposition,
         renderAsSource: Bool = false
     ) {
+        abandonScrollRestoration(for: disposition)
         navigationTask?.cancel()
         slowDownTask?.cancel()
         slowDownTask = nil
@@ -1845,6 +1938,7 @@ final class BrowserModel: ObservableObject {
         disposition: HistoryDisposition = .new
     ) {
         guard let decoded = decodedDataImage(url.absoluteString) else { return }
+        abandonScrollRestoration(for: disposition)
 
         navigationTask?.cancel()
         navigationTask = nil
@@ -1894,21 +1988,68 @@ final class BrowserModel: ObservableObject {
         linkSequence = 0
         expandedInlineImages.removeAll()
         let document = documentStore.createDocument()
+        activeWebDocumentURL = document.url
         let navigation = page.load(document.url)
-        if !hasPresentedInitialDocument {
-            Task { @MainActor [weak self] in
-                do {
-                    for try await event in navigation where event == .finished {
-                        self?.hasPresentedInitialDocument = true
-                        break
+        let restoration = pendingScrollRestoration
+        Task { @MainActor [weak self] in
+            do {
+                for try await event in navigation where event == .finished {
+                    if let restoration {
+                        await self?.restoreScrollPosition(restoration)
                     }
-                } catch {
-                    // A superseding navigation owns the placeholder now. Its own
-                    // beginDocument call will remove it after that document is shown.
+                    if self?.hasPresentedInitialDocument == false {
+                        self?.hasPresentedInitialDocument = true
+                    }
+                    break
+                }
+            } catch {
+                // A superseding navigation owns both the placeholder and any pending
+                // restoration. Its own beginDocument call will handle the new document.
+                if let restoration,
+                   self?.pendingScrollRestoration?.historyIndex == restoration.historyIndex {
+                    self?.pendingScrollRestoration = nil
+                    self?.isRestoringHistoryScroll = false
                 }
             }
         }
         return document.continuation
+    }
+
+    private func restoreScrollPosition(
+        _ restoration: (historyIndex: Int, offset: Double)
+    ) async {
+        guard historyIndex == restoration.historyIndex,
+              pendingScrollRestoration?.historyIndex == restoration.historyIndex else { return }
+        do {
+            _ = try await page.callJavaScript(
+                """
+                window.scrollTo(0, \(restoration.offset));
+                await new Promise(resolve => {
+                    requestAnimationFrame(() => requestAnimationFrame(resolve));
+                });
+                document.documentElement.style.setProperty('visibility', 'visible', 'important');
+                await new Promise(resolve => {
+                    requestAnimationFrame(() => requestAnimationFrame(resolve));
+                });
+                """
+            )
+        } catch {
+            // Never leave a document permanently hidden if WebKit accepted the load but
+            // rejected or interrupted the restoration script.
+            _ = try? await page.callJavaScript(
+                "document.documentElement.style.setProperty('visibility', 'visible', 'important');"
+            )
+        }
+        if pendingScrollRestoration?.historyIndex == restoration.historyIndex {
+            pendingScrollRestoration = nil
+            isRestoringHistoryScroll = false
+        }
+    }
+
+    private func abandonScrollRestoration(for disposition: HistoryDisposition) {
+        guard case .new = disposition else { return }
+        pendingScrollRestoration = nil
+        isRestoringHistoryScroll = false
     }
 
     private func finishCurrentDocument(message: String? = nil) {
@@ -2003,12 +2144,18 @@ final class BrowserModel: ObservableObject {
         locationText = url.absoluteString
         switch disposition {
         case .new:
+            // A new branch supersedes any Back/Forward restoration whose WebKit load
+            // had not yet finished.
+            pendingScrollRestoration = nil
+            isRestoringHistoryScroll = false
             if historyIndex + 1 < history.count {
                 history.removeSubrange((historyIndex + 1)...)
+                historyScrollPositions = historyScrollPositions.filter { $0.key <= historyIndex }
             }
             if history.last != url {
                 history.append(url)
                 historyIndex = history.count - 1
+                historyScrollPositions[historyIndex] = 0
             }
             BrowsingHistoryStore.shared.record(url)
         case .reload, .traversal:
@@ -2115,6 +2262,13 @@ final class BrowserModel: ObservableObject {
         var theme = settings.preferences.contentTheme.css(effectiveDarkAppearance: dark)
         if settings.preferences.renderingOptions.collapsesConsecutiveQuotes {
             theme += HTMLDocumentStreamRenderer.collapsedQuotesCSS
+        }
+        // This style arrives in the document's first HTML chunk, before WebKit can paint
+        // its initial y=0 layout. restoreScrollPosition reveals it only after the saved
+        // offset has crossed the compositor boundary, avoiding a one-frame top flash.
+        if pendingScrollRestoration?.historyIndex == historyIndex,
+           pendingScrollRestoration?.offset ?? 0 > 0 {
+            theme += "\nhtml { visibility: hidden !important; }"
         }
         theme += "\n" + settings.preferences.contentWidth.css
         // Screen-only zoom survives navigation without overriding print's 100% scale.
