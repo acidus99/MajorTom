@@ -1248,7 +1248,10 @@ private struct BrowserTabView: View {
                         browser: browser,
                         findNavigatorIsPresented: $showsFind
                     )
-                        .opacity(browser.hasPresentedInitialDocument ? 1 : 0)
+                        .opacity(
+                            browser.hasPresentedInitialDocument
+                                && !browser.isRestoringHistoryScroll ? 1 : 0
+                        )
                         // Move WebKit and its native Find bar below the floating chrome,
                         // but leave the content-theme background in place underneath the
                         // title bar and tabs so Liquid Glass continues sampling it.

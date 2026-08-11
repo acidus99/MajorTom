@@ -142,6 +142,20 @@ The initial content-theme choices are:
 - **Dracula Classic:** use the full classic Dracula semantic palette for headings,
   links and interaction states, emphasis, code, quotations, lists, selection,
   warnings, generated errors, and source-view furniture.
+- **Ocean:** a deep navy and turquoise theme with sky-blue links and coral accents.
+- **Forest:** an Enchanted Grove-inspired theme built from gum-leaf, laurel,
+  hippie-green, tom-thumb, and heavy-metal greens, with accessible pale-green
+  text roles and restrained warm interaction accents.
+- **Creamsicle:** an Orange Creamsicle-inspired vanilla theme built around
+  chardonnay, yellow-orange, and vivid orange surfaces, with darkened orange
+  text roles and complementary teal links for accessible contrast.
+- **Sand Dunes:** a light sand and sandstone theme with terracotta structure and oasis-teal links.
+
+Semantic themes supply a compact role-based palette for the document background,
+surface, foreground, muted text, headings, links, link interaction, accents, strong
+and emphasized text, code, danger, and selection. One shared stylesheet maps those
+tokens onto Gemtext and browser-generated content, so adding a palette does not
+introduce theme-specific document selectors.
 
 Additional content themes may be added later without changing the distinction between content and application appearance.
 

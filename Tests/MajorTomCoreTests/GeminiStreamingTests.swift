@@ -131,6 +131,10 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertFalse(ContentTheme.draculaLight.usesDarkPalette(effectiveDarkAppearance: true))
         XCTAssertTrue(ContentTheme.draculaDark.usesDarkPalette(effectiveDarkAppearance: false))
         XCTAssertTrue(ContentTheme.draculaClassic.usesDarkPalette(effectiveDarkAppearance: false))
+        XCTAssertTrue(ContentTheme.ocean.usesDarkPalette(effectiveDarkAppearance: false))
+        XCTAssertTrue(ContentTheme.forest.usesDarkPalette(effectiveDarkAppearance: false))
+        XCTAssertFalse(ContentTheme.creamsicle.usesDarkPalette(effectiveDarkAppearance: true))
+        XCTAssertFalse(ContentTheme.sandDunes.usesDarkPalette(effectiveDarkAppearance: true))
         XCTAssertFalse(ContentTheme.automatic.usesDarkPalette(effectiveDarkAppearance: false))
         XCTAssertTrue(ContentTheme.automatic.usesDarkPalette(effectiveDarkAppearance: true))
     }
@@ -138,22 +142,93 @@ final class GeminiStreamingTests: XCTestCase {
     func testDraculaClassicMapsSemanticTextAndLineRoles() {
         let css = ContentTheme.draculaClassic.css(effectiveDarkAppearance: false)
 
-        XCTAssertTrue(css.contains("h1, h2, h3 { color: var(--purple); }"))
-        XCTAssertTrue(css.contains("a:hover, a:focus { color: var(--pink); }"))
-        XCTAssertTrue(css.contains("strong { color: var(--orange); }"))
-        XCTAssertTrue(css.contains("em { color: var(--yellow); }"))
-        XCTAssertTrue(css.contains("code { color: var(--green); }"))
-        XCTAssertTrue(css.contains("pre, code { background: var(--surface-light); }"))
-        XCTAssertTrue(css.contains(".list-item > span[aria-hidden=\"true\"] { color: var(--pink); }"))
-        XCTAssertTrue(css.contains("background: var(--surface-dark)"))
-        XCTAssertTrue(css.contains(".browser-generated h1 { color: var(--red); }"))
+        XCTAssertTrue(css.contains("--theme-selection: #44475a"))
+        XCTAssertTrue(css.contains("h1, h2, h3 { color: var(--theme-heading); }"))
+        XCTAssertTrue(css.contains("a:hover, a:focus { color: var(--theme-link-hover); }"))
+        XCTAssertTrue(css.contains("strong { color: var(--theme-strong); }"))
+        XCTAssertTrue(css.contains("em { color: var(--theme-emphasis); }"))
+        XCTAssertTrue(css.contains("code { color: var(--theme-code); }"))
+        XCTAssertTrue(css.contains("pre, code { background: var(--theme-surface); }"))
+        XCTAssertTrue(css.contains(".list-item > span[aria-hidden=\"true\"] { color: var(--theme-accent); }"))
+        XCTAssertTrue(css.contains("background: var(--theme-surface)"))
+        XCTAssertTrue(css.contains(".browser-generated h1 { color: var(--theme-danger); }"))
         XCTAssertTrue(css.contains("blockquote { background: transparent !important; }"))
+    }
+
+    func testGeneratedSemanticThemesExposeTheirDistinctCorePalettes() {
+        let expected: [(ContentTheme, String, String, String)] = [
+            (.ocean, "#071a2b", "#38d6c8", "#69c7ff"),
+            (.forest, "#2b3d29", "#c3e7d2", "#a9d6bb"),
+            (.creamsicle, "#fff7ed", "#c2410c", "#006477"),
+            (.sandDunes, "#f6e7c8", "#a84e32", "#006b6b")
+        ]
+
+        for (theme, background, heading, link) in expected {
+            let css = theme.css(effectiveDarkAppearance: false)
+            XCTAssertTrue(css.contains("--theme-background: \(background)"))
+            XCTAssertTrue(css.contains("--theme-heading: \(heading)"))
+            XCTAssertTrue(css.contains("--theme-link: \(link)"))
+            XCTAssertTrue(css.contains("--theme-selection:"))
+        }
+    }
+
+    func testForestAndCreamsicleRetainTheirReferencePaletteAnchors() {
+        let forest = ContentTheme.forest.css(effectiveDarkAppearance: false)
+        XCTAssertTrue(forest.contains("--theme-background: #2b3d29"))
+        XCTAssertTrue(forest.contains("--theme-surface: #3a5a3c"))
+        XCTAssertTrue(forest.contains("--theme-muted: #a9d6bb"))
+        XCTAssertTrue(forest.contains("--theme-accent: #6a9a6d"))
+
+        let creamsicle = ContentTheme.creamsicle.css(effectiveDarkAppearance: true)
+        XCTAssertTrue(creamsicle.contains("--theme-surface: #ffcc80"))
+        XCTAssertTrue(creamsicle.contains("--theme-selection: #ffad42"))
+        XCTAssertTrue(creamsicle.contains("--theme-accent: #ff8c00"))
+    }
+
+    func testAdaptedForestAndCreamsicleTextRolesMeetAccessibleContrast() throws {
+        for theme in [ContentTheme.forest, .creamsicle] {
+            let palette = try XCTUnwrap(theme.semanticPalette)
+            let pageTextColors = [
+                palette.foreground, palette.muted, palette.heading, palette.link,
+                palette.linkHover, palette.strong, palette.emphasis, palette.danger
+            ]
+
+            for color in pageTextColors {
+                XCTAssertGreaterThanOrEqual(
+                    contrastRatio(color, palette.background),
+                    4.5,
+                    "\(theme.rawValue): \(color.cssHex) on \(palette.background.cssHex)"
+                )
+            }
+            XCTAssertGreaterThanOrEqual(contrastRatio(palette.code, palette.surface), 4.5)
+            XCTAssertGreaterThanOrEqual(contrastRatio(palette.foreground, palette.surface), 4.5)
+            XCTAssertGreaterThanOrEqual(contrastRatio(palette.foreground, palette.selection), 4.5)
+        }
     }
 
     func testExistingDraculaDarkDoesNotGainClassicSemanticMapping() {
         let css = ContentTheme.draculaDark.css(effectiveDarkAppearance: true)
-        XCTAssertFalse(css.contains("--selection: #44475a"))
-        XCTAssertFalse(css.contains("strong { color: var(--orange); }"))
+        XCTAssertFalse(css.contains("--theme-selection:"))
+        XCTAssertFalse(css.contains("strong { color: var(--theme-strong); }"))
+    }
+
+    private func contrastRatio(_ first: ContentThemeColor, _ second: ContentThemeColor) -> Double {
+        let firstLuminance = relativeLuminance(first)
+        let secondLuminance = relativeLuminance(second)
+        return (max(firstLuminance, secondLuminance) + 0.05)
+            / (min(firstLuminance, secondLuminance) + 0.05)
+    }
+
+    private func relativeLuminance(_ color: ContentThemeColor) -> Double {
+        func linearize(_ component: UInt8) -> Double {
+            let value = Double(component) / 255
+            return value <= 0.04045
+                ? value / 12.92
+                : pow((value + 0.055) / 1.055, 2.4)
+        }
+        return 0.2126 * linearize(color.red)
+            + 0.7152 * linearize(color.green)
+            + 0.0722 * linearize(color.blue)
     }
 
     func testContentThemeCSSUsesItsResolvedPaletteBackground() {

@@ -72,13 +72,23 @@ public enum ContentTheme: String, CaseIterable, Codable, Sendable {
     case draculaLight
     case draculaDark
     case draculaClassic
+    case ocean
+    case forest
+    case creamsicle
+    case sandDunes
 
     public func palette(effectiveDarkAppearance: Bool) -> ContentThemePalette {
+        if let semanticPalette {
+            return semanticPalette.contentPalette
+        }
+
         let useDarkPalette: Bool
         switch self {
         case .automatic: useDarkPalette = effectiveDarkAppearance
         case .draculaLight: useDarkPalette = false
-        case .draculaDark, .draculaClassic: useDarkPalette = true
+        case .draculaDark: useDarkPalette = true
+        case .draculaClassic, .ocean, .forest, .creamsicle, .sandDunes:
+            preconditionFailure("Semantic themes provide their own resolved palette")
         }
 
         if useDarkPalette {
@@ -89,9 +99,7 @@ public enum ContentTheme: String, CaseIterable, Codable, Sendable {
                 muted: ContentThemeColor(red: 0x62, green: 0x72, blue: 0xa4),
                 accent: ContentThemeColor(red: 0xbd, green: 0x93, blue: 0xf9),
                 link: ContentThemeColor(red: 0x8b, green: 0xe9, blue: 0xfd),
-                blockquote: self == .draculaClassic
-                    ? ContentThemeColor(red: 0xf8, green: 0xf8, blue: 0xf2)
-                    : ContentThemeColor(red: 0xf1, green: 0xfa, blue: 0x8c),
+                blockquote: ContentThemeColor(red: 0xf1, green: 0xfa, blue: 0x8c),
                 codeBackground: ContentThemeColor(red: 0x34, green: 0x37, blue: 0x46)
             )
         }
@@ -120,7 +128,9 @@ public enum ContentTheme: String, CaseIterable, Codable, Sendable {
         pre, code { background: \(palette.codeBackground.cssHex); } .details { background: \(palette.codeBackground.cssHex) !important; }
         """
 
-        let semanticCSS = self == .draculaClassic ? Self.draculaClassicCSS : ""
+        let semanticCSS = semanticPalette.map {
+            $0.variableCSS + "\n" + Self.semanticThemeCSS
+        } ?? ""
 
         // Print rules must follow appearance rules in the cascade so dark screen
         // colors cannot win when WebKit switches to print media.
@@ -130,37 +140,31 @@ public enum ContentTheme: String, CaseIterable, Codable, Sendable {
             + "\n" + HTMLDocumentStreamRenderer.printThemeCSS
     }
 
-    /// Dracula CSS's prose-oriented semantic mapping, adapted to Major Tom's
-    /// streamed Gemtext markup. Ordinary prose stays neutral while structure,
-    /// inline emphasis and interaction states receive stable roles.
-    private static let draculaClassicCSS = """
-    :root {
-      --selection: #44475a; --surface-dark: #21222c; --surface-light: #343746;
-      --red: #ff5555; --orange: #ffb86c; --yellow: #f1fa8c;
-      --green: #50fa7b; --purple: #bd93f9; --cyan: #8be9fd; --pink: #ff79c6;
-    }
-    ::selection { color: var(--foreground); background: var(--selection); }
-    h1, h2, h3 { color: var(--purple); }
-    a { color: var(--cyan); }
-    a:hover, a:focus { color: var(--pink); }
-    a:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
-    strong { color: var(--orange); }
-    em { color: var(--yellow); }
-    code { color: var(--green); }
-    pre, code { background: var(--surface-light); }
-    .browser-generated .details { background: var(--surface-light) !important; }
-    .delimiter, .link-hint { color: var(--muted); }
-    .list-item > span[aria-hidden="true"] { color: var(--pink); }
+    /// One selector contract shared by every semantic theme. Adding another theme is
+    /// deliberately a palette-only operation; capsule markup and CSS targets stay fixed.
+    private static let semanticThemeCSS = """
+    ::selection { color: var(--theme-foreground); background: var(--theme-selection); }
+    h1, h2, h3 { color: var(--theme-heading); }
+    a { color: var(--theme-link); }
+    a:hover, a:focus { color: var(--theme-link-hover); }
+    a:focus-visible { outline: 2px solid var(--theme-heading); outline-offset: 2px; }
+    strong { color: var(--theme-strong); }
+    em { color: var(--theme-emphasis); }
+    code { color: var(--theme-code); }
+    pre, code { background: var(--theme-surface); }
+    .browser-generated .details { background: var(--theme-surface) !important; }
+    .delimiter, .link-hint { color: var(--theme-muted); }
+    .list-item > span[aria-hidden="true"] { color: var(--theme-accent); }
     blockquote {
-      color: var(--foreground); border-color: var(--muted);
-      background: var(--surface-dark); border-radius: 0 .4rem .4rem 0;
+      color: var(--theme-foreground); border-color: var(--theme-muted);
+      background: var(--theme-surface); border-radius: 0 .4rem .4rem 0;
     }
-    .pre-block.multiline[open] > pre:focus-visible { outline-color: var(--purple); }
+    .pre-block.multiline[open] > pre:focus-visible { outline-color: var(--theme-heading); }
     .pre-block > summary, figcaption, .browser-generated .eyebrow,
-    .source-line::before { color: var(--muted); }
-    .source-line:hover { background: var(--surface-dark); }
-    .incomplete { border-color: var(--orange); }
-    .browser-generated h1 { color: var(--red); }
+    .source-line::before { color: var(--theme-muted); }
+    .source-line:hover { background: var(--theme-surface); }
+    .incomplete { border-color: var(--theme-strong); }
+    .browser-generated h1 { color: var(--theme-danger); }
     @media print {
       h1, h2, h3, strong, em, .delimiter, .link-hint,
       .list-item > span[aria-hidden="true"], .browser-generated h1 {
@@ -172,6 +176,135 @@ public enum ContentTheme: String, CaseIterable, Codable, Sendable {
       .incomplete { border-color: #777 !important; }
     }
     """
+
+    var semanticPalette: SemanticContentThemePalette? {
+        switch self {
+        case .draculaClassic:
+            SemanticContentThemePalette(
+                isDark: true,
+                background: 0x282a36, surface: 0x343746, foreground: 0xf8f8f2,
+                muted: 0x6272a4, heading: 0xbd93f9, link: 0x8be9fd,
+                linkHover: 0xff79c6, accent: 0xff79c6, strong: 0xffb86c,
+                emphasis: 0xf1fa8c, code: 0x50fa7b, danger: 0xff5555,
+                selection: 0x44475a
+            )
+        case .ocean:
+            SemanticContentThemePalette(
+                isDark: true,
+                background: 0x071a2b, surface: 0x102b3f, foreground: 0xeaf7fa,
+                muted: 0x9bb8c3, heading: 0x38d6c8, link: 0x69c7ff,
+                linkHover: 0xff9b73, accent: 0xff9b73, strong: 0xffb86b,
+                emphasis: 0xffdca8, code: 0x70e1c8, danger: 0xff6b6b,
+                selection: 0x16465c
+            )
+        case .forest:
+            SemanticContentThemePalette(
+                isDark: true,
+                background: 0x2b3d29, surface: 0x3a5a3c, foreground: 0xf2f5ed,
+                muted: 0xa9d6bb, heading: 0xc3e7d2, link: 0xa9d6bb,
+                linkHover: 0xf2d49b, accent: 0x6a9a6d, strong: 0xf2d49b,
+                emphasis: 0xd7e8a3, code: 0xb9e2c9, danger: 0xff8b7d,
+                selection: 0x477747
+            )
+        case .creamsicle:
+            SemanticContentThemePalette(
+                isDark: false,
+                background: 0xfff7ed, surface: 0xffcc80, foreground: 0x43200d,
+                muted: 0x76523e, heading: 0xc2410c, link: 0x006477,
+                linkHover: 0x9a3412, accent: 0xff8c00, strong: 0xa83a0b,
+                emphasis: 0x7c4a03, code: 0x00675b, danger: 0xb42318,
+                selection: 0xffad42
+            )
+        case .sandDunes:
+            SemanticContentThemePalette(
+                isDark: false,
+                background: 0xf6e7c8, surface: 0xe8cf9f, foreground: 0x34281d,
+                muted: 0x6e5b47, heading: 0xa84e32, link: 0x006b6b,
+                linkHover: 0x7b3e24, accent: 0xc66a42, strong: 0x8b451f,
+                emphasis: 0x6d5a00, code: 0x27624c, danger: 0xa83232,
+                selection: 0xdabf8d
+            )
+        case .automatic, .draculaLight, .draculaDark:
+            nil
+        }
+    }
+}
+
+struct SemanticContentThemePalette {
+    let isDark: Bool
+    let background: ContentThemeColor
+    let surface: ContentThemeColor
+    let foreground: ContentThemeColor
+    let muted: ContentThemeColor
+    let heading: ContentThemeColor
+    let link: ContentThemeColor
+    let linkHover: ContentThemeColor
+    let accent: ContentThemeColor
+    let strong: ContentThemeColor
+    let emphasis: ContentThemeColor
+    let code: ContentThemeColor
+    let danger: ContentThemeColor
+    let selection: ContentThemeColor
+
+    init(
+        isDark: Bool,
+        background: UInt32, surface: UInt32, foreground: UInt32, muted: UInt32,
+        heading: UInt32, link: UInt32, linkHover: UInt32, accent: UInt32,
+        strong: UInt32, emphasis: UInt32, code: UInt32, danger: UInt32,
+        selection: UInt32
+    ) {
+        self.isDark = isDark
+        self.background = ContentThemeColor(hex: background)
+        self.surface = ContentThemeColor(hex: surface)
+        self.foreground = ContentThemeColor(hex: foreground)
+        self.muted = ContentThemeColor(hex: muted)
+        self.heading = ContentThemeColor(hex: heading)
+        self.link = ContentThemeColor(hex: link)
+        self.linkHover = ContentThemeColor(hex: linkHover)
+        self.accent = ContentThemeColor(hex: accent)
+        self.strong = ContentThemeColor(hex: strong)
+        self.emphasis = ContentThemeColor(hex: emphasis)
+        self.code = ContentThemeColor(hex: code)
+        self.danger = ContentThemeColor(hex: danger)
+        self.selection = ContentThemeColor(hex: selection)
+    }
+
+    var contentPalette: ContentThemePalette {
+        ContentThemePalette(
+            isDark: isDark,
+            background: background,
+            foreground: foreground,
+            muted: muted,
+            accent: accent,
+            link: link,
+            blockquote: foreground,
+            codeBackground: surface
+        )
+    }
+
+    var variableCSS: String {
+        """
+        :root {
+          --theme-background: \(background.cssHex); --theme-surface: \(surface.cssHex);
+          --theme-foreground: \(foreground.cssHex); --theme-muted: \(muted.cssHex);
+          --theme-heading: \(heading.cssHex); --theme-link: \(link.cssHex);
+          --theme-link-hover: \(linkHover.cssHex); --theme-accent: \(accent.cssHex);
+          --theme-strong: \(strong.cssHex); --theme-emphasis: \(emphasis.cssHex);
+          --theme-code: \(code.cssHex); --theme-danger: \(danger.cssHex);
+          --theme-selection: \(selection.cssHex);
+        }
+        """
+    }
+}
+
+private extension ContentThemeColor {
+    init(hex: UInt32) {
+        self.init(
+            red: UInt8((hex >> 16) & 0xff),
+            green: UInt8((hex >> 8) & 0xff),
+            blue: UInt8(hex & 0xff)
+        )
+    }
 }
 
 public struct GeminiProxyConfiguration: Equatable, Codable, Sendable {

@@ -49,6 +49,10 @@ struct BrowserSettingsView: View {
                 Text("Dracula Light").tag(ContentTheme.draculaLight)
                 Text("Dracula Dark").tag(ContentTheme.draculaDark)
                 Text("Dracula Classic").tag(ContentTheme.draculaClassic)
+                Text("Ocean").tag(ContentTheme.ocean)
+                Text("Forest").tag(ContentTheme.forest)
+                Text("Creamsicle").tag(ContentTheme.creamsicle)
+                Text("Sand Dunes").tag(ContentTheme.sandDunes)
             }
             Picker("Content width", selection: store.binding(\.contentWidth)) {
                 Text("Narrow").tag(ContentWidth.narrow)
