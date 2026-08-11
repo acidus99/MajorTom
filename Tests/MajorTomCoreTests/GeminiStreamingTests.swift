@@ -130,8 +130,30 @@ final class GeminiStreamingTests: XCTestCase {
     func testContentThemePaletteSelectionDoesNotDependOnUIThemeForExplicitThemes() {
         XCTAssertFalse(ContentTheme.draculaLight.usesDarkPalette(effectiveDarkAppearance: true))
         XCTAssertTrue(ContentTheme.draculaDark.usesDarkPalette(effectiveDarkAppearance: false))
+        XCTAssertTrue(ContentTheme.draculaClassic.usesDarkPalette(effectiveDarkAppearance: false))
         XCTAssertFalse(ContentTheme.automatic.usesDarkPalette(effectiveDarkAppearance: false))
         XCTAssertTrue(ContentTheme.automatic.usesDarkPalette(effectiveDarkAppearance: true))
+    }
+
+    func testDraculaClassicMapsSemanticTextAndLineRoles() {
+        let css = ContentTheme.draculaClassic.css(effectiveDarkAppearance: false)
+
+        XCTAssertTrue(css.contains("h1, h2, h3 { color: var(--purple); }"))
+        XCTAssertTrue(css.contains("a:hover, a:focus { color: var(--pink); }"))
+        XCTAssertTrue(css.contains("strong { color: var(--orange); }"))
+        XCTAssertTrue(css.contains("em { color: var(--yellow); }"))
+        XCTAssertTrue(css.contains("code { color: var(--green); }"))
+        XCTAssertTrue(css.contains("pre, code { background: var(--surface-light); }"))
+        XCTAssertTrue(css.contains(".list-item > span[aria-hidden=\"true\"] { color: var(--pink); }"))
+        XCTAssertTrue(css.contains("background: var(--surface-dark)"))
+        XCTAssertTrue(css.contains(".browser-generated h1 { color: var(--red); }"))
+        XCTAssertTrue(css.contains("blockquote { background: transparent !important; }"))
+    }
+
+    func testExistingDraculaDarkDoesNotGainClassicSemanticMapping() {
+        let css = ContentTheme.draculaDark.css(effectiveDarkAppearance: true)
+        XCTAssertFalse(css.contains("--selection: #44475a"))
+        XCTAssertFalse(css.contains("strong { color: var(--orange); }"))
     }
 
     func testContentThemeCSSUsesItsResolvedPaletteBackground() {
@@ -245,6 +267,7 @@ final class GeminiStreamingTests: XCTestCase {
             customSearchEndpoint: "gemini://search.example/query",
             applicationAppearance: .dark,
             contentTheme: .draculaLight,
+            contentWidth: .wide,
             proxy: GeminiProxyConfiguration(host: "proxy.example", port: 8080),
             automaticallyLoadsSameCapsuleImages: false
         )
@@ -253,6 +276,21 @@ final class GeminiStreamingTests: XCTestCase {
             from: JSONEncoder().encode(original)
         )
         XCTAssertEqual(decoded, original)
+    }
+
+    func testContentWidthCSSUsesExpectedScreenWidths() {
+        XCTAssertTrue(ContentWidth.narrow.css.contains("max-width: 48rem"))
+        XCTAssertTrue(ContentWidth.wide.css.contains("max-width: 56rem"))
+        XCTAssertTrue(ContentWidth.full.css.contains("max-width: none"))
+        XCTAssertTrue(ContentWidth.full.css.hasPrefix("@media screen"))
+    }
+
+    func testMissingContentWidthDecodesAsNarrow() throws {
+        let decoded = try JSONDecoder().decode(
+            BrowserPreferences.self,
+            from: Data("{}".utf8)
+        )
+        XCTAssertEqual(decoded.contentWidth, .narrow)
     }
 
     func testDirectorySaveFilenameUsesDocumentTitle() {

@@ -48,6 +48,12 @@ struct BrowserSettingsView: View {
                 Text("Automatic").tag(ContentTheme.automatic)
                 Text("Dracula Light").tag(ContentTheme.draculaLight)
                 Text("Dracula Dark").tag(ContentTheme.draculaDark)
+                Text("Dracula Classic").tag(ContentTheme.draculaClassic)
+            }
+            Picker("Content width", selection: store.binding(\.contentWidth)) {
+                Text("Narrow").tag(ContentWidth.narrow)
+                Text("Wide").tag(ContentWidth.wide)
+                Text("Full").tag(ContentWidth.full)
             }
             Text("Application chrome and document themes are independent.")
                 .font(.callout)

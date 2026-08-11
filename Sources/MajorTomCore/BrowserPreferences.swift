@@ -24,6 +24,22 @@ public enum ApplicationAppearance: String, CaseIterable, Codable, Sendable {
     case dark
 }
 
+public enum ContentWidth: String, CaseIterable, Codable, Sendable {
+    case narrow
+    case wide
+    case full
+
+    /// Screen-only so printing can continue to use the full printable page width.
+    public var css: String {
+        let maxWidth = switch self {
+        case .narrow: "48rem"
+        case .wide: "56rem"
+        case .full: "none"
+        }
+        return "@media screen { main, .browser-generated main { max-width: \(maxWidth); } }"
+    }
+}
+
 public struct ContentThemeColor: Equatable, Sendable {
     public let red: UInt8
     public let green: UInt8
@@ -55,13 +71,14 @@ public enum ContentTheme: String, CaseIterable, Codable, Sendable {
     case automatic
     case draculaLight
     case draculaDark
+    case draculaClassic
 
     public func palette(effectiveDarkAppearance: Bool) -> ContentThemePalette {
         let useDarkPalette: Bool
         switch self {
         case .automatic: useDarkPalette = effectiveDarkAppearance
         case .draculaLight: useDarkPalette = false
-        case .draculaDark: useDarkPalette = true
+        case .draculaDark, .draculaClassic: useDarkPalette = true
         }
 
         if useDarkPalette {
@@ -72,7 +89,9 @@ public enum ContentTheme: String, CaseIterable, Codable, Sendable {
                 muted: ContentThemeColor(red: 0x62, green: 0x72, blue: 0xa4),
                 accent: ContentThemeColor(red: 0xbd, green: 0x93, blue: 0xf9),
                 link: ContentThemeColor(red: 0x8b, green: 0xe9, blue: 0xfd),
-                blockquote: ContentThemeColor(red: 0xf1, green: 0xfa, blue: 0x8c),
+                blockquote: self == .draculaClassic
+                    ? ContentThemeColor(red: 0xf8, green: 0xf8, blue: 0xf2)
+                    : ContentThemeColor(red: 0xf1, green: 0xfa, blue: 0x8c),
                 codeBackground: ContentThemeColor(red: 0x34, green: 0x37, blue: 0x46)
             )
         }
@@ -101,12 +120,58 @@ public enum ContentTheme: String, CaseIterable, Codable, Sendable {
         pre, code { background: \(palette.codeBackground.cssHex); } .details { background: \(palette.codeBackground.cssHex) !important; }
         """
 
+        let semanticCSS = self == .draculaClassic ? Self.draculaClassicCSS : ""
+
         // Print rules must follow appearance rules in the cascade so dark screen
         // colors cannot win when WebKit switches to print media.
         return HTMLDocumentStreamRenderer.defaultThemeCSS
             + "\n" + appearanceCSS
+            + "\n" + semanticCSS
             + "\n" + HTMLDocumentStreamRenderer.printThemeCSS
     }
+
+    /// Dracula CSS's prose-oriented semantic mapping, adapted to Major Tom's
+    /// streamed Gemtext markup. Ordinary prose stays neutral while structure,
+    /// inline emphasis and interaction states receive stable roles.
+    private static let draculaClassicCSS = """
+    :root {
+      --selection: #44475a; --surface-dark: #21222c; --surface-light: #343746;
+      --red: #ff5555; --orange: #ffb86c; --yellow: #f1fa8c;
+      --green: #50fa7b; --purple: #bd93f9; --cyan: #8be9fd; --pink: #ff79c6;
+    }
+    ::selection { color: var(--foreground); background: var(--selection); }
+    h1, h2, h3 { color: var(--purple); }
+    a { color: var(--cyan); }
+    a:hover, a:focus { color: var(--pink); }
+    a:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+    strong { color: var(--orange); }
+    em { color: var(--yellow); }
+    code { color: var(--green); }
+    pre, code { background: var(--surface-light); }
+    .browser-generated .details { background: var(--surface-light) !important; }
+    .delimiter, .link-hint { color: var(--muted); }
+    .list-item > span[aria-hidden="true"] { color: var(--pink); }
+    blockquote {
+      color: var(--foreground); border-color: var(--muted);
+      background: var(--surface-dark); border-radius: 0 .4rem .4rem 0;
+    }
+    .pre-block.multiline[open] > pre:focus-visible { outline-color: var(--purple); }
+    .pre-block > summary, figcaption, .browser-generated .eyebrow,
+    .source-line::before { color: var(--muted); }
+    .source-line:hover { background: var(--surface-dark); }
+    .incomplete { border-color: var(--orange); }
+    .browser-generated h1 { color: var(--red); }
+    @media print {
+      h1, h2, h3, strong, em, .delimiter, .link-hint,
+      .list-item > span[aria-hidden="true"], .browser-generated h1 {
+        color: #000 !important;
+      }
+      blockquote { background: transparent !important; }
+      .browser-generated .eyebrow, .source-line::before { color: #444 !important; }
+      .source-line:hover { background: transparent !important; }
+      .incomplete { border-color: #777 !important; }
+    }
+    """
 }
 
 public struct GeminiProxyConfiguration: Equatable, Codable, Sendable {
@@ -125,6 +190,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
     public var customSearchEndpoint: String
     public var applicationAppearance: ApplicationAppearance
     public var contentTheme: ContentTheme
+    public var contentWidth: ContentWidth
     public var proxy: GeminiProxyConfiguration?
     public var automaticallyLoadsSameCapsuleImages: Bool
     public var automaticallyLoadsDataImages: Bool
@@ -140,6 +206,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         customSearchEndpoint: String = "",
         applicationAppearance: ApplicationAppearance = .system,
         contentTheme: ContentTheme = .automatic,
+        contentWidth: ContentWidth = .narrow,
         proxy: GeminiProxyConfiguration? = nil,
         automaticallyLoadsSameCapsuleImages: Bool = true,
         automaticallyLoadsDataImages: Bool = true,
@@ -152,6 +219,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         self.customSearchEndpoint = customSearchEndpoint
         self.applicationAppearance = applicationAppearance
         self.contentTheme = contentTheme
+        self.contentWidth = contentWidth
         self.proxy = proxy
         self.automaticallyLoadsSameCapsuleImages = automaticallyLoadsSameCapsuleImages
         self.automaticallyLoadsDataImages = automaticallyLoadsDataImages
@@ -182,6 +250,8 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         ) ?? defaults.applicationAppearance
         contentTheme = try container.decodeIfPresent(ContentTheme.self, forKey: .contentTheme)
             ?? defaults.contentTheme
+        contentWidth = try container.decodeIfPresent(ContentWidth.self, forKey: .contentWidth)
+            ?? defaults.contentWidth
         // Genuinely optional: absent and "no proxy" are the same thing.
         proxy = try container.decodeIfPresent(GeminiProxyConfiguration.self, forKey: .proxy)
         automaticallyLoadsSameCapsuleImages = try container.decodeIfPresent(

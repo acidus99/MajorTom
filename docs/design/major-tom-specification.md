@@ -139,10 +139,23 @@ The initial content-theme choices are:
 - **Automatic:** select a suitable content theme based on the effective application appearance.
 - **Dracula Light:** always use the light Dracula reading theme.
 - **Dracula Dark:** always use the dark Dracula reading theme.
+- **Dracula Classic:** use the full classic Dracula semantic palette for headings,
+  links and interaction states, emphasis, code, quotations, lists, selection,
+  warnings, generated errors, and source-view furniture.
 
 Additional content themes may be added later without changing the distinction between content and application appearance.
 
-### 6.3 Independence
+### 6.3 Content width
+
+Content width applies consistently to Gemtext, plain-text documents, and source views. The options are:
+
+- **Narrow:** the default 48-rem content container.
+- **Wide:** a 56-rem content container.
+- **Full:** use the available window width while retaining the document's side padding.
+
+Changing content width updates open documents without another network request.
+
+### 6.4 Independence
 
 An explicitly selected content theme remains fixed when the application or macOS appearance changes. This allows combinations such as dark browser chrome with a light reading surface.
 
@@ -542,7 +555,7 @@ Browser-generated pages identify themselves clearly and never impersonate capsul
 
 Each live tab maintains enough cached source and presentation state to make Back and Forward responsive and to restore relevant page state without unnecessary requests.
 
-Cached entries preserve original bytes, response metadata, final URL, title information, completion state, and sufficient parsed or rendered state to reproduce the page under current settings. Changing a content theme or quality-of-life option re-renders from authoritative cached source rather than from previously rendered output.
+Cached entries preserve original bytes, response metadata, final URL, title information, completion state, and sufficient parsed or rendered state to reproduce the page under current settings. Presentation-only changes such as content width update the current document stylesheet; changes that require re-rendering use authoritative cached source rather than previously rendered output.
 
 Incomplete, stopped, or truncated responses are labeled as such and are never silently promoted to complete cached responses.
 
@@ -558,6 +571,7 @@ Initial configurable values include:
 - Search provider and custom search endpoint.
 - Application appearance.
 - Content theme.
+- Content width, with Narrow as the default.
 - HTTP proxy.
 - Automatic same-capsule inline images, enabled by default.
 - Automatic inline `data:` URI images, enabled by default.

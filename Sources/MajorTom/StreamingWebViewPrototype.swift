@@ -1133,7 +1133,6 @@ final class BrowserModel: ObservableObject {
     /// long line keeps exactly one number.
     private static let sourceViewPrologue = """
     <style>
-    body.browser-generated:has(.source) main { max-width: 62rem; }
     .source { counter-reset: source-line; margin-top: 1rem; }
     .source-line { display: grid; grid-template-columns: 3.5rem 1fr; column-gap: 1rem; }
     .source-line:hover { background: color-mix(in srgb, CanvasText 6%, transparent); }
@@ -2117,6 +2116,7 @@ final class BrowserModel: ObservableObject {
         if settings.preferences.renderingOptions.collapsesConsecutiveQuotes {
             theme += HTMLDocumentStreamRenderer.collapsedQuotesCSS
         }
+        theme += "\n" + settings.preferences.contentWidth.css
         // Screen-only zoom survives navigation without overriding print's 100% scale.
         return theme + "\n@media screen { :root { zoom: \(pageZoom); } }"
     }
@@ -2137,12 +2137,15 @@ final class BrowserModel: ObservableObject {
             }
         }
 
-        guard committedURL != nil, canSavePage else { return }
+        guard committedURL != nil else { return }
 
-        if preferences.contentTheme != lastPreferences.contentTheme {
+        if preferences.contentTheme != lastPreferences.contentTheme
+            || preferences.contentWidth != lastPreferences.contentWidth {
             applyThemeWithoutReload()
             return
         }
+
+        guard canSavePage else { return }
 
         let renderingChanged = preferences.renderingOptions != lastPreferences.renderingOptions
             || preferences.automaticallyLoadsSameCapsuleImages != lastPreferences.automaticallyLoadsSameCapsuleImages
