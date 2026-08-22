@@ -171,11 +171,17 @@ final class ClientCertificateStore: ObservableObject {
 
     @discardableResult
     func stopUsing(for url: URL) -> Bool {
-        guard let association = ClientCertificateAssociation.mostSpecific(
+        guard ClientCertificateAssociation.mostSpecific(
             matching: url,
             in: associations
-        ) else { return false }
-        associations.removeAll { $0.id == association.id }
+        ) != nil else { return false }
+        // “For this capsule” means every approval for the identity and endpoint,
+        // including overlapping whole-capsule and path-specific rules. Removing only
+        // the most-specific rule could immediately expose a broader rule underneath it.
+        associations = ClientCertificateAssociation.removingCapsuleApproval(
+            matching: url,
+            from: associations
+        )
         changed()
         return true
     }
@@ -215,7 +221,6 @@ final class ClientCertificateStore: ObservableObject {
                 identity = cachedIdentity(for: descriptor.id)
             } catch {
                 identity = nil
-                lastError = error.localizedDescription
             }
         } else {
             identity = nil

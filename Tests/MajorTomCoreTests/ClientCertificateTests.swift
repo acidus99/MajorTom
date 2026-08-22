@@ -89,4 +89,33 @@ final class ClientCertificateTests: XCTestCase {
         XCTAssertTrue(association.matches(URL(string: "gemini://station.martinrue.com/join/profile")!))
         XCTAssertFalse(association.matches(URL(string: "gemini://station.martinrue.com/timeline")!))
     }
+
+    func testStoppingForCapsuleRemovesOverlappingRulesForUsedIdentity() throws {
+        let usedCertificate = UUID()
+        let otherCertificate = UUID()
+        let endpoint = CapsuleEndpoint(host: "station.martinrue.com")
+        let wholeCapsule = ClientCertificateAssociation.entireCapsule(
+            certificateID: usedCertificate,
+            endpoint: endpoint
+        )
+        let path = try XCTUnwrap(ClientCertificateAssociation.pathAndDescendants(
+            certificateID: usedCertificate,
+            url: URL(string: "gemini://station.martinrue.com/acidus")!
+        ))
+        let otherIdentity = ClientCertificateAssociation.entireCapsule(
+            certificateID: otherCertificate,
+            endpoint: endpoint
+        )
+        let otherCapsule = ClientCertificateAssociation.entireCapsule(
+            certificateID: usedCertificate,
+            endpoint: CapsuleEndpoint(host: "bbs.geminispace.org")
+        )
+
+        let remaining = ClientCertificateAssociation.removingCapsuleApproval(
+            matching: URL(string: "gemini://station.martinrue.com/acidus/notifications")!,
+            from: [wholeCapsule, path, otherIdentity, otherCapsule]
+        )
+
+        XCTAssertEqual(remaining, [otherIdentity, otherCapsule])
+    }
 }

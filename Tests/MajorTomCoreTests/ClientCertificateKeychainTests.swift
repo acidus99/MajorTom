@@ -102,6 +102,56 @@ final class ClientCertificateKeychainTests: XCTestCase {
         XCTAssertEqual(imported.commonName, "Imported Lagrange Identity")
     }
 
+    func testSeparateCertificateAndPrivateKeyFilesImportInEitherOrder() throws {
+        let combined = try makeCombinedPEM()
+        let certificate = pem(
+            named: "CERTIFICATE",
+            data: try XCTUnwrap(pemBlock(named: "CERTIFICATE", in: combined))
+        )
+        let privateKey = pem(
+            named: "PRIVATE KEY",
+            data: try XCTUnwrap(pemBlock(named: "PRIVATE KEY", in: combined))
+        )
+
+        XCTAssertNoThrow(try ClientCertificateImport.parse(
+            pemFiles: [certificate, privateKey]
+        ))
+        XCTAssertNoThrow(try ClientCertificateImport.parse(
+            pemFiles: [privateKey, certificate]
+        ))
+    }
+
+    func testTwoFilesMustBeExactlyOneCertificateAndOnePrivateKey() throws {
+        let combined = try makeCombinedPEM()
+        let certificate = pem(
+            named: "CERTIFICATE",
+            data: try XCTUnwrap(pemBlock(named: "CERTIFICATE", in: combined))
+        )
+        let privateKey = pem(
+            named: "PRIVATE KEY",
+            data: try XCTUnwrap(pemBlock(named: "PRIVATE KEY", in: combined))
+        )
+
+        XCTAssertThrowsError(try ClientCertificateImport.parse(
+            pemFiles: [certificate, certificate]
+        )) { error in
+            XCTAssertEqual(error as? ClientCertificatePEMError, .invalidFilePair)
+        }
+        XCTAssertThrowsError(try ClientCertificateImport.parse(
+            pemFiles: [combined, privateKey]
+        )) { error in
+            XCTAssertEqual(error as? ClientCertificatePEMError, .invalidFilePair)
+        }
+    }
+
+    func testNoMoreThanTwoPEMFilesMayBeSelected() {
+        XCTAssertThrowsError(try ClientCertificateImport.parse(
+            pemFiles: ["first", "second", "third"]
+        )) { error in
+            XCTAssertEqual(error as? ClientCertificatePEMError, .tooManyFiles)
+        }
+    }
+
     private func makeCombinedPEM() throws -> String {
         var error: Unmanaged<CFError>?
         let attributes: [CFString: Any] = [
