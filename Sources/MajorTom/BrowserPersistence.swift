@@ -93,6 +93,8 @@ struct CachedPage: Codable {
     /// sessions written before these fields existed continue to decode.
     var responseStatus: Int? = nil
     var responseMeta: String? = nil
+    /// Identity actually offered in the TLS handshake that produced this representation.
+    var clientCertificateID: UUID? = nil
 }
 
 struct RestoredTabState: Codable {

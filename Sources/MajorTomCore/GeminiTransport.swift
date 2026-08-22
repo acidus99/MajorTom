@@ -43,12 +43,14 @@ public final class GeminiTransport: @unchecked Sendable {
 
     public func events(
         for target: GeminiRequestTarget,
+        clientIdentity: ClientTLSIdentity? = nil,
         configuration: GeminiTransportConfiguration = GeminiTransportConfiguration(),
         authorizeTrust: @escaping TrustAuthorization
     ) -> AsyncThrowingStream<GeminiTransportEvent, any Error> {
         AsyncThrowingStream { continuation in
             let session = GeminiConnectionSession(
                 target: target,
+                clientIdentity: clientIdentity,
                 configuration: configuration,
                 continuation: continuation,
                 authorizeTrust: authorizeTrust
@@ -65,6 +67,7 @@ public final class GeminiTransport: @unchecked Sendable {
 
 private final class GeminiConnectionSession: @unchecked Sendable {
     private let target: GeminiRequestTarget
+    private let clientIdentity: ClientTLSIdentity?
     private let configuration: GeminiTransportConfiguration
     private let continuation: AsyncThrowingStream<GeminiTransportEvent, any Error>.Continuation
     private let authorizeTrust: GeminiTransport.TrustAuthorization
@@ -78,11 +81,13 @@ private final class GeminiConnectionSession: @unchecked Sendable {
 
     init(
         target: GeminiRequestTarget,
+        clientIdentity: ClientTLSIdentity?,
         configuration: GeminiTransportConfiguration,
         continuation: AsyncThrowingStream<GeminiTransportEvent, any Error>.Continuation,
         authorizeTrust: @escaping GeminiTransport.TrustAuthorization
     ) {
         self.target = target
+        self.clientIdentity = clientIdentity
         self.configuration = configuration
         self.continuation = continuation
         self.authorizeTrust = authorizeTrust
@@ -95,6 +100,14 @@ private final class GeminiConnectionSession: @unchecked Sendable {
             tlsOptions.securityProtocolOptions,
             .TLSv12
         )
+
+        if let clientIdentity,
+           let localIdentity = sec_identity_create(clientIdentity.securityIdentity) {
+            sec_protocol_options_set_local_identity(
+                tlsOptions.securityProtocolOptions,
+                localIdentity
+            )
+        }
 
         sec_protocol_options_set_verify_block(
             tlsOptions.securityProtocolOptions,

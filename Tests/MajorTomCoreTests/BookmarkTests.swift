@@ -226,6 +226,15 @@ final class InternalPageTests: XCTestCase {
         XCTAssertEqual(InternalPage.page(for: InternalPage.bookmarks.url), .bookmarks)
     }
 
+    func testClientCertificatesPageIsAddressable() throws {
+        XCTAssertEqual(InternalPage.clientCertificates.url.absoluteString, "about:client-certs")
+        let result = try AddressInputInterpreter().interpret("about:client-certs")
+        guard case .internalPage(let page) = result else {
+            return XCTFail("expected an internal page, got \(result)")
+        }
+        XCTAssertEqual(page, .clientCertificates)
+    }
+
     func testRecognitionIgnoresCase() {
         XCTAssertEqual(InternalPage.page(for: URL(string: "ABOUT:Bookmarks")!), .bookmarks)
     }

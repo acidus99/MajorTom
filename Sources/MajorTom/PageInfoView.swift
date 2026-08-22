@@ -14,6 +14,8 @@ struct PageInformation: Identifiable {
     /// without reconnecting.
     var identity: PresentedServerIdentity?
     var trusted: TrustedServerIdentity?
+    var clientCertificate: ClientCertificateDescriptor?
+    var clientCertificateAssociation: ClientCertificateAssociation?
 }
 
 /// Page and certificate information, in the spirit of Lagrange's panel.
@@ -27,7 +29,10 @@ struct PageInformation: Identifiable {
 struct PageInfoView: View {
     let information: PageInformation
     let dismiss: () -> Void
+    let stopUsingClientCertificate: () -> Void
+    let showClientCertificate: () -> Void
     @State private var copied: String?
+    @State private var stoppedUsingClientCertificate = false
 
     private enum CheckState {
         case passed, failed, unknown
@@ -63,6 +68,41 @@ struct PageInfoView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 9) {
+                Text("Client-side Certificate")
+                    .font(.caption.weight(.semibold))
+                    .textCase(.uppercase)
+                    .foregroundStyle(.tint)
+
+                if let certificate = information.clientCertificate {
+                    LabeledContent("Identity:", value: certificate.commonName)
+                    LabeledContent("Expires:", value: Self.expiryFormatter.string(from: certificate.notAfter))
+                    if let association = information.clientCertificateAssociation,
+                       !stoppedUsingClientCertificate {
+                        LabeledContent("Approved scope:", value: scopeDescription(association))
+                    } else {
+                        Text("This identity was used for the page, but it is no longer approved for this address.")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack {
+                        Button("Show Certificate", action: showClientCertificate)
+                        if information.clientCertificateAssociation != nil,
+                           !stoppedUsingClientCertificate {
+                            Button("Stop Using for This Capsule", role: .destructive) {
+                                stopUsingClientCertificate()
+                                stoppedUsingClientCertificate = true
+                            }
+                        }
+                    }
+                } else {
+                    Text("None")
+                        .foregroundStyle(.secondary)
+                }
             }
 
             HStack(spacing: 10) {
@@ -238,6 +278,16 @@ struct PageInfoView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
         copied = "\(name) copied"
+    }
+
+    private func scopeDescription(_ association: ClientCertificateAssociation) -> String {
+        let port = association.endpoint.port == GeminiRequestTarget.defaultPort
+            ? ""
+            : ":\(association.endpoint.port)"
+        if association.scope == .entireCapsule {
+            return "Entire capsule (\(association.endpoint.host)\(port))"
+        }
+        return "\(association.endpoint.host)\(port)\(association.pathPrefix) and below"
     }
 
     private static let expiryFormatter: DateFormatter = {

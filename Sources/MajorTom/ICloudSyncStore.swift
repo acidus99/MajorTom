@@ -33,6 +33,7 @@ final class ICloudSyncStore: ObservableObject {
     @Published private(set) var remoteTabDevices: [CloudTabDeviceSnapshot] = []
 
     let receivedPreferences = PassthroughSubject<SyncedBrowserPreferences, Never>()
+    let receivedClientCertificates = PassthroughSubject<SyncedClientCertificates, Never>()
 
     let localDeviceID: UUID
     let localDeviceName: String
@@ -42,10 +43,12 @@ final class ICloudSyncStore: ObservableObject {
     private let defaults: UserDefaults
     private let zoneID = CKRecordZone.ID(zoneName: "MajorTomUserData")
     private let preferencesRecordID: CKRecord.ID
+    private let clientCertificatesRecordID: CKRecord.ID
     private let tabsRecordID: CKRecord.ID
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var localPreferences: SyncedBrowserPreferences?
+    private var localClientCertificates: SyncedClientCertificates?
     private var localTabs: CloudTabDeviceSnapshot?
     private var syncTask: Task<Void, Never>?
     private var pendingSync = false
@@ -73,6 +76,10 @@ final class ICloudSyncStore: ObservableObject {
             status = .unavailable("This build is not provisioned for Major Tom iCloud sync")
         }
         preferencesRecordID = CKRecord.ID(recordName: "preferences", zoneID: zoneID)
+        clientCertificatesRecordID = CKRecord.ID(
+            recordName: "client-certificates",
+            zoneID: zoneID
+        )
         tabsRecordID = CKRecord.ID(
             recordName: "tabs-\(localDeviceID.uuidString.lowercased())",
             zoneID: zoneID
@@ -91,6 +98,16 @@ final class ICloudSyncStore: ObservableObject {
 
     func updatePreferences(_ snapshot: SyncedBrowserPreferences) {
         localPreferences = snapshot
+        requestSync()
+    }
+
+    func configure(clientCertificates: SyncedClientCertificates?) {
+        localClientCertificates = clientCertificates
+        requestSync()
+    }
+
+    func updateClientCertificates(_ snapshot: SyncedClientCertificates) {
+        localClientCertificates = snapshot
         requestSync()
     }
 
@@ -140,6 +157,7 @@ final class ICloudSyncStore: ObservableObject {
             _ = try await database.save(CKRecordZone(zoneID: zoneID))
             let remote = try await fetchAllRecords(from: database)
             var remotePreferences: SyncedBrowserPreferences?
+            var remoteClientCertificates: SyncedClientCertificates?
             var devices: [CloudTabDeviceSnapshot] = []
 
             for record in remote {
@@ -151,6 +169,11 @@ final class ICloudSyncStore: ObservableObject {
                     if let device = try? decoder.decode(CloudTabDeviceSnapshot.self, from: data) {
                         devices.append(device)
                     }
+                case "MTClientCertificates":
+                    remoteClientCertificates = try? decoder.decode(
+                        SyncedClientCertificates.self,
+                        from: data
+                    )
                 default:
                     break
                 }
@@ -159,6 +182,11 @@ final class ICloudSyncStore: ObservableObject {
             if let remotePreferences, remotePreferences.shouldReplace(localPreferences) {
                 localPreferences = remotePreferences
                 receivedPreferences.send(remotePreferences)
+            }
+            if let remoteClientCertificates,
+               remoteClientCertificates.shouldReplace(localClientCertificates) {
+                localClientCertificates = remoteClientCertificates
+                receivedClientCertificates.send(remoteClientCertificates)
             }
 
             remoteTabDevices = devices.visibleCloudTabDevices(excluding: localDeviceID)
@@ -171,6 +199,15 @@ final class ICloudSyncStore: ObservableObject {
                     type: "MTPreferences",
                     id: preferencesRecordID,
                     value: localPreferences
+                ))
+            }
+            if let localClientCertificates,
+               remoteClientCertificates == nil
+                    || localClientCertificates.shouldReplace(remoteClientCertificates) {
+                recordsToSave.append(try makeRecord(
+                    type: "MTClientCertificates",
+                    id: clientCertificatesRecordID,
+                    value: localClientCertificates
                 ))
             }
             if let localTabs {

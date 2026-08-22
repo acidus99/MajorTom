@@ -470,6 +470,16 @@ final class BrowserModel: ObservableObject {
         var initialText: String = ""
     }
 
+    struct ClientCertificatePrompt: Identifiable {
+        let id = UUID()
+        let target: GeminiRequestTarget
+        let status: Int
+        let message: String
+        let attemptedCertificate: ClientCertificateDescriptor?
+        let matchingCertificateIsUnavailable: Bool
+        let matchingCertificateIsInvalid: Bool
+    }
+
     @Published var locationText = "gemini://gemi.dev/"
     @Published private(set) var committedURL: URL?
     @Published private(set) var isLoading = false
@@ -492,10 +502,13 @@ final class BrowserModel: ObservableObject {
     @Published var validationMessage: String?
     @Published var trustPrompt: TrustPrompt?
     @Published var inputPrompt: InputPrompt?
+    @Published var clientCertificatePrompt: ClientCertificatePrompt?
     /// Set to present the Page Info panel; cleared when it is dismissed.
     @Published var pageInformation: PageInformation?
     /// The identity presented by the capsule serving the current page, kept for Page Info.
     @Published private(set) var serverIdentity: PresentedServerIdentity?
+    /// The client identity actually offered for the request that produced this page.
+    @Published private(set) var usedClientCertificate: ClientCertificateDescriptor?
     private var responseStatus: Int?
     private var responseMeta = ""
     @Published var inputValidationMessage: String?
@@ -520,6 +533,7 @@ final class BrowserModel: ObservableObject {
     private let router: BrowserNavigationRouter
     private let transport = GeminiTransport()
     private let settings = BrowserSettingsStore.shared
+    private let clientCertificates = ClientCertificateStore.shared
     private let trustPolicy = ServerTrustPolicy()
     private let trustStore: TrustedIdentityStore?
     private let renderer = HTMLDocumentStreamRenderer()
@@ -545,6 +559,11 @@ final class BrowserModel: ObservableObject {
     /// Answers typed but not submitted, so cancelling a prompt and returning to it does
     /// not lose the work. Sensitive prompts are deliberately never recorded here.
     private var inputDrafts: [URL: String] = [:]
+    private var pendingClientCertificateChallenge: (
+        target: GeminiRequestTarget,
+        disposition: HistoryDisposition,
+        renderAsSource: Bool
+    )?
     private var hasStarted = false
     private var trustWasDeclined = false
     private var currentSourceBytes = Data()
@@ -817,6 +836,12 @@ final class BrowserModel: ObservableObject {
         isLoading = false
         validationMessage = nil
         internalPage = nil
+        clientCertificatePrompt = nil
+        pendingClientCertificateChallenge = nil
+        serverIdentity = nil
+        usedClientCertificate = nil
+        responseStatus = nil
+        responseMeta = ""
 
         let mimeType = Self.mimeType(forPathExtension: url.pathExtension)
 
@@ -898,6 +923,8 @@ final class BrowserModel: ObservableObject {
         trustContinuation?.resume(returning: false)
         trustContinuation = nil
         trustPrompt = nil
+        clientCertificatePrompt = nil
+        pendingClientCertificateChallenge = nil
 
         // Stopping an idle page must not touch it. This previously rewrote the cache
         // entry of a fully loaded page as .stopped and dropped its title.
@@ -914,7 +941,8 @@ final class BrowserModel: ObservableObject {
                 title: title,
                 documentTitle: documentTitle,
                 responseStatus: responseStatus,
-                responseMeta: responseMeta
+                responseMeta: responseMeta,
+                clientCertificateID: usedClientCertificate?.id
             )
         }
         isLoading = false
@@ -1177,7 +1205,8 @@ final class BrowserModel: ObservableObject {
             receivedAt: Date(),
             title: heading,
             responseStatus: responseStatus,
-            responseMeta: responseMeta
+            responseMeta: responseMeta,
+            clientCertificateID: usedClientCertificate?.id
         )
         currentSourceBytes = bytes
         currentMIMEType = mimeType
@@ -1386,6 +1415,9 @@ final class BrowserModel: ObservableObject {
         hoveredLinkURL = nil
         favicon = nil
         serverIdentity = nil
+        usedClientCertificate = nil
+        clientCertificatePrompt = nil
+        pendingClientCertificateChallenge = nil
         responseStatus = nil
         responseMeta = ""
         currentSourceBytes = Data()
@@ -1424,9 +1456,57 @@ final class BrowserModel: ObservableObject {
                 byteCount: currentSourceBytes.count,
                 mimeType: currentMIMEType,
                 identity: serverIdentity,
-                trusted: trusted
+                trusted: trusted,
+                clientCertificate: usedClientCertificate,
+                clientCertificateAssociation: usedClientCertificate.flatMap { certificate in
+                    ClientCertificateAssociation.mostSpecific(
+                        matching: committedURL,
+                        in: clientCertificates.associations.filter {
+                            $0.certificateID == certificate.id
+                        }
+                    )
+                }
             )
         }
+    }
+
+    func useClientCertificate(_ certificateID: UUID, scope: ClientCertificateScopeChoice) {
+        guard let pending = pendingClientCertificateChallenge else { return }
+        clientCertificates.associate(
+            certificateID: certificateID,
+            with: pending.target.url,
+            scope: scope
+        )
+        clientCertificatePrompt = nil
+        pendingClientCertificateChallenge = nil
+        navigate(
+            to: pending.target,
+            disposition: pending.disposition,
+            renderAsSource: pending.renderAsSource
+        )
+    }
+
+    func cancelClientCertificatePrompt() {
+        clientCertificatePrompt = nil
+        pendingClientCertificateChallenge = nil
+        isLoading = false
+        statusText = "Client identity not selected"
+        if let committedURL { locationText = committedURL.absoluteString }
+    }
+
+    func stopUsingClientCertificateForCurrentPage() {
+        guard let url = pageInformation?.url ?? committedURL else { return }
+        guard clientCertificates.stopUsing(for: url) else { return }
+        if var information = pageInformation {
+            information.clientCertificateAssociation = nil
+            pageInformation = information
+        }
+    }
+
+    func stopUsingClientCertificateForPendingChallenge() {
+        guard let prompt = clientCertificatePrompt else { return }
+        _ = clientCertificates.stopUsing(for: prompt.target.url)
+        cancelClientCertificatePrompt()
     }
 
     func respondToTrust(allow: Bool) {
@@ -1517,6 +1597,9 @@ final class BrowserModel: ObservableObject {
         // Belongs to the page being replaced, and a stale identity in Page Info would
         // describe the wrong capsule.
         serverIdentity = nil
+        usedClientCertificate = nil
+        clientCertificatePrompt = nil
+        pendingClientCertificateChallenge = nil
         responseStatus = nil
         responseMeta = ""
         // The document is going away, so its hover state is stale.
@@ -1570,9 +1653,15 @@ final class BrowserModel: ObservableObject {
         var gemtextParser = IncrementalGemtextParser()
         var contentStarted = false
 
+        let resolvedClientCertificate = clientCertificates.resolvedCertificate(for: target.url)
+        let sentClientCertificate = resolvedClientCertificate?.tlsIdentity == nil
+            ? nil
+            : resolvedClientCertificate?.descriptor
+
         do {
             let events = transport.events(
                 for: target,
+                clientIdentity: resolvedClientCertificate?.tlsIdentity,
                 configuration: GeminiTransportConfiguration()
             ) { [weak self] identity, _ in
                 guard let self else { return false }
@@ -1635,7 +1724,32 @@ final class BrowserModel: ObservableObject {
                         return
                     }
 
-                    if header.isTemporaryFailure || header.isPermanentFailure || header.requiresClientCertificate {
+                    if header.requiresClientCertificate {
+                        pendingClientCertificateChallenge = (
+                            target: target,
+                            disposition: disposition,
+                            renderAsSource: renderAsSource
+                        )
+                        clientCertificatePrompt = ClientCertificatePrompt(
+                            target: target,
+                            status: header.status,
+                            message: header.meta,
+                            attemptedCertificate: sentClientCertificate,
+                            matchingCertificateIsUnavailable:
+                                resolvedClientCertificate != nil
+                                    && resolvedClientCertificate?.descriptor.isValid() == true
+                                    && resolvedClientCertificate?.tlsIdentity == nil,
+                            matchingCertificateIsInvalid:
+                                resolvedClientCertificate?.descriptor.isValid() == false
+                        )
+                        isLoading = false
+                        statusText = header.status == 60
+                            ? "Client identity required"
+                            : "Client identity rejected"
+                        return
+                    }
+
+                    if header.isTemporaryFailure || header.isPermanentFailure {
                         // 43 and 53 are the proxy-specific failures. Reported generically
                         // they read as "the capsule is broken", when in fact the proxy
                         // is misconfigured or unwilling — a very different fix.
@@ -1644,10 +1758,8 @@ final class BrowserModel: ObservableObject {
                             ? "Temporary Capsule Failure"
                             : header.isPermanentFailure
                                 ? "Permanent Capsule Failure"
-                                : "Client Identity Required"
-                        var message = header.requiresClientCertificate
-                            ? "This capsule requires a client certificate. Major Tom does not support client identities yet."
-                            : header.meta
+                                : "Capsule Failure"
+                        var message = header.meta
                         if header.status == 43 {
                             title = "Proxy Error"
                             message = header.meta.isEmpty
@@ -1693,6 +1805,8 @@ final class BrowserModel: ObservableObject {
                         )
                         return
                     }
+
+                    usedClientCertificate = sentClientCertificate
 
                     mimeType = header.meta.split(separator: ";", maxSplits: 1).first
                         .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
@@ -1793,7 +1907,8 @@ final class BrowserModel: ObservableObject {
                         title: title,
                         documentTitle: documentTitle,
                         responseStatus: header.status,
-                        responseMeta: header.meta
+                        responseMeta: header.meta,
+                        clientCertificateID: sentClientCertificate?.id
                     )
                     statusText = "Loaded \(sourceBytes.count) bytes"
                     // Only now, once the reader has actually landed on this capsule: the
@@ -1829,7 +1944,8 @@ final class BrowserModel: ObservableObject {
                         completion: .incomplete,
                         receivedAt: Date(),
                         responseStatus: responseHeader?.status,
-                        responseMeta: responseHeader?.meta
+                        responseMeta: responseHeader?.meta,
+                        clientCertificateID: usedClientCertificate?.id
                     )
                 }
                 isLoading = false
@@ -1949,6 +2065,12 @@ final class BrowserModel: ObservableObject {
         retryNotBefore = nil
         validationMessage = nil
         internalPage = nil
+        clientCertificatePrompt = nil
+        pendingClientCertificateChallenge = nil
+        serverIdentity = nil
+        usedClientCertificate = nil
+        responseStatus = nil
+        responseMeta = ""
         isLoading = false
         currentSourceBytes = decoded.data
         currentMIMEType = decoded.mimeType
@@ -2176,6 +2298,7 @@ final class BrowserModel: ObservableObject {
         // A restored/cached page has no live TLS connection. Leaving the previous
         // identity here would make Page Info describe a different page's certificate.
         serverIdentity = nil
+        usedClientCertificate = cached.clientCertificateID.flatMap(clientCertificates.descriptor(id:))
         committedURL = cached.url
         locationText = cached.url.absoluteString
         currentSourceBytes = cached.body

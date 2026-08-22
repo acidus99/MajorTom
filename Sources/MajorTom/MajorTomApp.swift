@@ -150,6 +150,15 @@ struct MajorTomApp: App {
                 }
             }
 
+            CommandMenu("Certificates") {
+                Button("Manage Client Certificates…") {
+                    NotificationCenter.default.post(
+                        name: .majorTomShowClientCertificates,
+                        object: nil
+                    )
+                }
+            }
+
             CommandMenu("History") {
                 Button("Back") { NotificationCenter.default.post(name: .majorTomBack, object: nil) }
                     .keyboardShortcut("[", modifiers: .command)
@@ -1268,6 +1277,7 @@ private struct BrowserTabView: View {
     let hostWindow: NSWindow?
     @ObservedObject private var bookmarks = BookmarksModel.shared
     @ObservedObject private var settings = BrowserSettingsStore.shared
+    @ObservedObject private var clientCertificates = ClientCertificateStore.shared
     @FocusState private var locationIsFocused: Bool
     @State private var showsFind = false
     @State private var contextMenuMonitor: Any?
@@ -1308,6 +1318,11 @@ private struct BrowserTabView: View {
                         openBookmark(url, inNewTab: inNewTab)
                     }
                     .padding(.top, chromeHeight)
+                case .clientCertificates:
+                    ClientCertificatesManagerView(store: clientCertificates) { url in
+                        browser.openInNewTab?(url, false)
+                    }
+                        .padding(.top, chromeHeight)
                 }
             } else {
                 ZStack {
@@ -1495,6 +1510,9 @@ private struct BrowserTabView: View {
         .onCommand(.majorTomArchive, when: { isCommandTarget }) { browser.openArchive() }
         .onCommand(.majorTomAddBookmark, when: { isCommandTarget }) { requestAddBookmark() }
         .onCommand(.majorTomShowBookmarks, when: { isCommandTarget }) { browser.showInternalPage(.bookmarks) }
+        .onCommand(.majorTomShowClientCertificates, when: { isCommandTarget }) {
+            browser.showInternalPage(.clientCertificates)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomOpenBookmark)) { notification in
             guard isCommandTarget, let url = notification.object as? URL else { return }
             openBookmark(url, inNewTab: false)
@@ -1520,7 +1538,17 @@ private struct BrowserTabView: View {
             }
         }
         .sheet(item: $browser.pageInformation) { information in
-            PageInfoView(information: information) { browser.pageInformation = nil }
+            PageInfoView(
+                information: information,
+                dismiss: { browser.pageInformation = nil },
+                stopUsingClientCertificate: browser.stopUsingClientCertificateForCurrentPage,
+                showClientCertificate: {
+                    guard let certificate = information.clientCertificate else { return }
+                    clientCertificates.requestManagerSelection(certificate.id)
+                    browser.pageInformation = nil
+                    browser.openInNewTab?(InternalPage.clientCertificates.url, false)
+                }
+            )
         }
         .sheet(item: $browser.trustPrompt) { prompt in
             TrustPromptView(prompt: prompt) { approved in
@@ -1536,6 +1564,15 @@ private struct BrowserTabView: View {
                     browser.cancelInput(draft: draft)
                 }
             }
+        }
+        .sheet(item: $browser.clientCertificatePrompt) { prompt in
+            ClientCertificatePromptView(
+                prompt: prompt,
+                store: clientCertificates,
+                use: browser.useClientCertificate,
+                stopUsing: browser.stopUsingClientCertificateForPendingChallenge,
+                cancel: browser.cancelClientCertificatePrompt
+            )
         }
     }
 
@@ -1948,6 +1985,7 @@ extension Notification.Name {
     static let majorTomArchive = Notification.Name("MajorTomArchive")
     static let majorTomAddBookmark = Notification.Name("MajorTomAddBookmark")
     static let majorTomShowBookmarks = Notification.Name("MajorTomShowBookmarks")
+    static let majorTomShowClientCertificates = Notification.Name("MajorTomShowClientCertificates")
     static let majorTomOpenBookmark = Notification.Name("MajorTomOpenBookmark")
     static let majorTomSavePage = Notification.Name("MajorTomSavePage")
     static let majorTomPrint = Notification.Name("MajorTomPrint")

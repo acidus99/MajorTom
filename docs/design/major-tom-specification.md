@@ -364,11 +364,17 @@ The interface must enforce the Gemini request-size limit based on the encoded re
 
 ## 13. Client-Certificate Authentication
 
-Gemini client-certificate authentication, represented by status codes `60` through `69`, is planned for a later release. It is not required for initial native Major Tom feature parity.
+Major Tom supports self-signed Gemini client certificates for authentication represented by status codes `60` through `69`. Status `60` requests an identity, `61` reports that the offered identity is not authorized, and `62` reports that it is not valid. The interface preserves the capsule-provided message and lets the user choose another valid identity, create one, or remove the rejected approval.
 
-The initial native version must still recognize client-certificate responses as a distinct protocol category. It must explain that the capsule requires a client identity and that Major Tom does not yet support that authentication, rather than presenting an unknown or generic failure.
+Major Tom creates RSA-2048 certificates signed with SHA-256 and marks them for TLS client authentication. The creation form requires a common name and expiration date and optionally accepts the public subject fields email address, user ID, domain, organization, and country. The interface makes clear that subject fields are public identity data presented to a capsule, not secret profile data. Import and export of private identities are outside the 1.0 scope.
 
-Future client-certificate work will require its own product design for identity creation, import, selection, secure storage, scope, expiration, replacement, removal, and user consent. Those behaviors are not defined by the present specification.
+Private keys and certificates are stored as synchronizable Keychain items. They are never placed in preferences or CloudKit. Public certificate descriptors and activation rules are stored locally and mirrored through the user's private CloudKit database. A newly synchronized rule whose Keychain identity has not arrived on the current Mac is shown as unavailable and is never sent as a partial credential.
+
+An activation rule identifies a Gemini host, effective port, and either the entire capsule or one path and its descendants. Queries and fragments do not affect matching, and a path prefix observes path-segment boundaries. The most-specific matching rule wins. Redirect targets are evaluated independently so approval for one capsule cannot disclose an identity to another capsule.
+
+The client identity is selected before the TLS handshake. A certificate is offered only when a matching user-approved rule exists, its private key is available, and its validity period includes the current time. Because Gemini applications commonly continue authentication across sibling routes after enrollment, the prompt defaults to the whole capsule and offers the challenged path and descendants as an explicit privacy-restricting choice.
+
+The manager at `about:client-certs` displays the selected identity with macOS's standard read-only certificate inspector, with details initially expanded and trust editing disabled. Major Tom supplements the native inspector with local Keychain availability, copy and destructive deletion actions, and a sortable approved-scope table. That table can open a scope in a new tab, change its scope between the entire capsule and that URL and below, or remove the activation rule. Certificate deletion removes the private key and every activation rule after warning that certificate-bound accounts may become inaccessible. Page Info reports the identity actually used for the committed response, or **None**, and can remove the most-specific activation rule for that page with **Stop Using for This Capsule**. **Show Certificate** dismisses Page Info and opens a focused certificate-manager tab with that identity selected.
 
 ## 14. Gemini Failure Responses
 

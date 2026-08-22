@@ -79,4 +79,14 @@ final class CloudSyncModelTests: XCTestCase {
         let data = try JSONEncoder().encode(original)
         XCTAssertEqual(try JSONDecoder().decode(CloudTabDeviceSnapshot.self, from: data), original)
     }
+
+    func testNewerClientCertificateMetadataReplacesOlderMetadata() {
+        let old = SyncedClientCertificates(modifiedAt: Date(timeIntervalSince1970: 10))
+        let new = SyncedClientCertificates(modifiedAt: Date(timeIntervalSince1970: 20))
+
+        XCTAssertTrue(new.shouldReplace(old))
+        XCTAssertFalse(old.shouldReplace(new))
+        XCTAssertFalse(old.shouldReplace(old))
+        XCTAssertTrue(old.shouldReplace(nil))
+    }
 }

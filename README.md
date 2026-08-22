@@ -23,8 +23,11 @@ The product requirements are in [`docs/design/major-tom-specification.md`](docs/
 - Application/content themes, inline formatting controls, and bounded same-capsule image loading.
 - Gemini proxy for web links, idle timeout, response-size limits, find, native commands, and browsing-data controls.
 - Bookmarks with folders, a Favourites bar, and a manager at `about:bookmarks`.
+- Self-signed Gemini client certificates in Keychain, scoped capsule/path approvals,
+  6x authentication prompts, and a manager at `about:client-certs`.
 - Capsule favicons per the favicon RFC, cached for a week and never prefetched.
-- Page Info with domain, expiry and trust checks, and copyable certificate and public-key fingerprints.
+- Page Info with server trust details, client-certificate usage and revocation controls,
+  and copyable certificate and public-key fingerprints.
 - Link hints for destination and type, and image links that expand in place on click.
 - Archived captures offered through Delorean when a capsule is gone or unreachable.
 - Seeded capsule identities read from `certs.csv` in Application Support.
