@@ -89,6 +89,8 @@ public enum ClientCertificatePEMError: Error, LocalizedError, Equatable, Sendabl
     case invalidPrivateKey
     case unsupportedPrivateKey
     case mismatchedKey
+    case invalidFilePair
+    case tooManyFiles
 
     public var errorDescription: String? {
         switch self {
@@ -106,6 +108,10 @@ public enum ClientCertificatePEMError: Error, LocalizedError, Equatable, Sendabl
             "This private-key format is not supported. Major Tom currently imports RSA client identities."
         case .mismatchedKey:
             "The private key does not belong to this certificate."
+        case .invalidFilePair:
+            "Choose one combined PEM file, or one certificate PEM file and one private-key PEM file."
+        case .tooManyFiles:
+            "Choose no more than two PEM files."
         }
     }
 }
@@ -177,6 +183,34 @@ public struct ClientCertificateImport: Sendable {
             certificateDER: certificateDER,
             rsaPrivateKeyDER: rsaPrivateKeyDER
         )
+    }
+
+    /// Parses either one combined PEM document or a pair containing exactly one
+    /// certificate-only document and one private-key-only document.
+    public static func parse(pemFiles: [String]) throws -> ClientCertificateImport {
+        guard pemFiles.count <= 2 else { throw ClientCertificatePEMError.tooManyFiles }
+        guard pemFiles.count == 2 else {
+            guard let pem = pemFiles.first else {
+                throw ClientCertificatePEMError.certificateMissing
+            }
+            return try parse(pem: pem)
+        }
+
+        let roles = pemFiles.map { pem -> (certificate: Bool, privateKey: Bool) in
+            (
+                pem.contains("-----BEGIN CERTIFICATE-----"),
+                pem.contains("-----BEGIN RSA PRIVATE KEY-----")
+                    || pem.contains("-----BEGIN PRIVATE KEY-----")
+                    || pem.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----")
+                    || pem.contains("-----BEGIN EC PRIVATE KEY-----")
+            )
+        }
+        guard roles.filter({ $0.certificate }).count == 1,
+              roles.filter({ $0.privateKey }).count == 1,
+              roles.allSatisfy({ $0.certificate != $0.privateKey }) else {
+            throw ClientCertificatePEMError.invalidFilePair
+        }
+        return try parse(pem: pemFiles.joined(separator: "\n"))
     }
 
     func makePrivateKey() throws -> SecKey {
@@ -317,6 +351,20 @@ public struct ClientCertificateAssociation: Codable, Equatable, Identifiable, Se
         associations
             .filter { $0.matches(url) }
             .max { lhs, rhs in lhs.specificity < rhs.specificity }
+    }
+
+    /// Removes every approval for the identity used at `url` on that capsule. This
+    /// prevents a broader rule from becoming active when a narrower rule is removed.
+    public static func removingCapsuleApproval(
+        matching url: URL,
+        from associations: [ClientCertificateAssociation]
+    ) -> [ClientCertificateAssociation] {
+        guard let used = mostSpecific(matching: url, in: associations) else {
+            return associations
+        }
+        return associations.filter {
+            $0.certificateID != used.certificateID || $0.endpoint != used.endpoint
+        }
     }
 
     public static func requestPath(for url: URL) -> String {

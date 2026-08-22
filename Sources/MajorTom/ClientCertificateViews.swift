@@ -184,7 +184,7 @@ struct ClientCertificatesManagerView: View {
                         ContentUnavailableView {
                             Label("Certificate Unavailable", systemImage: "icloud.slash")
                         } description: {
-                            Text("The certificate and private key have not arrived from iCloud Keychain on this Mac yet.")
+                            Text("The certificate or private key is not available in Keychain on this Mac.")
                         }
                         .frame(minHeight: 260)
                     }
@@ -443,7 +443,7 @@ private struct ClientCertificateImportView: View {
                 }
                 .keyboardShortcut("v", modifiers: .command)
 
-                Button("Choose File…", systemImage: "folder") {
+                Button("Choose Files…", systemImage: "folder") {
                     showsFileImporter = true
                 }
 
@@ -466,12 +466,11 @@ private struct ClientCertificateImportView: View {
         .fileImporter(
             isPresented: $showsFileImporter,
             allowedContentTypes: Self.allowedTypes,
-            allowsMultipleSelection: false
+            allowsMultipleSelection: true
         ) { result in
             switch result {
             case .success(let urls):
-                guard let url = urls.first else { return }
-                importFile(url)
+                importFiles(urls)
             case .failure(let error):
                 errorMessage = error.localizedDescription
             }
@@ -489,18 +488,26 @@ private struct ClientCertificateImportView: View {
         load(text, pastedChangeCount: pasteboard.changeCount)
     }
 
-    private func importFile(_ url: URL) {
-        let accessed = url.startAccessingSecurityScopedResource()
-        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+    private func importFiles(_ urls: [URL]) {
         do {
-            let data = try Data(contentsOf: url, options: [.mappedIfSafe])
-            guard data.count <= 10 * 1_024 * 1_024 else {
-                throw CocoaError(.fileReadTooLarge)
+            guard urls.count <= 2 else { throw ClientCertificatePEMError.tooManyFiles }
+            var totalSize = 0
+            let documents = try urls.map { url in
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+                totalSize += data.count
+                guard totalSize <= 10 * 1_024 * 1_024 else {
+                    throw CocoaError(.fileReadTooLarge)
+                }
+                guard let text = String(data: data, encoding: .utf8) else {
+                    throw ClientCertificatePEMError.invalidCertificate
+                }
+                return text
             }
-            guard let text = String(data: data, encoding: .utf8) else {
-                throw ClientCertificatePEMError.invalidCertificate
-            }
-            load(text, pastedChangeCount: nil)
+            imported = try ClientCertificateImport.parse(pemFiles: documents)
+            pastedChangeCount = nil
+            errorMessage = nil
         } catch {
             imported = nil
             pastedChangeCount = nil
@@ -677,7 +684,7 @@ struct ClientCertificatePromptView: View {
 
             if prompt.matchingCertificateIsUnavailable {
                 Label(
-                    "The approved certificate is not available from iCloud Keychain on this Mac yet.",
+                    "The approved certificate’s private key is not available in Keychain on this Mac.",
                     systemImage: "icloud.slash"
                 )
                 .font(.callout)
