@@ -3,6 +3,7 @@ import SwiftUI
 
 struct BrowserSettingsView: View {
     @ObservedObject private var store = BrowserSettingsStore.shared
+    @ObservedObject private var cloud = ICloudSyncStore.shared
     @State private var faviconCacheCleared = false
 
     var body: some View {
@@ -32,6 +33,15 @@ struct BrowserSettingsView: View {
             }
             if store.preferences.searchProvider == .custom {
                 TextField("Custom search endpoint", text: store.binding(\.customSearchEndpoint))
+            }
+            Section("iCloud") {
+                LabeledContent("Settings and tabs") {
+                    Label(cloud.status.label, systemImage: "icloud")
+                        .foregroundStyle(.secondary)
+                }
+                Text("Preferences are cached on this Mac and synced privately through iCloud. Open-tab snapshots contain only each page title and URL.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

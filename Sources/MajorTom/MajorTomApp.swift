@@ -17,6 +17,7 @@ private struct BrowserWindowDestination: Codable, Hashable {
 @main
 struct MajorTomApp: App {
     @NSApplicationDelegateAdaptor(MajorTomApplicationDelegate.self) private var appDelegate
+    @Environment(\.openWindow) private var openWindow
     /// Observed so the Bookmarks menu lists the current favourites and reflects the
     /// Favourites-bar toggle.
     @ObservedObject private var bookmarks = BookmarksModel.shared
@@ -163,8 +164,15 @@ struct MajorTomApp: App {
                     .keyboardShortcut(.upArrow, modifiers: .option)
                 Button("Capsule Root") { NotificationCenter.default.post(name: .majorTomRoot, object: nil) }
                     .keyboardShortcut(.upArrow, modifiers: [.option, .shift])
+                Divider()
+                Button("iCloud Tabs…") { openWindow(id: "icloud-tabs") }
             }
         }
+
+        Window("iCloud Tabs", id: "icloud-tabs") {
+            ICloudTabsView()
+        }
+        .defaultSize(width: 620, height: 480)
 
         Settings {
             BrowserSettingsView()
@@ -176,6 +184,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
     private var commandKeyMonitor: Any?
     private var aboutObserver: (any NSObjectProtocol)?
     private var menuObserver: (any NSObjectProtocol)?
+    private var openICloudTabObserver: (any NSObjectProtocol)?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Native tab dragging is an AppKit window-tabbing feature. Opt in before the
@@ -220,6 +229,18 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
                 NativeTabMenuCustomization.apply()
             }
         }
+        openICloudTabObserver = NotificationCenter.default.addObserver(
+            forName: .majorTomOpenICloudTab,
+            object: nil,
+            queue: .main
+        ) { notification in
+            guard let url = notification.object as? URL else { return }
+            MainActor.assumeIsolated { NativeTabCoordinator.shared.openCloudTab(url) }
+        }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        ICloudSyncStore.shared.refresh()
     }
 
 
@@ -312,6 +333,7 @@ private final class NativeTabCoordinator {
     private struct RegisteredTab {
         weak var window: NSWindow?
         weak var browser: BrowserModel?
+        let cloudID: UUID
     }
 
     /// Windows created outside SwiftUI's WindowGroup need a retained controller.
@@ -327,6 +349,8 @@ private final class NativeTabCoordinator {
     private var tabDragTrackingTimer: Timer?
     private var temporarilyShownTabBars: [NSWindow] = []
     private var tabDragCleanupTask: Task<Void, Never>?
+    private var cloudPublishTask: Task<Void, Never>?
+    private var cloudHeartbeat: Timer?
 
     private init() {
         tabDragMonitor = NSEvent.addLocalMonitorForEvents(
@@ -334,6 +358,10 @@ private final class NativeTabCoordinator {
         ) { [weak self] event in
             self?.handleTabDragEvent(event)
             return event
+        }
+        cloudHeartbeat = Timer.scheduledTimer(withTimeInterval: 60 * 60, repeats: true) {
+            [weak self] _ in
+            MainActor.assumeIsolated { self?.publishCloudTabs() }
         }
     }
 
@@ -355,8 +383,13 @@ private final class NativeTabCoordinator {
     func register(window: NSWindow, browser: BrowserModel) {
         configure(window: window)
         let identifier = ObjectIdentifier(window)
-        registeredTabs[identifier] = RegisteredTab(window: window, browser: browser)
+        registeredTabs[identifier] = RegisteredTab(
+            window: window,
+            browser: browser,
+            cloudID: registeredTabs[identifier]?.cloudID ?? UUID()
+        )
         installCloseObserver(for: window)
+        scheduleCloudTabPublish()
 
         guard !hasAttemptedSessionRestore else { return }
         hasAttemptedSessionRestore = true
@@ -646,6 +679,7 @@ private final class NativeTabCoordinator {
                     NotificationCenter.default.removeObserver(observer)
                 }
                 DispatchQueue.main.async { [weak self] in self?.persistSession() }
+                self.scheduleCloudTabPublish()
             }
         }
     }
@@ -684,6 +718,41 @@ private final class NativeTabCoordinator {
         window.tabbingMode = .disallowed
         window.makeKeyAndOrderFront(nil)
         window.tabbingMode = .preferred
+    }
+
+    func openCloudTab(_ url: URL) {
+        let keyBrowserWindow = NSApplication.shared.keyWindow.flatMap { window in
+            registeredTabs[ObjectIdentifier(window)]?.browser == nil ? nil : window
+        }
+        if let parent = keyBrowserWindow ?? registeredTabs.values.compactMap(\.window).first {
+            openTab(url: url, from: parent, inBackground: false)
+        } else {
+            openWindow(url: url)
+        }
+    }
+
+    func scheduleCloudTabPublish() {
+        cloudPublishTask?.cancel()
+        cloudPublishTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(750))
+            guard !Task.isCancelled else { return }
+            self?.publishCloudTabs()
+        }
+    }
+
+    private func publishCloudTabs() {
+        let tabs = registeredTabs.values.compactMap { registration -> CloudTabSnapshot? in
+            guard let browser = registration.browser,
+                  let url = browser.committedURL,
+                  ["gemini", "http", "https"].contains(url.scheme?.lowercased() ?? "")
+            else { return nil }
+            return CloudTabSnapshot(
+                id: registration.cloudID,
+                title: browser.title,
+                url: url
+            )
+        }
+        ICloudSyncStore.shared.updateTabs(tabs)
     }
 
     private func makeBrowserWindow(
@@ -856,6 +925,7 @@ private struct BrowserWindowView: View {
             hostWindow.tab.title = browser.title
         }
         hostWindow.tab.toolTip = browser.committedURL?.absoluteString ?? browser.title
+        NativeTabCoordinator.shared.scheduleCloudTabPublish()
     }
 
     private func openNativeTab(url: URL?, inBackground: Bool) {
@@ -1865,7 +1935,7 @@ private extension View {
     }
 }
 
-private extension Notification.Name {
+extension Notification.Name {
     static let majorTomAbout = Notification.Name("MajorTomAbout")
     static let majorTomNewTab = Notification.Name("MajorTomNewTab")
     static let majorTomCloseTab = Notification.Name("MajorTomCloseTab")
@@ -1890,4 +1960,5 @@ private extension Notification.Name {
     static let majorTomHome = Notification.Name("MajorTomHome")
     static let majorTomUp = Notification.Name("MajorTomUp")
     static let majorTomRoot = Notification.Name("MajorTomRoot")
+    static let majorTomOpenICloudTab = Notification.Name("MajorTomOpenICloudTab")
 }
