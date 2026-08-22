@@ -18,13 +18,10 @@ struct PageInformation: Identifiable {
     var clientCertificateAssociation: ClientCertificateAssociation?
 }
 
-/// Page and certificate information, in the spirit of Lagrange's panel.
-///
 /// The check list deliberately omits "Verified by CA". Nearly every Gemini capsule is
 /// self-signed, so that row would show a red cross almost everywhere and teach the reader
-/// to ignore the whole list. What replaces it is a plain statement of what Major Tom
-/// actually relies on. The layout keeps room for a certificate-authority section later,
-/// when this view is reused for a browser that speaks more than Gemini.
+/// to ignore the whole list. The layout keeps room for a certificate-authority section
+/// later, when this view is reused for a browser that speaks more than Gemini.
 @available(macOS 26.0, *)
 struct PageInfoView: View {
     let information: PageInformation
@@ -55,7 +52,7 @@ struct PageInfoView: View {
             Divider()
 
             VStack(alignment: .leading, spacing: 9) {
-                Text("Certificate Status")
+                Text("Server Certificate")
                     .font(.caption.weight(.semibold))
                     .textCase(.uppercase)
                     .foregroundStyle(.tint)
@@ -64,10 +61,15 @@ struct PageInfoView: View {
                 check("Not Expired", detail: expiryTimestamp, state: notExpired)
                 check(trustLabel, state: isTrusted)
 
-                Text(tofuExplanation)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    fingerprintsMenu
+                    if let copied {
+                        Text(copied)
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .transition(.opacity)
+                    }
+                }
             }
 
             Divider()
@@ -105,14 +107,7 @@ struct PageInfoView: View {
                 }
             }
 
-            HStack(spacing: 10) {
-                fingerprintsMenu
-                if let copied {
-                    Text(copied)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .transition(.opacity)
-                }
+            HStack {
                 Spacer()
                 Button("Close") { dismiss() }
                     .keyboardShortcut(.defaultAction)
@@ -189,15 +184,6 @@ struct PageInfoView: View {
         let sourceText = trusted.source == .seed ? "from seed list" : "on first use"
         let sightings = trusted.timesSeen == 1 ? "seen once" : "seen \(trusted.timesSeen) times"
         return "Trusted \(sourceText), \(sightings)"
-    }
-
-    private var tofuExplanation: String {
-        switch (information.identity, information.trusted) {
-        case (.some, .none):
-            return "Gemini TOFU mode: this capsule's key is not pinned yet. Major Tom pins the key it sees on first use and warns if it later changes."
-        default:
-            return "Gemini TOFU mode: capsules are identified by their public key, not by a certificate authority. Major Tom pins the key it first sees and warns you if it changes, so a self-signed certificate is normal and expected here."
-        }
     }
 
     @ViewBuilder
