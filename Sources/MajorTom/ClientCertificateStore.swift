@@ -31,6 +31,7 @@ final class ClientCertificateStore: ObservableObject {
     private var uploadTask: Task<Void, Never>?
     private var managerSelectionRequest: UUID?
     private var identityCache: [UUID: ClientTLSIdentity] = [:]
+    private var signingValidated: Set<UUID> = []
 
     init(
         defaults: UserDefaults = .standard,
@@ -83,6 +84,45 @@ final class ClientCertificateStore: ObservableObject {
         }.value
         certificates.append(descriptor)
         availability[descriptor.id] = true
+        signingValidated.insert(descriptor.id)
+        changed()
+        return descriptor
+    }
+
+    func importIdentity(_ imported: ClientCertificateImport) async throws -> ClientCertificateDescriptor {
+        let digest = CertificateDetails.sha256(certificateDER: imported.certificateDER)
+        if let existing = certificates.first(where: { $0.certificateSHA256 == digest }) {
+            let keychain = self.keychain
+            if (try? keychain.certificateDER(for: existing.id)) != nil {
+                try await Task.detached(priority: .userInitiated) {
+                    try keychain.validateIdentityCanSign(for: existing.id)
+                }.value
+                availability[existing.id] = true
+                signingValidated.insert(existing.id)
+                return existing
+            }
+            // An ad-hoc rebuild changes the app's Keychain identity. Repair imports made
+            // by an earlier development signature in place so capsule approvals and
+            // synced metadata keep referring to the same certificate UUID.
+            let descriptor = try await Task.detached(priority: .userInitiated) {
+                return try keychain.importIdentity(imported, id: existing.id)
+            }.value
+            if let index = certificates.firstIndex(where: { $0.id == existing.id }) {
+                certificates[index] = descriptor
+            }
+            identityCache.removeValue(forKey: existing.id)
+            availability[existing.id] = true
+            signingValidated.insert(existing.id)
+            changed()
+            return descriptor
+        }
+        let keychain = self.keychain
+        let descriptor = try await Task.detached(priority: .userInitiated) {
+            try keychain.importIdentity(imported)
+        }.value
+        certificates.append(descriptor)
+        availability[descriptor.id] = true
+        signingValidated.insert(descriptor.id)
         changed()
         return descriptor
     }
@@ -96,6 +136,7 @@ final class ClientCertificateStore: ObservableObject {
         associations.removeAll { $0.certificateID == descriptor.id }
         availability.removeValue(forKey: descriptor.id)
         identityCache.removeValue(forKey: descriptor.id)
+        signingValidated.remove(descriptor.id)
         changed()
     }
 
@@ -164,18 +205,39 @@ final class ClientCertificateStore: ObservableObject {
             matching: url,
             in: associations
         ), let descriptor = descriptor(id: association.certificateID) else { return nil }
-        let identity = cachedIdentity(for: descriptor.id)
+        let identity: ClientTLSIdentity?
+        if descriptor.isValid() {
+            do {
+                if !signingValidated.contains(descriptor.id) {
+                    try keychain.validateIdentityCanSign(for: descriptor.id)
+                    signingValidated.insert(descriptor.id)
+                }
+                identity = cachedIdentity(for: descriptor.id)
+            } catch {
+                identity = nil
+                lastError = error.localizedDescription
+            }
+        } else {
+            identity = nil
+        }
         availability[descriptor.id] = identity != nil
         return ResolvedClientCertificate(
             descriptor: descriptor,
             association: association,
-            tlsIdentity: descriptor.isValid() ? identity : nil
+            tlsIdentity: identity
         )
     }
 
     func certificatePEM(for descriptor: ClientCertificateDescriptor) -> String? {
         guard let der = try? keychain.certificateDER(for: descriptor.id) else { return nil }
         return CertificateDetails.pem(certificateDER: der)
+    }
+
+    func exportIdentityPEM(for descriptor: ClientCertificateDescriptor) async throws -> String {
+        let keychain = self.keychain
+        return try await Task.detached(priority: .userInitiated) {
+            try keychain.exportIdentityPEM(for: descriptor.id)
+        }.value
     }
 
     func certificateDER(for descriptor: ClientCertificateDescriptor) -> Data? {
@@ -225,6 +287,9 @@ final class ClientCertificateStore: ObservableObject {
         isApplyingRemote = true
         certificates = snapshot.certificates
         identityCache = identityCache.filter { id, _ in
+            snapshot.certificates.contains { $0.id == id }
+        }
+        signingValidated = signingValidated.filter { id in
             snapshot.certificates.contains { $0.id == id }
         }
         associations = snapshot.associations.filter { association in

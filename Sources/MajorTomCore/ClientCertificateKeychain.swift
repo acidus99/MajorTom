@@ -7,6 +7,7 @@ public enum ClientCertificateKeychainError: Error, LocalizedError, Sendable {
     case invalidExpiration
     case keyGeneration(String)
     case certificateGeneration(String)
+    case privateKeyExport(String)
     case keychain(OSStatus)
     case identityUnavailable
 
@@ -22,6 +23,8 @@ public enum ClientCertificateKeychainError: Error, LocalizedError, Sendable {
             "The private key could not be created: \(message)"
         case .certificateGeneration(let message):
             "The certificate could not be created: \(message)"
+        case .privateKeyExport(let message):
+            "The private key could not be exported: \(message)"
         case .keychain(let status):
             SecCopyErrorMessageString(status, nil) as String?
                 ?? "Keychain returned error \(status)."
@@ -130,6 +133,8 @@ public struct ClientCertificateKeychain: Sendable {
             if keyStorage.usesDataProtection {
                 addCertificate[kSecUseDataProtectionKeychain] = true
                 addCertificate[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
+            } else {
+                addCertificate[kSecUseDataProtectionKeychain] = false
             }
             if keyStorage.synchronizesWithICloud {
                 addCertificate[kSecAttrSynchronizable] = true
@@ -153,6 +158,64 @@ public struct ClientCertificateKeychain: Sendable {
                 publicKeySHA256: try SubjectPublicKeyFingerprint.sha256(certificateDER: certificateDER),
                 synchronizesWithICloud: keyStorage.synchronizesWithICloud
             )
+        } catch {
+            try? deleteKey(id: id)
+            throw error
+        }
+    }
+
+    public func importIdentity(
+        _ imported: ClientCertificateImport,
+        id: UUID = UUID()
+    ) throws -> ClientCertificateDescriptor {
+        let label = Self.label(for: id)
+        let applicationTag = Self.applicationTag(for: id)
+        let privateKey = try imported.makePrivateKey()
+        let storage = try storeImportedPrivateKey(
+            privateKey,
+            label: label,
+            applicationTag: applicationTag
+        )
+
+        do {
+            var addCertificate: [CFString: Any] = [
+                kSecClass: kSecClassGenericPassword,
+                kSecAttrService: Self.certificateService,
+                kSecAttrAccount: Self.account(for: id),
+                kSecAttrLabel: label,
+                kSecValueData: imported.certificateDER
+            ]
+            if storage.usesDataProtection {
+                addCertificate[kSecUseDataProtectionKeychain] = true
+                addCertificate[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
+            } else {
+                addCertificate[kSecUseDataProtectionKeychain] = false
+            }
+            if storage.synchronizesWithICloud {
+                addCertificate[kSecAttrSynchronizable] = true
+            }
+            let status = SecItemAdd(addCertificate as CFDictionary, nil)
+            guard status == errSecSuccess else {
+                throw ClientCertificateKeychainError.keychain(status)
+            }
+
+            let dates = CertificateDetails.validityDates(certificateDER: imported.certificateDER)
+            let descriptor = ClientCertificateDescriptor(
+                id: id,
+                commonName: imported.commonName,
+                notBefore: dates.notBefore ?? .distantPast,
+                notAfter: dates.notAfter ?? .distantFuture,
+                certificateSHA256: CertificateDetails.sha256(certificateDER: imported.certificateDER),
+                publicKeySHA256: try SubjectPublicKeyFingerprint.sha256(
+                    certificateDER: imported.certificateDER
+                ),
+                synchronizesWithICloud: storage.synchronizesWithICloud
+            )
+            guard try certificateDER(for: id) == imported.certificateDER else {
+                throw ClientCertificateKeychainError.identityUnavailable
+            }
+            try validateIdentityCanSign(for: id)
+            return descriptor
         } catch {
             try? deleteKey(id: id)
             throw error
@@ -184,6 +247,85 @@ public struct ClientCertificateKeychain: Sendable {
         }
     }
 
+    /// Confirms that the persisted private key can perform the operation TLS needs.
+    /// For a legacy key created by an older ad-hoc build, this explicit user-initiated
+    /// check gives macOS an opportunity to authorize the current build before
+    /// Network.framework reaches the non-interactive handshake.
+    public func validateIdentityCanSign(for id: UUID) throws {
+        let identity = try identity(for: id)
+        var privateKey: SecKey?
+        let status = SecIdentityCopyPrivateKey(identity.securityIdentity, &privateKey)
+        guard status == errSecSuccess, let privateKey else {
+            throw ClientCertificateKeychainError.keychain(status)
+        }
+        var error: Unmanaged<CFError>?
+        guard SecKeyCreateSignature(
+            privateKey,
+            .rsaSignatureMessagePSSSHA256,
+            Data("Major Tom TLS client identity check".utf8) as CFData,
+            &error
+        ) != nil else {
+            throw ClientCertificateKeychainError.identityUnavailable
+        }
+    }
+
+    /// Returns an interoperable, unencrypted PEM identity containing the public
+    /// certificate followed by its matching RSA private key.
+    public func exportIdentityPEM(for id: UUID) throws -> String {
+        let certificateDER = try certificateDER(for: id)
+        let identity = try identity(for: id)
+        var privateKey: SecKey?
+        let status = SecIdentityCopyPrivateKey(identity.securityIdentity, &privateKey)
+        guard status == errSecSuccess, let privateKey else {
+            throw ClientCertificateKeychainError.keychain(status)
+        }
+
+        let privateKeyPEM: String
+        var modernExportError: Unmanaged<CFError>?
+        if let privateKeyDER = SecKeyCopyExternalRepresentation(
+            privateKey,
+            &modernExportError
+        ) as Data? {
+            privateKeyPEM = Self.pem(label: "RSA PRIVATE KEY", data: privateKeyDER)
+        } else {
+            // Keys in the pre-Data-Protection macOS Keychain are backed by the
+            // legacy CDSA/CSSM provider. SecKeyCopyExternalRepresentation can reject
+            // those keys with CSSMERR_CSP_INVALID_KEYATTR_MASK even when they were
+            // originally imported as extractable. SecItemExport is the public API for
+            // exporting those SecKeychainItem-backed SecKey values.
+            var legacyExport: CFData?
+            let legacyStatus = SecItemExport(
+                privateKey,
+                .formatOpenSSL,
+                .pemArmour,
+                nil,
+                &legacyExport
+            )
+            guard legacyStatus == errSecSuccess,
+                  let legacyExport,
+                  let pem = String(data: legacyExport as Data, encoding: .utf8),
+                  (pem.contains("-----BEGIN RSA PRIVATE KEY-----")
+                    || pem.contains("-----BEGIN PRIVATE KEY-----")) else {
+                let modernMessage = modernExportError?
+                    .takeRetainedValue()
+                    .localizedDescription
+                    ?? "Keychain did not provide the private-key data."
+                let legacyMessage = legacyStatus == errSecSuccess
+                    ? nil
+                    : SecCopyErrorMessageString(legacyStatus, nil) as String?
+                throw ClientCertificateKeychainError.privateKeyExport(
+                    legacyMessage ?? modernMessage
+                )
+            }
+            privateKeyPEM = pem.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return CertificateDetails.pem(certificateDER: certificateDER)
+            + "\n"
+            + privateKeyPEM
+            + "\n"
+    }
+
     private func privateKey(for id: UUID) throws -> SecKey {
         if let key = try dataProtectionPrivateKey(for: id, synchronized: true) {
             return key
@@ -195,6 +337,7 @@ public struct ClientCertificateKeychain: Sendable {
         let query: [CFString: Any] = [
             kSecClass: kSecClassKey,
             kSecAttrApplicationTag: Self.applicationTag(for: id),
+            kSecUseDataProtectionKeychain: false,
             kSecReturnRef: true,
             kSecMatchLimit: kSecMatchLimitOne
         ]
@@ -263,6 +406,7 @@ public struct ClientCertificateKeychain: Sendable {
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: Self.certificateService,
             kSecAttrAccount: Self.account(for: id),
+            kSecUseDataProtectionKeychain: false,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne
         ]
@@ -288,6 +432,7 @@ public struct ClientCertificateKeychain: Sendable {
         let localLegacyQuery: [CFString: Any] = [
             kSecClass: kSecClassCertificate,
             kSecAttrLabel: Self.label(for: id),
+            kSecUseDataProtectionKeychain: false,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne
         ]
@@ -340,9 +485,12 @@ public struct ClientCertificateKeychain: Sendable {
         let localCertificateStatus = SecItemDelete([
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: Self.certificateService,
-            kSecAttrAccount: Self.account(for: id)
+            kSecAttrAccount: Self.account(for: id),
+            kSecUseDataProtectionKeychain: false
         ] as CFDictionary)
-        guard localCertificateStatus == errSecSuccess || localCertificateStatus == errSecItemNotFound else {
+        guard localCertificateStatus == errSecSuccess
+                || localCertificateStatus == errSecItemNotFound
+                || localCertificateStatus == errSecMissingEntitlement else {
             throw ClientCertificateKeychainError.keychain(localCertificateStatus)
         }
         let synchronizedLegacyCertificateStatus = SecItemDelete([
@@ -358,7 +506,8 @@ public struct ClientCertificateKeychain: Sendable {
         }
         let localLegacyCertificateStatus = SecItemDelete([
             kSecClass: kSecClassCertificate,
-            kSecAttrLabel: Self.label(for: id)
+            kSecAttrLabel: Self.label(for: id),
+            kSecUseDataProtectionKeychain: false
         ] as CFDictionary)
         guard localLegacyCertificateStatus == errSecSuccess
                 || localLegacyCertificateStatus == errSecItemNotFound else {
@@ -391,7 +540,8 @@ public struct ClientCertificateKeychain: Sendable {
         }
         let localStatus = SecItemDelete([
             kSecClass: kSecClassKey,
-            kSecAttrApplicationTag: Self.applicationTag(for: id)
+            kSecAttrApplicationTag: Self.applicationTag(for: id),
+            kSecUseDataProtectionKeychain: false
         ] as CFDictionary)
         guard localStatus == errSecSuccess || localStatus == errSecItemNotFound else {
             throw ClientCertificateKeychainError.keychain(localStatus)
@@ -428,15 +578,6 @@ public struct ClientCertificateKeychain: Sendable {
             ]
             if dataProtection {
                 privateAttributes[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
-            } else {
-                // The file-based Keychain is only a compatibility path for unsigned
-                // development/test builds. Give its private key the system's standard
-                // "creating application" ACL so TLS signing does not require a prompt.
-                var access: SecAccess?
-                if SecAccessCreate(label as CFString, nil, &access) == errSecSuccess,
-                   let access {
-                    privateAttributes[kSecAttrAccess] = access
-                }
             }
             var attributes: [CFString: Any] = [
                 kSecAttrKeyType: kSecAttrKeyTypeRSA,
@@ -485,8 +626,73 @@ public struct ClientCertificateKeychain: Sendable {
         )
     }
 
+    private func storeImportedPrivateKey(
+        _ privateKey: SecKey,
+        label: String,
+        applicationTag: Data
+    ) throws -> KeyStorage {
+        func attempt(_ storage: KeyStorage) -> OSStatus {
+            var query: [CFString: Any] = [
+                kSecClass: kSecClassKey,
+                kSecAttrKeyType: kSecAttrKeyTypeRSA,
+                kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+                kSecAttrApplicationTag: applicationTag,
+                kSecAttrLabel: label,
+                kSecAttrIsExtractable: true,
+                kSecValueRef: privateKey
+            ]
+            if storage.usesDataProtection {
+                query[kSecUseDataProtectionKeychain] = true
+                query[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlock
+            } else {
+                query[kSecUseDataProtectionKeychain] = false
+            }
+            if storage.synchronizesWithICloud {
+                query[kSecAttrSynchronizable] = true
+            }
+            return SecItemAdd(query as CFDictionary, nil)
+        }
+
+        let synchronizedStatus = attempt(.synchronizedDataProtection)
+        if synchronizedStatus == errSecSuccess || synchronizedStatus == errSecDuplicateItem {
+            return .synchronizedDataProtection
+        }
+
+        let localStatus = attempt(.localDataProtection)
+        if localStatus == errSecSuccess || localStatus == errSecDuplicateItem {
+            return .localDataProtection
+        }
+
+        if synchronizedStatus == errSecMissingEntitlement
+            || localStatus == errSecMissingEntitlement {
+            let legacyStatus = attempt(.legacy)
+            if legacyStatus == errSecSuccess || legacyStatus == errSecDuplicateItem {
+                return .legacy
+            }
+            throw ClientCertificateKeychainError.keychain(legacyStatus)
+        }
+        throw ClientCertificateKeychainError.keychain(localStatus)
+    }
+
     private static func label(for id: UUID) -> String {
         labelPrefix + id.uuidString.lowercased()
+    }
+
+    private static func pem(label: String, data: Data) -> String {
+        let base64 = data.base64EncodedString()
+        var lines = ["-----BEGIN \(label)-----"]
+        var index = base64.startIndex
+        while index < base64.endIndex {
+            let end = base64.index(
+                index,
+                offsetBy: 64,
+                limitedBy: base64.endIndex
+            ) ?? base64.endIndex
+            lines.append(String(base64[index..<end]))
+            index = end
+        }
+        lines.append("-----END \(label)-----")
+        return lines.joined(separator: "\n")
     }
 
     private static func applicationTag(for id: UUID) -> Data {
@@ -502,7 +708,7 @@ public struct ClientCertificateKeychain: Sendable {
     }
 }
 
-private struct X509DistinguishedName {
+struct X509DistinguishedName {
     var commonName: String
     var emailAddress: String
     var userID: String
@@ -511,7 +717,7 @@ private struct X509DistinguishedName {
     var country: String
 }
 
-private enum SelfSignedClientCertificate {
+enum SelfSignedClientCertificate {
     private static let sha256WithRSAEncryption: [UInt64] = [1, 2, 840, 113549, 1, 1, 11]
     private static let rsaEncryption: [UInt64] = [1, 2, 840, 113549, 1, 1, 1]
 

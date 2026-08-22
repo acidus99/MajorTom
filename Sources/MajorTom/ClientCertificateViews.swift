@@ -3,6 +3,7 @@ import MajorTomCore
 import Security
 import SecurityInterface
 import SwiftUI
+import UniformTypeIdentifiers
 
 @available(macOS 26.0, *)
 struct ClientCertificatesManagerView: View {
@@ -11,7 +12,9 @@ struct ClientCertificatesManagerView: View {
 
     @State private var selectedID: UUID?
     @State private var showsCreation = false
+    @State private var showsImport = false
     @State private var certificatePendingDeletion: ClientCertificateDescriptor?
+    @State private var certificatePendingExport: ClientCertificateDescriptor?
     @State private var associationSortOrder = [
         KeyPathComparator(\AssociationRow.urlString)
     ]
@@ -71,6 +74,14 @@ struct ClientCertificatesManagerView: View {
                 showsCreation = false
             }
         }
+        .sheet(isPresented: $showsImport) {
+            ClientCertificateImportView(store: store) { certificate in
+                selectedID = certificate.id
+                showsImport = false
+            } cancel: {
+                showsImport = false
+            }
+        }
         .alert(
             "Delete Client Certificate?",
             isPresented: Binding(
@@ -94,6 +105,22 @@ struct ClientCertificatesManagerView: View {
         } message: { certificate in
             Text("Deleting “\(certificate.commonName)” removes its private key, all saved capsule associations, and synchronized copies on your other Macs. You may permanently lose access to accounts registered with it.")
         }
+        .alert(
+            "Export Client Identity?",
+            isPresented: Binding(
+                get: { certificatePendingExport != nil },
+                set: { if !$0 { certificatePendingExport = nil } }
+            ),
+            presenting: certificatePendingExport
+        ) { certificate in
+            Button("Cancel", role: .cancel) { certificatePendingExport = nil }
+            Button("Export Identity…") {
+                certificatePendingExport = nil
+                exportIdentity(certificate)
+            }
+        } message: { certificate in
+            Text("The exported PEM file contains the private key for “\(certificate.commonName)”. Anyone with this file can use this identity. Store it securely and delete it after importing.")
+        }
         .alert("Client Certificate Error", isPresented: Binding(
             get: { store.lastError != nil },
             set: { if !$0 { store.lastError = nil } }
@@ -109,6 +136,7 @@ struct ClientCertificatesManagerView: View {
             Label("Client Certificates", systemImage: "person.badge.key")
                 .font(.headline)
             Spacer()
+            Button("Import…", systemImage: "square.and.arrow.down") { showsImport = true }
             Button("New Client Certificate", systemImage: "plus") { showsCreation = true }
         }
         .padding(.horizontal, 16)
@@ -172,6 +200,10 @@ struct ClientCertificatesManagerView: View {
                         Spacer()
                         Button("Copy Public Certificate") { copyPEM(certificate) }
                             .disabled(store.certificatePEM(for: certificate) == nil)
+                        Button("Export Identity…") {
+                            certificatePendingExport = certificate
+                        }
+                        .disabled(store.availability[certificate.id] == false)
                         Button("Delete…", role: .destructive) {
                             certificatePendingDeletion = certificate
                         }
@@ -262,12 +294,54 @@ struct ClientCertificatesManagerView: View {
         NSPasteboard.general.setString(pem, forType: .string)
     }
 
+    private func exportIdentity(_ certificate: ClientCertificateDescriptor) {
+        Task {
+            let panel = NSSavePanel()
+            panel.title = "Export Client Identity"
+            panel.prompt = "Export"
+            panel.nameFieldStringValue = exportFilename(for: certificate)
+            panel.canCreateDirectories = true
+            if let pemType = UTType(filenameExtension: "pem") {
+                panel.allowedContentTypes = [pemType]
+            }
+            guard await panel.begin() == .OK, let destination = panel.url else { return }
+
+            do {
+                let pem = try await store.exportIdentityPEM(for: certificate)
+                try await Task.detached(priority: .userInitiated) {
+                    let data = Data(pem.utf8)
+                    try data.write(to: destination, options: .atomic)
+
+                    // Harden the file where POSIX modes exist. FAT volumes and some
+                    // network shares do not implement chmod; a successful write remains
+                    // a successful export on those destinations.
+                    try? FileManager.default.setAttributes(
+                        [.posixPermissions: 0o600],
+                        ofItemAtPath: destination.path
+                    )
+                }.value
+            } catch {
+                store.lastError = error.localizedDescription
+            }
+        }
+    }
+
+    private func exportFilename(for certificate: ClientCertificateDescriptor) -> String {
+        let invalid = CharacterSet(charactersIn: "/:").union(.controlCharacters)
+        let sanitized = certificate.commonName
+            .components(separatedBy: invalid)
+            .joined(separator: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return "\(sanitized.isEmpty ? "client-identity" : sanitized).pem"
+    }
+
 }
 
 /// SwiftUI bridge for Apple's standard certificate inspector used throughout macOS.
 @available(macOS 26.0, *)
 private struct NativeCertificateDetailsView: NSViewRepresentable {
     let certificateDER: Data
+    var detailsDisclosed = true
 
     func makeNSView(context: Context) -> SFCertificateView {
         let view = SFCertificateView(frame: .zero)
@@ -302,7 +376,168 @@ private struct NativeCertificateDetailsView: NSViewRepresentable {
         view.setDisplayTrust(false)
         view.setEditableTrust(false)
         view.setDisplayDetails(true)
-        view.setDetailsDisclosed(true)
+        view.setDetailsDisclosed(detailsDisclosed)
+    }
+}
+
+@available(macOS 26.0, *)
+private struct ClientCertificateImportView: View {
+    @ObservedObject var store: ClientCertificateStore
+    let completion: (ClientCertificateDescriptor) -> Void
+    let cancel: () -> Void
+
+    @State private var imported: ClientCertificateImport?
+    @State private var errorMessage: String?
+    @State private var showsFileImporter = false
+    @State private var isImporting = false
+    @State private var pastedChangeCount: Int?
+    @State private var clearsClipboard = true
+
+    private static let allowedTypes: [UTType] = {
+        var types = [UTType.plainText]
+        if let pem = UTType(filenameExtension: "pem") { types.insert(pem, at: 0) }
+        if let key = UTType(filenameExtension: "key") { types.append(key) }
+        if let certificate = UTType(filenameExtension: "crt") { types.append(certificate) }
+        return types
+    }()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Import Client Identity")
+                .font(.headline)
+
+            Text("Paste a PEM-encoded client certificate and its matching private key.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            if let imported {
+                NativeCertificateDetailsView(
+                    certificateDER: imported.certificateDER,
+                    detailsDisclosed: false
+                )
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+
+                Label("Matching private key found", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+
+                if pastedChangeCount != nil {
+                    Toggle("Clear the copied private key from the clipboard after importing", isOn: $clearsClipboard)
+                }
+            } else {
+                ContentUnavailableView(
+                    "Paste a Client Identity",
+                    systemImage: "doc.on.clipboard"
+                )
+                .frame(maxWidth: .infinity, minHeight: 150)
+            }
+
+            if let errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack {
+                Button("Paste from Clipboard", systemImage: "clipboard") {
+                    pasteFromClipboard()
+                }
+                .keyboardShortcut("v", modifiers: .command)
+
+                Button("Choose File…", systemImage: "folder") {
+                    showsFileImporter = true
+                }
+
+                Spacer()
+
+                Button("Cancel", role: .cancel) { cancel() }
+                Button("Import") { performImport() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(imported == nil || isImporting)
+            }
+
+            if isImporting {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .padding(20)
+        .frame(width: 660)
+        .fileImporter(
+            isPresented: $showsFileImporter,
+            allowedContentTypes: Self.allowedTypes,
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let urls):
+                guard let url = urls.first else { return }
+                importFile(url)
+            case .failure(let error):
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func pasteFromClipboard() {
+        let pasteboard = NSPasteboard.general
+        guard let text = pasteboard.string(forType: .string), !text.isEmpty else {
+            imported = nil
+            pastedChangeCount = nil
+            errorMessage = "The clipboard does not contain PEM text."
+            return
+        }
+        load(text, pastedChangeCount: pasteboard.changeCount)
+    }
+
+    private func importFile(_ url: URL) {
+        let accessed = url.startAccessingSecurityScopedResource()
+        defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+            guard data.count <= 10 * 1_024 * 1_024 else {
+                throw CocoaError(.fileReadTooLarge)
+            }
+            guard let text = String(data: data, encoding: .utf8) else {
+                throw ClientCertificatePEMError.invalidCertificate
+            }
+            load(text, pastedChangeCount: nil)
+        } catch {
+            imported = nil
+            pastedChangeCount = nil
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func load(_ pem: String, pastedChangeCount: Int?) {
+        do {
+            imported = try ClientCertificateImport.parse(pem: pem)
+            self.pastedChangeCount = pastedChangeCount
+            errorMessage = nil
+        } catch {
+            imported = nil
+            self.pastedChangeCount = nil
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func performImport() {
+        guard let imported else { return }
+        isImporting = true
+        errorMessage = nil
+        Task {
+            do {
+                let descriptor = try await store.importIdentity(imported)
+                if clearsClipboard,
+                   let pastedChangeCount,
+                   NSPasteboard.general.changeCount == pastedChangeCount {
+                    NSPasteboard.general.clearContents()
+                }
+                completion(descriptor)
+            } catch {
+                errorMessage = error.localizedDescription
+                isImporting = false
+            }
+        }
     }
 }
 

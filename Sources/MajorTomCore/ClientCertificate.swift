@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// The public, syncable description of a TLS client identity.
 ///
@@ -77,6 +78,161 @@ public struct ClientCertificateCreationRequest: Equatable, Sendable {
         self.organization = organization
         self.country = country
         self.validUntil = validUntil
+    }
+}
+
+public enum ClientCertificatePEMError: Error, LocalizedError, Equatable, Sendable {
+    case certificateMissing
+    case privateKeyMissing
+    case encryptedPrivateKey
+    case invalidCertificate
+    case invalidPrivateKey
+    case unsupportedPrivateKey
+    case mismatchedKey
+
+    public var errorDescription: String? {
+        switch self {
+        case .certificateMissing:
+            "No PEM certificate was found. Copy the complete client identity."
+        case .privateKeyMissing:
+            "No PEM private key was found. Copy the complete client identity."
+        case .encryptedPrivateKey:
+            "Encrypted private keys are not supported yet."
+        case .invalidCertificate:
+            "The PEM certificate is not a valid X.509 certificate."
+        case .invalidPrivateKey:
+            "The PEM private key is not valid."
+        case .unsupportedPrivateKey:
+            "This private-key format is not supported. Major Tom currently imports RSA client identities."
+        case .mismatchedKey:
+            "The private key does not belong to this certificate."
+        }
+    }
+}
+
+/// A validated certificate/private-key pair awaiting storage in Keychain.
+///
+/// The private key remains in memory only while the import sheet is open. It is never
+/// placed in preferences or CloudKit.
+public struct ClientCertificateImport: Sendable {
+    public let certificateDER: Data
+    let rsaPrivateKeyDER: Data
+
+    public var commonName: String {
+        CertificateSubject.commonName(certificateDER: certificateDER) ?? "Imported Identity"
+    }
+
+    public var notBefore: Date? {
+        CertificateDetails.validityDates(certificateDER: certificateDER).notBefore
+    }
+
+    public var notAfter: Date? {
+        CertificateDetails.validityDates(certificateDER: certificateDER).notAfter
+    }
+
+    public static func parse(pem: String) throws -> ClientCertificateImport {
+        guard let certificateDER = pemBlock(named: "CERTIFICATE", in: pem) else {
+            throw ClientCertificatePEMError.certificateMissing
+        }
+        guard SecCertificateCreateWithData(nil, certificateDER as CFData) != nil else {
+            throw ClientCertificatePEMError.invalidCertificate
+        }
+
+        if pem.contains("-----BEGIN ENCRYPTED PRIVATE KEY-----") {
+            throw ClientCertificatePEMError.encryptedPrivateKey
+        }
+
+        let rsaPrivateKeyDER: Data
+        if let pkcs1 = pemBlock(named: "RSA PRIVATE KEY", in: pem) {
+            rsaPrivateKeyDER = pkcs1
+        } else if let pkcs8 = pemBlock(named: "PRIVATE KEY", in: pem) {
+            rsaPrivateKeyDER = try unwrapRSAPKCS8(pkcs8)
+        } else if pem.contains("-----BEGIN EC PRIVATE KEY-----") {
+            throw ClientCertificatePEMError.unsupportedPrivateKey
+        } else {
+            throw ClientCertificatePEMError.privateKeyMissing
+        }
+
+        let privateKey = try makePrivateKey(rsaPrivateKeyDER)
+        guard let privatePublicKey = SecKeyCopyPublicKey(privateKey),
+              let certificate = SecCertificateCreateWithData(nil, certificateDER as CFData),
+              let certificatePublicKey = SecCertificateCopyKey(certificate) else {
+            throw ClientCertificatePEMError.invalidPrivateKey
+        }
+        var privateError: Unmanaged<CFError>?
+        var certificateError: Unmanaged<CFError>?
+        guard let privatePublicBytes = SecKeyCopyExternalRepresentation(
+            privatePublicKey,
+            &privateError
+        ) as Data?,
+              let certificatePublicBytes = SecKeyCopyExternalRepresentation(
+                certificatePublicKey,
+                &certificateError
+              ) as Data?,
+              privatePublicBytes == certificatePublicBytes else {
+            throw ClientCertificatePEMError.mismatchedKey
+        }
+
+        return ClientCertificateImport(
+            certificateDER: certificateDER,
+            rsaPrivateKeyDER: rsaPrivateKeyDER
+        )
+    }
+
+    func makePrivateKey() throws -> SecKey {
+        try Self.makePrivateKey(rsaPrivateKeyDER)
+    }
+
+    private static func makePrivateKey(_ der: Data) throws -> SecKey {
+        var error: Unmanaged<CFError>?
+        let attributes: [CFString: Any] = [
+            kSecAttrKeyType: kSecAttrKeyTypeRSA,
+            kSecAttrKeyClass: kSecAttrKeyClassPrivate
+        ]
+        guard let key = SecKeyCreateWithData(
+            der as CFData,
+            attributes as CFDictionary,
+            &error
+        ) else {
+            throw ClientCertificatePEMError.invalidPrivateKey
+        }
+        return key
+    }
+
+    private static func pemBlock(named name: String, in pem: String) -> Data? {
+        let beginning = "-----BEGIN \(name)-----"
+        let ending = "-----END \(name)-----"
+        guard let beginRange = pem.range(of: beginning),
+              let endRange = pem.range(of: ending, range: beginRange.upperBound..<pem.endIndex) else {
+            return nil
+        }
+        let base64 = pem[beginRange.upperBound..<endRange.lowerBound]
+            .components(separatedBy: .whitespacesAndNewlines)
+            .joined()
+        return Data(base64Encoded: base64)
+    }
+
+    /// PKCS #8 wraps the PKCS #1 RSA private key in an OCTET STRING after an RSA
+    /// algorithm identifier. Security.framework imports the inner PKCS #1 value.
+    private static func unwrapRSAPKCS8(_ der: Data) throws -> Data {
+        let rsaEncryptionOID = Data([0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01])
+        guard let root = try? DERElement.parse(in: der, at: der.startIndex),
+              root.tag == 0x30,
+              root.fullRange == der.startIndex..<der.endIndex,
+              let fields = try? root.children(in: der),
+              fields.count >= 3,
+              fields[0].tag == 0x02,
+              fields[1].tag == 0x30,
+              fields[2].tag == 0x04,
+              let algorithm = try? fields[1].children(in: der),
+              let oid = algorithm.first,
+              oid.tag == 0x06 else {
+            throw ClientCertificatePEMError.invalidPrivateKey
+        }
+        guard der[oid.contentRange].elementsEqual(rsaEncryptionOID) else {
+            throw ClientCertificatePEMError.unsupportedPrivateKey
+        }
+        return Data(der[fields[2].contentRange])
     }
 }
 
