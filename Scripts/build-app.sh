@@ -81,7 +81,17 @@ plist="$contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :MTBuildInfo $build_info" "$plist" 2>/dev/null \
     || /usr/libexec/PlistBuddy -c "Add :MTBuildInfo string $build_info" "$plist"
 
-codesign --force --sign - "$app"
+signing_identity="${MAJOR_TOM_CODESIGN_IDENTITY:--}"
+if [[ "$signing_identity" == "-" ]]; then
+    # Restricted iCloud entitlements require an Apple-issued signing identity.
+    # Putting them on an ad-hoc signature makes macOS kill the executable before
+    # launch (LaunchServices reports RBSRequestErrorDomain Code=5 / POSIX 163).
+    codesign --force --sign - "$app"
+    echo "Note: iCloud sync is unavailable in this ad-hoc signed build." >&2
+else
+    codesign --force --sign "$signing_identity" \
+        --entitlements "$project_root/Resources/MajorTom.entitlements" "$app"
+fi
 
 echo "$app"
 echo "Version $short_version ($build_number) - $build_info"
