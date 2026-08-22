@@ -18,7 +18,7 @@ let package = Package(
             name: "MajorTom",
             dependencies: ["MajorTomCore", "MajorTomAppKitSupport"],
             resources: [
-                .copy("Resources/major-tom.mid")
+                .copy("Resources/funpack.dat")
             ]
         ),
         .testTarget(

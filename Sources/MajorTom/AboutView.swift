@@ -58,7 +58,7 @@ enum AboutWindowPresenter {
 struct AboutView: View {
     @ObservedObject private var settings = BrowserSettingsStore.shared
     @State private var midiPlayer = AboutMIDILooper()
-    @State private var isMIDIPlaying = false
+    @State private var isLogoPressed = false
     @State private var isIconHovered = false
     @State private var playbackError: String?
 
@@ -66,9 +66,9 @@ struct AboutView: View {
         VStack(spacing: 16) {
             Button {
                 do {
-                    isMIDIPlaying = try midiPlayer.toggle()
+                    isLogoPressed = try midiPlayer.toggle()
                 } catch {
-                    isMIDIPlaying = false
+                    isLogoPressed = false
                     playbackError = error.localizedDescription
                 }
             } label: {
@@ -76,25 +76,20 @@ struct AboutView: View {
                     .resizable()
                     .interpolation(.high)
                     .frame(width: 128, height: 128)
-                    .overlay(alignment: .bottomTrailing) {
-                        if isMIDIPlaying || isIconHovered {
-                            Image(systemName: isMIDIPlaying ? "stop.circle.fill" : "play.circle.fill")
-                                .font(.system(size: 25))
-                                .symbolRenderingMode(.palette)
-                                .foregroundStyle(.white, Color.accentColor)
-                                .padding(3)
-                                .transition(.opacity.combined(with: .scale(scale: 0.85)))
-                        }
-                    }
             }
-            .buttonStyle(.plain)
+            .buttonStyle(RecessedIconButtonStyle(isLatched: isLogoPressed))
             .onHover { hovering in
-                withAnimation(.easeOut(duration: 0.12)) {
-                    isIconHovered = hovering
+                guard hovering != isIconHovered else { return }
+                isIconHovered = hovering
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
                 }
             }
-            .help(isMIDIPlaying ? "Stop MIDI" : "Play MIDI")
-            .accessibilityLabel(isMIDIPlaying ? "Stop Major Tom MIDI" : "Play Major Tom MIDI")
+            .help(isLogoPressed ? "Release the logo" : "Press the logo")
+            .accessibilityLabel("Major Tom logo")
+            .accessibilityValue(isLogoPressed ? "Pressed" : "Not pressed")
 
             Text("Major Tom")
                 .font(.system(size: 28, weight: .semibold))
@@ -129,7 +124,11 @@ struct AboutView: View {
         }
         .onDisappear {
             midiPlayer.stop()
-            isMIDIPlaying = false
+            isLogoPressed = false
+            if isIconHovered {
+                NSCursor.pop()
+                isIconHovered = false
+            }
         }
         .alert(
             "MIDI Playback Failed",
@@ -152,6 +151,30 @@ struct AboutView: View {
         case .light: .light
         case .dark: .dark
         }
+    }
+}
+
+private struct RecessedIconButtonStyle: ButtonStyle {
+    let isLatched: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        let isPressed = isLatched || configuration.isPressed
+
+        configuration.label
+            .scaleEffect(isPressed ? 0.965 : 1)
+            .offset(y: isPressed ? 2 : 0)
+            .brightness(isPressed ? -0.1 : 0)
+            .overlay {
+                RoundedRectangle(cornerRadius: 27, style: .continuous)
+                    .strokeBorder(.black.opacity(isPressed ? 0.24 : 0), lineWidth: 4)
+                    .blur(radius: isPressed ? 1.5 : 0)
+            }
+            .shadow(
+                color: .black.opacity(isPressed ? 0.08 : 0.25),
+                radius: isPressed ? 1 : 4,
+                y: isPressed ? 1 : 3
+            )
+            .animation(.easeOut(duration: 0.1), value: isPressed)
     }
 }
 
@@ -203,9 +226,14 @@ private final class AboutMIDILooper {
     }
 
     private func prepare() throws {
-        guard let midiURL = Bundle.module.url(forResource: "major-tom", withExtension: "mid") else {
+        guard let encodedURL = Bundle.module.url(forResource: "funpack", withExtension: "dat") else {
             throw MIDIPlaybackError.missingResource
         }
+        let encodedData = try Data(contentsOf: encodedURL)
+        let xorKey = Array("BMH".utf8)
+        let midiData = Data(encodedData.enumerated().map { index, byte in
+            byte ^ xorKey[index % xorKey.count]
+        })
 
         var newSequence: MusicSequence?
         try check(NewMusicSequence(&newSequence), operation: "create sequence")
@@ -215,7 +243,7 @@ private final class AboutMIDILooper {
 
         do {
             try check(
-                MusicSequenceFileLoad(newSequence, midiURL as CFURL, .midiType, []),
+                MusicSequenceFileLoadData(newSequence, midiData as CFData, .midiType, []),
                 operation: "load MIDI"
             )
             try makeSequenceLoopForever(newSequence)
@@ -335,7 +363,7 @@ private enum MIDIPlaybackError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .missingResource:
-            "The bundled MIDI file could not be found."
+            "The bundled music data could not be found."
         case .sequenceUnavailable:
             "macOS could not create a MIDI sequence."
         case .playerUnavailable:
