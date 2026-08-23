@@ -707,7 +707,11 @@ private final class NativeTabCoordinator {
     /// constructed hidden, populated, and joined to the tab group before AppKit can draw
     /// it independently.
     func openTab(url: URL?, from parent: NSWindow, inBackground: Bool) {
-        let window = makeBrowserWindow(url: url, matching: parent)
+        let window = makeBrowserWindow(
+            url: url,
+            matching: parent,
+            focusesLocationOnPresentation: url == nil && !inBackground
+        )
         parent.addTabbedWindow(window, ordered: .above)
         parent.tabGroup?.selectedWindow = inBackground ? parent : window
         if !inBackground {
@@ -773,7 +777,8 @@ private final class NativeTabCoordinator {
     private func makeBrowserWindow(
         url: URL?,
         matching source: NSWindow?,
-        restoredState: RestoredTabState? = nil
+        restoredState: RestoredTabState? = nil,
+        focusesLocationOnPresentation: Bool = false
     ) -> NSWindow {
         let destination = BrowserWindowDestination(url: url)
         if let restoredState {
@@ -792,7 +797,8 @@ private final class NativeTabCoordinator {
         window.contentViewController = NSHostingController(
             rootView: NativeFoundationView(
                 initialURL: destination.url,
-                destinationID: destination.id
+                destinationID: destination.id,
+                focusesLocationOnPresentation: focusesLocationOnPresentation
             )
         )
         if let source {
@@ -816,16 +822,26 @@ private struct NativeFoundationView: View {
     @ObservedObject private var settings = BrowserSettingsStore.shared
     let initialURL: URL?
     let destinationID: UUID
+    let focusesLocationOnPresentation: Bool
 
-    init(initialURL: URL? = nil, destinationID: UUID = UUID()) {
+    init(
+        initialURL: URL? = nil,
+        destinationID: UUID = UUID(),
+        focusesLocationOnPresentation: Bool = false
+    ) {
         self.initialURL = initialURL
         self.destinationID = destinationID
+        self.focusesLocationOnPresentation = focusesLocationOnPresentation
     }
 
     var body: some View {
         Group {
             if #available(macOS 26.0, *) {
-                BrowserWindowView(initialURL: initialURL, destinationID: destinationID)
+                BrowserWindowView(
+                    initialURL: initialURL,
+                    destinationID: destinationID,
+                    focusesLocationOnPresentation: focusesLocationOnPresentation
+                )
             } else {
                 ContentUnavailableView {
                     Label("Major Tom requires macOS 26", systemImage: "sparkles")
@@ -852,8 +868,13 @@ private struct BrowserWindowView: View {
     @StateObject private var browser: BrowserModel
     @State private var hostWindow: NSWindow?
     let destinationID: UUID
+    let focusesLocationOnPresentation: Bool
 
-    init(initialURL: URL? = nil, destinationID: UUID = UUID()) {
+    init(
+        initialURL: URL? = nil,
+        destinationID: UUID = UUID(),
+        focusesLocationOnPresentation: Bool = false
+    ) {
         _browser = StateObject(wrappedValue: BrowserModel(
             restoredState: NativeTabRestorationState.next(
                 destinationID: destinationID,
@@ -862,10 +883,16 @@ private struct BrowserWindowView: View {
             initialURL: initialURL
         ))
         self.destinationID = destinationID
+        self.focusesLocationOnPresentation = focusesLocationOnPresentation
     }
 
     var body: some View {
-        BrowserTabView(browser: browser, chromeTopInset: 0, hostWindow: hostWindow)
+        BrowserTabView(
+            browser: browser,
+            chromeTopInset: 0,
+            hostWindow: hostWindow,
+            focusesLocationOnPresentation: focusesLocationOnPresentation
+        )
         .navigationTitle(browser.title)
         .background(WindowAccessor(window: $hostWindow))
         .onAppear {
@@ -1281,6 +1308,7 @@ private struct BrowserTabView: View {
     @ObservedObject var browser: BrowserModel
     let chromeTopInset: CGFloat
     let hostWindow: NSWindow?
+    let focusesLocationOnPresentation: Bool
     @ObservedObject private var bookmarks = BookmarksModel.shared
     @ObservedObject private var settings = BrowserSettingsStore.shared
     @ObservedObject private var clientCertificates = ClientCertificateStore.shared
@@ -1509,7 +1537,13 @@ private struct BrowserTabView: View {
         .task { await browser.releaseWebViewDragTypes() }
         .onAppear { installContextMenuMonitor() }
         .onDisappear { removeContextMenuMonitor() }
-        .onCommand(.majorTomFocusLocation, when: { isCommandTarget }) { locationIsFocused = true }
+        .onCommand(.majorTomFocusLocation, when: { isCommandTarget }) {
+            focusLocationAndSelectAll()
+        }
+        .onChange(of: hostWindow) { _, window in
+            guard focusesLocationOnPresentation, window?.isKeyWindow == true else { return }
+            focusLocationAndSelectAll()
+        }
         .onCommand(.majorTomReload, when: { isCommandTarget }) { browser.reload() }
         .onCommand(.majorTomStop, when: { isCommandTarget }) { browser.stop() }
         .onCommand(.majorTomShowSource, when: { isCommandTarget }) { browser.showPageSource() }
@@ -1598,6 +1632,28 @@ private struct BrowserTabView: View {
         }
         browser.locationText = url.absoluteString
         browser.submitLocation()
+    }
+
+    /// Gives the native field editor one update cycle to become first responder before
+    /// selecting its contents. This also makes Command-L reselect the address when the
+    /// location field already owns focus.
+    private func focusLocationAndSelectAll() {
+        locationIsFocused = true
+        Task { @MainActor in
+            // SwiftUI updates AppKit's first responder after the FocusState mutation.
+            // A few short retries cover that handoff without selecting the old web view
+            // if its field editor has not been installed yet.
+            for _ in 0..<4 {
+                await Task.yield()
+                guard locationIsFocused, let hostWindow, hostWindow.isKeyWindow else { return }
+                if let editor = hostWindow.firstResponder as? NSTextView,
+                   editor.delegate is NSTextField {
+                    editor.selectAll(nil)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+        }
     }
 
     private var contentThemeBackground: Color {
