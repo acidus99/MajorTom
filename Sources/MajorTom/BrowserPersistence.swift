@@ -23,6 +23,85 @@ enum SharedTrustedIdentityStore {
     }()
 }
 
+/// Bridges durable user TOFU decisions to private CloudKit while leaving observations,
+/// certificate copies, counters, and seed policy in the local JSON store.
+@MainActor
+final class TrustedIdentityCloudCoordinator: ObservableObject {
+    static let shared = TrustedIdentityCloudCoordinator()
+
+    @Published private(set) var conflictingEndpoints: Set<CapsuleEndpoint> = []
+
+    private let defaults = UserDefaults.standard
+    private let storageKey = "server-trust-cloud-metadata-v1"
+    private let store = SharedTrustedIdentityStore.shared
+    private var state = SyncedServerTrust()
+    private var cloudObserver: AnyCancellable?
+
+    private init() {
+        if let data = defaults.data(forKey: storageKey),
+           let stored = try? JSONDecoder().decode(SyncedServerTrust.self, from: data) {
+            state = stored
+        }
+        cloudObserver = ICloudSyncStore.shared.receivedServerTrust.sink { [weak self] incoming in
+            Task { await self?.apply(incoming) }
+        }
+        Task { await start() }
+    }
+
+    private func start() async {
+        guard let store else { return }
+        let identities = await store.allIdentities()
+        state = state.reconciled(with: identities, at: Date())
+        persist()
+        ICloudSyncStore.shared.configure(
+            serverTrust: state.decisions.isEmpty ? nil : state
+        )
+        await store.setChangeHandler { [weak self] identities in
+            Task { @MainActor in self?.localTrustChanged(identities) }
+        }
+    }
+
+    private func localTrustChanged(_ identities: [TrustedServerIdentity]) {
+        state = state.reconciled(with: identities, at: Date())
+        conflictingEndpoints = state.conflictingEndpoints
+        persist()
+        ICloudSyncStore.shared.updateServerTrust(state)
+    }
+
+    private func apply(_ incoming: SyncedServerTrust) async {
+        let merged = state.merging(incoming)
+        let conflicts = merged.conflictingEndpoints
+        var decisionsToApply = merged.activeByEndpoint.compactMap { endpoint, decisions in
+            conflicts.contains(endpoint) ? nil : decisions.first
+        }
+        if let store {
+            // A cloud conflict must not erase the decision already protecting this Mac.
+            // Keep it in force until the user removes trust or explicitly approves a
+            // newly presented key, either of which creates the resolving tombstones.
+            decisionsToApply += await store.allIdentities().compactMap { identity in
+                guard identity.source == .user, conflicts.contains(identity.endpoint) else {
+                    return nil
+                }
+                return SyncedServerTrustDecision(
+                    endpoint: identity.endpoint,
+                    publicKeySHA256: identity.publicKeySHA256,
+                    firstTrustedAt: identity.firstTrustedAt,
+                    modifiedAt: identity.firstTrustedAt
+                )
+            }
+            try? await store.applySyncedUserTrust(decisionsToApply)
+        }
+        state = merged
+        conflictingEndpoints = conflicts
+        persist()
+    }
+
+    private func persist() {
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        defaults.set(data, forKey: storageKey)
+    }
+}
+
 /// The one favicon cache for the whole application.
 ///
 /// Shared for the same reason the trusted-identity store is: each instance holds the file

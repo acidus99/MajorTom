@@ -427,3 +427,200 @@ public struct SyncedClientCertificates: Codable, Equatable, Sendable {
         return modifiedAt > local.modifiedAt
     }
 }
+
+/// A public certificate description mirrored through CloudKit. Whether the matching
+/// Keychain identity is available is deliberately absent: that is different on every Mac.
+public struct SyncedClientCertificateDescriptor: Codable, Equatable, Identifiable, Sendable {
+    public var id: UUID
+    public var commonName: String
+    public var emailAddress: String
+    public var userID: String
+    public var domain: String
+    public var organization: String
+    public var country: String
+    public var notBefore: Date
+    public var notAfter: Date
+    public var certificateSHA256: String
+    public var publicKeySHA256: String
+    public var modifiedAt: Date
+    public var deletedAt: Date?
+
+    public init(
+        descriptor: ClientCertificateDescriptor,
+        modifiedAt: Date,
+        deletedAt: Date? = nil
+    ) {
+        id = descriptor.id
+        commonName = descriptor.commonName
+        emailAddress = descriptor.emailAddress
+        userID = descriptor.userID
+        domain = descriptor.domain
+        organization = descriptor.organization
+        country = descriptor.country
+        notBefore = descriptor.notBefore
+        notAfter = descriptor.notAfter
+        certificateSHA256 = descriptor.certificateSHA256
+        publicKeySHA256 = descriptor.publicKeySHA256
+        self.modifiedAt = modifiedAt
+        self.deletedAt = deletedAt
+    }
+
+    public var descriptor: ClientCertificateDescriptor {
+        ClientCertificateDescriptor(
+            id: id,
+            commonName: commonName,
+            emailAddress: emailAddress,
+            userID: userID,
+            domain: domain,
+            organization: organization,
+            country: country,
+            notBefore: notBefore,
+            notAfter: notAfter,
+            certificateSHA256: certificateSHA256,
+            publicKeySHA256: publicKeySHA256,
+            // This only expresses the intended backing store. Actual per-Mac
+            // availability remains in ClientCertificateStore.availability.
+            synchronizesWithICloud: true
+        )
+    }
+}
+
+public struct SyncedClientCertificateAssociation: Codable, Equatable, Identifiable, Sendable {
+    public var association: ClientCertificateAssociation
+    public var modifiedAt: Date
+    public var deletedAt: Date?
+
+    public var id: UUID { association.id }
+
+    public init(
+        association: ClientCertificateAssociation,
+        modifiedAt: Date,
+        deletedAt: Date? = nil
+    ) {
+        self.association = association
+        self.modifiedAt = modifiedAt
+        self.deletedAt = deletedAt
+    }
+}
+
+/// Record-level client identity metadata. Tombstones prevent an offline Mac from
+/// resurrecting a deleted identity or capsule approval when it reconnects.
+public struct ClientCertificateSyncState: Codable, Equatable, Sendable {
+    public var certificates: [SyncedClientCertificateDescriptor]
+    public var associations: [SyncedClientCertificateAssociation]
+
+    public init(
+        certificates: [SyncedClientCertificateDescriptor] = [],
+        associations: [SyncedClientCertificateAssociation] = []
+    ) {
+        self.certificates = certificates
+        self.associations = associations
+    }
+
+    public init(legacy: SyncedClientCertificates) {
+        certificates = legacy.certificates.map {
+            SyncedClientCertificateDescriptor(descriptor: $0, modifiedAt: legacy.modifiedAt)
+        }
+        associations = legacy.associations.map {
+            SyncedClientCertificateAssociation(association: $0, modifiedAt: legacy.modifiedAt)
+        }
+    }
+
+    public func reconciled(
+        certificates currentCertificates: [ClientCertificateDescriptor],
+        associations currentAssociations: [ClientCertificateAssociation],
+        at date: Date
+    ) -> Self {
+        let oldCertificates = Dictionary(uniqueKeysWithValues: certificates.map { ($0.id, $0) })
+        let oldAssociations = Dictionary(uniqueKeysWithValues: associations.map { ($0.id, $0) })
+
+        var nextCertificates = currentCertificates.map { descriptor in
+            let incoming = SyncedClientCertificateDescriptor(descriptor: descriptor, modifiedAt: date)
+            guard let old = oldCertificates[descriptor.id], old.deletedAt == nil,
+                  old.descriptor == descriptor.normalizedForCloudComparison else { return incoming }
+            return old
+        }
+        let currentCertificateIDs = Set(currentCertificates.map(\.id))
+        nextCertificates += certificates.filter { !currentCertificateIDs.contains($0.id) }.map { old in
+            guard old.deletedAt == nil else { return old }
+            var tombstone = old
+            tombstone.modifiedAt = date
+            tombstone.deletedAt = date
+            return tombstone
+        }
+
+        var nextAssociations = currentAssociations.map { association in
+            let incoming = SyncedClientCertificateAssociation(association: association, modifiedAt: date)
+            guard let old = oldAssociations[association.id], old.deletedAt == nil,
+                  old.association == association else { return incoming }
+            return old
+        }
+        let currentAssociationIDs = Set(currentAssociations.map(\.id))
+        nextAssociations += associations.filter { !currentAssociationIDs.contains($0.id) }.map { old in
+            guard old.deletedAt == nil else { return old }
+            var tombstone = old
+            tombstone.modifiedAt = date
+            tombstone.deletedAt = date
+            return tombstone
+        }
+        return Self(certificates: nextCertificates, associations: nextAssociations)
+    }
+
+    public func merging(_ other: Self) -> Self {
+        Self(
+            certificates: Self.latest(certificates + other.certificates, modifiedAt: \.modifiedAt),
+            associations: Self.latest(associations + other.associations, modifiedAt: \.modifiedAt)
+        )
+    }
+
+    public func activeCertificates(
+        preservingLocalStorageFrom local: [ClientCertificateDescriptor]
+    ) -> [ClientCertificateDescriptor] {
+        let localByID = Dictionary(uniqueKeysWithValues: local.map { ($0.id, $0) })
+        return certificates.filter { $0.deletedAt == nil }.map { record in
+            var descriptor = record.descriptor
+            if let local = localByID[record.id] {
+                descriptor.synchronizesWithICloud = local.synchronizesWithICloud
+            }
+            return descriptor
+        }
+    }
+
+    public var activeAssociations: [ClientCertificateAssociation] {
+        let activeCertificateIDs = Set(certificates.filter { $0.deletedAt == nil }.map(\.id))
+        return associations.compactMap {
+            guard $0.deletedAt == nil,
+                  activeCertificateIDs.contains($0.association.certificateID) else { return nil }
+            return $0.association
+        }
+    }
+
+    private static func latest<Record>(
+        _ records: [Record],
+        modifiedAt: KeyPath<Record, Date>
+    ) -> [Record] where Record: Identifiable, Record.ID == UUID {
+        var result: [UUID: Record] = [:]
+        for record in records
+        where result[record.id].map({ $0[keyPath: modifiedAt] }) ?? .distantPast
+            < record[keyPath: modifiedAt] {
+            result[record.id] = record
+        }
+        return Array(result.values)
+    }
+}
+
+private extension ClientCertificateDescriptor {
+    var normalizedForCloudComparison: ClientCertificateDescriptor {
+        var result = self
+        result.synchronizesWithICloud = true
+        return result
+    }
+}
+
+extension SyncedClientCertificateDescriptor: CloudModifiedRecord {
+    public var cloudModifiedAt: Date { modifiedAt }
+}
+
+extension SyncedClientCertificateAssociation: CloudModifiedRecord {
+    public var cloudModifiedAt: Date { modifiedAt }
+}

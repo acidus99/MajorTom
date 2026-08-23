@@ -1,5 +1,6 @@
 import CloudKit
 import Combine
+import CryptoKit
 import Foundation
 import MajorTomCore
 import Security
@@ -33,7 +34,9 @@ final class ICloudSyncStore: ObservableObject {
     @Published private(set) var remoteTabDevices: [CloudTabDeviceSnapshot] = []
 
     let receivedPreferences = PassthroughSubject<SyncedBrowserPreferences, Never>()
-    let receivedClientCertificates = PassthroughSubject<SyncedClientCertificates, Never>()
+    let receivedClientCertificates = PassthroughSubject<ClientCertificateSyncState, Never>()
+    let receivedBookmarks = PassthroughSubject<SyncedBookmarks, Never>()
+    let receivedServerTrust = PassthroughSubject<SyncedServerTrust, Never>()
 
     let localDeviceID: UUID
     let localDeviceName: String
@@ -43,12 +46,13 @@ final class ICloudSyncStore: ObservableObject {
     private let defaults: UserDefaults
     private let zoneID = CKRecordZone.ID(zoneName: "MajorTomUserData")
     private let preferencesRecordID: CKRecord.ID
-    private let clientCertificatesRecordID: CKRecord.ID
     private let tabsRecordID: CKRecord.ID
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var localPreferences: SyncedBrowserPreferences?
-    private var localClientCertificates: SyncedClientCertificates?
+    private var localClientCertificates: ClientCertificateSyncState?
+    private var localBookmarks: SyncedBookmarks?
+    private var localServerTrust: SyncedServerTrust?
     private var localTabs: CloudTabDeviceSnapshot?
     private var syncTask: Task<Void, Never>?
     private var pendingSync = false
@@ -76,10 +80,6 @@ final class ICloudSyncStore: ObservableObject {
             status = .unavailable("This build is not provisioned for Major Tom iCloud sync")
         }
         preferencesRecordID = CKRecord.ID(recordName: "preferences", zoneID: zoneID)
-        clientCertificatesRecordID = CKRecord.ID(
-            recordName: "client-certificates",
-            zoneID: zoneID
-        )
         tabsRecordID = CKRecord.ID(
             recordName: "tabs-\(localDeviceID.uuidString.lowercased())",
             zoneID: zoneID
@@ -101,13 +101,33 @@ final class ICloudSyncStore: ObservableObject {
         requestSync()
     }
 
-    func configure(clientCertificates: SyncedClientCertificates?) {
+    func configure(clientCertificates: ClientCertificateSyncState?) {
         localClientCertificates = clientCertificates
         requestSync()
     }
 
-    func updateClientCertificates(_ snapshot: SyncedClientCertificates) {
+    func updateClientCertificates(_ snapshot: ClientCertificateSyncState) {
         localClientCertificates = snapshot
+        requestSync()
+    }
+
+    func configure(bookmarks: SyncedBookmarks?) {
+        localBookmarks = bookmarks
+        requestSync()
+    }
+
+    func updateBookmarks(_ snapshot: SyncedBookmarks) {
+        localBookmarks = snapshot
+        requestSync()
+    }
+
+    func configure(serverTrust: SyncedServerTrust?) {
+        localServerTrust = serverTrust
+        requestSync()
+    }
+
+    func updateServerTrust(_ snapshot: SyncedServerTrust) {
+        localServerTrust = snapshot
         requestSync()
     }
 
@@ -146,7 +166,16 @@ final class ICloudSyncStore: ObservableObject {
             status = .unavailable("This build is not provisioned for Major Tom iCloud sync")
             return
         }
-        status = .syncing
+        // Several stores configure themselves independently during launch, which can
+        // queue a handful of very short follow-up syncs. Once CloudKit is up to date,
+        // keep that stable status visible while those routine background passes run
+        // instead of flashing "Syncing" between each one. Initial and recovery syncs
+        // still advertise that work, and failures replace the status immediately.
+        if case .upToDate = status {
+            // Preserve the last successful status during a background refresh.
+        } else {
+            status = .syncing
+        }
         do {
             let accountStatus = try await container.accountStatus()
             guard accountStatus == .available else {
@@ -155,9 +184,25 @@ final class ICloudSyncStore: ObservableObject {
             }
 
             _ = try await database.save(CKRecordZone(zoneID: zoneID))
-            let remote = try await fetchAllRecords(from: database)
+            let fetchedRemote = try await fetchAllRecords(from: database)
+            // A zone can change while CloudKit is paging through its change history,
+            // so the same record ID may legitimately appear in more than one batch.
+            // Dictionary(uniqueKeysWithValues:) traps on that input. Collapse repeats
+            // first and retain the newest server version for decoding and conflict
+            // handling below.
+            let remoteRecordsByID = newestValuesByID(
+                fetchedRemote,
+                id: \.recordID,
+                modifiedAt: \.modificationDate
+            )
+            let remote = Array(remoteRecordsByID.values)
             var remotePreferences: SyncedBrowserPreferences?
-            var remoteClientCertificates: SyncedClientCertificates?
+            var legacyClientCertificates: SyncedClientCertificates?
+            var remoteCertificateRecords: [SyncedClientCertificateDescriptor] = []
+            var remoteAssociationRecords: [SyncedClientCertificateAssociation] = []
+            var remoteBookmarkFolders: [SyncedBookmarkFolder] = []
+            var remoteBookmarks: [SyncedBookmark] = []
+            var remoteTrustDecisions: [SyncedServerTrustDecision] = []
             var devices: [CloudTabDeviceSnapshot] = []
 
             for record in remote {
@@ -170,10 +215,32 @@ final class ICloudSyncStore: ObservableObject {
                         devices.append(device)
                     }
                 case "MTClientCertificates":
-                    remoteClientCertificates = try? decoder.decode(
+                    legacyClientCertificates = try? decoder.decode(
                         SyncedClientCertificates.self,
                         from: data
                     )
+                case "MTClientCertificateDescriptor":
+                    if let value = try? decoder.decode(
+                        SyncedClientCertificateDescriptor.self,
+                        from: data
+                    ) { remoteCertificateRecords.append(value) }
+                case "MTClientCertificateAssociation":
+                    if let value = try? decoder.decode(
+                        SyncedClientCertificateAssociation.self,
+                        from: data
+                    ) { remoteAssociationRecords.append(value) }
+                case "MTBookmarkFolder":
+                    if let value = try? decoder.decode(SyncedBookmarkFolder.self, from: data) {
+                        remoteBookmarkFolders.append(value)
+                    }
+                case "MTBookmark":
+                    if let value = try? decoder.decode(SyncedBookmark.self, from: data) {
+                        remoteBookmarks.append(value)
+                    }
+                case "MTServerTrust":
+                    if let value = try? decoder.decode(SyncedServerTrustDecision.self, from: data) {
+                        remoteTrustDecisions.append(value)
+                    }
                 default:
                     break
                 }
@@ -183,10 +250,41 @@ final class ICloudSyncStore: ObservableObject {
                 localPreferences = remotePreferences
                 receivedPreferences.send(remotePreferences)
             }
-            if let remoteClientCertificates,
-               remoteClientCertificates.shouldReplace(localClientCertificates) {
-                localClientCertificates = remoteClientCertificates
-                receivedClientCertificates.send(remoteClientCertificates)
+            var remoteClientCertificates = ClientCertificateSyncState(
+                certificates: remoteCertificateRecords,
+                associations: remoteAssociationRecords
+            )
+            if remoteCertificateRecords.isEmpty, remoteAssociationRecords.isEmpty,
+               let legacyClientCertificates {
+                remoteClientCertificates = ClientCertificateSyncState(legacy: legacyClientCertificates)
+            }
+            let mergedClientCertificates = localClientCertificates.map {
+                $0.merging(remoteClientCertificates)
+            } ?? remoteClientCertificates
+            if mergedClientCertificates != localClientCertificates,
+               (!mergedClientCertificates.certificates.isEmpty
+                    || !mergedClientCertificates.associations.isEmpty) {
+                localClientCertificates = mergedClientCertificates
+                receivedClientCertificates.send(mergedClientCertificates)
+            }
+
+            let remoteBookmarkState = SyncedBookmarks(
+                folders: remoteBookmarkFolders,
+                bookmarks: remoteBookmarks
+            )
+            let mergedBookmarks = localBookmarks.map { $0.merging(remoteBookmarkState) }
+                ?? remoteBookmarkState
+            if mergedBookmarks != localBookmarks,
+               (!mergedBookmarks.folders.isEmpty || !mergedBookmarks.bookmarks.isEmpty) {
+                localBookmarks = mergedBookmarks
+                receivedBookmarks.send(mergedBookmarks)
+            }
+
+            let remoteTrust = SyncedServerTrust(decisions: remoteTrustDecisions)
+            let mergedTrust = localServerTrust.map { $0.merging(remoteTrust) } ?? remoteTrust
+            if mergedTrust != localServerTrust, !mergedTrust.decisions.isEmpty {
+                localServerTrust = mergedTrust
+                receivedServerTrust.send(mergedTrust)
             }
 
             remoteTabDevices = devices.visibleCloudTabDevices(excluding: localDeviceID)
@@ -198,30 +296,69 @@ final class ICloudSyncStore: ObservableObject {
                 recordsToSave.append(try makeRecord(
                     type: "MTPreferences",
                     id: preferencesRecordID,
-                    value: localPreferences
+                    value: localPreferences,
+                    existing: remoteRecordsByID[preferencesRecordID]
                 ))
             }
-            if let localClientCertificates,
-               remoteClientCertificates == nil
-                    || localClientCertificates.shouldReplace(remoteClientCertificates) {
-                recordsToSave.append(try makeRecord(
-                    type: "MTClientCertificates",
-                    id: clientCertificatesRecordID,
-                    value: localClientCertificates
-                ))
+            if let localClientCertificates {
+                recordsToSave += try recordsNeedingUpload(
+                    local: localClientCertificates.certificates,
+                    remote: remoteCertificateRecords,
+                    type: "MTClientCertificateDescriptor",
+                    prefix: "client-certificate",
+                    cloudRecords: remoteRecordsByID
+                )
+                recordsToSave += try recordsNeedingUpload(
+                    local: localClientCertificates.associations,
+                    remote: remoteAssociationRecords,
+                    type: "MTClientCertificateAssociation",
+                    prefix: "client-certificate-association",
+                    cloudRecords: remoteRecordsByID
+                )
+            }
+            if let localBookmarks {
+                recordsToSave += try recordsNeedingUpload(
+                    local: localBookmarks.folders,
+                    remote: remoteBookmarkFolders,
+                    type: "MTBookmarkFolder",
+                    prefix: "bookmark-folder",
+                    cloudRecords: remoteRecordsByID
+                )
+                recordsToSave += try recordsNeedingUpload(
+                    local: localBookmarks.bookmarks,
+                    remote: remoteBookmarks,
+                    type: "MTBookmark",
+                    prefix: "bookmark",
+                    cloudRecords: remoteRecordsByID
+                )
+            }
+            if let localServerTrust {
+                let remoteByID = Dictionary(uniqueKeysWithValues: remoteTrustDecisions.map { ($0.id, $0) })
+                for decision in localServerTrust.decisions
+                where remoteByID[decision.id]?.modifiedAt ?? .distantPast < decision.modifiedAt {
+                    recordsToSave.append(try makeRecord(
+                        type: "MTServerTrust",
+                        id: recordID(prefix: "server-trust", stableID: decision.id),
+                        value: decision,
+                        existing: remoteRecordsByID[
+                            recordID(prefix: "server-trust", stableID: decision.id)
+                        ]
+                    ))
+                }
             }
             if let localTabs {
                 recordsToSave.append(try makeRecord(
                     type: "MTDeviceTabs",
                     id: tabsRecordID,
-                    value: localTabs
+                    value: localTabs,
+                    existing: remoteRecordsByID[tabsRecordID]
                 ))
             }
             if !recordsToSave.isEmpty {
                 let result = try await database.modifyRecords(
                     saving: recordsToSave,
                     deleting: [],
-                    savePolicy: .allKeys,
+                    savePolicy: .ifServerRecordUnchanged,
                     atomically: false
                 )
                 for saveResult in result.saveResults.values {
@@ -230,6 +367,12 @@ final class ICloudSyncStore: ObservableObject {
             }
             status = .upToDate(Date())
         } catch {
+            if Self.isConflict(error) {
+                // Refetch and merge the winning server value instead of allowing a
+                // stale device to overwrite it. requestSync() observes this after the
+                // current task has unwound.
+                pendingSync = true
+            }
             status = .failed(Self.description(for: error))
         }
     }
@@ -258,11 +401,41 @@ final class ICloudSyncStore: ObservableObject {
     private func makeRecord<Value: Encodable>(
         type: CKRecord.RecordType,
         id: CKRecord.ID,
-        value: Value
+        value: Value,
+        existing: CKRecord? = nil
     ) throws -> CKRecord {
-        let record = CKRecord(recordType: type, recordID: id)
+        let record = existing ?? CKRecord(recordType: type, recordID: id)
         record.encryptedValues["payload"] = try encoder.encode(value) as CKRecordValue
         return record
+    }
+
+    private func recordsNeedingUpload<Record>(
+        local: [Record],
+        remote: [Record],
+        type: CKRecord.RecordType,
+        prefix: String,
+        cloudRecords: [CKRecord.ID: CKRecord]
+    ) throws -> [CKRecord]
+    where Record: Encodable & Identifiable & CloudModifiedRecord, Record.ID == UUID {
+        let remoteByID = Dictionary(uniqueKeysWithValues: remote.map { ($0.id, $0) })
+        return try local.compactMap { record in
+            guard remoteByID[record.id]?.cloudModifiedAt ?? .distantPast
+                < record.cloudModifiedAt else {
+                return nil
+            }
+            let id = recordID(prefix: prefix, stableID: record.id.uuidString)
+            return try makeRecord(
+                type: type,
+                id: id,
+                value: record,
+                existing: cloudRecords[id]
+            )
+        }
+    }
+
+    private func recordID(prefix: String, stableID: String) -> CKRecord.ID {
+        let digest = SHA256.hash(data: Data(stableID.utf8)).map { String(format: "%02x", $0) }.joined()
+        return CKRecord.ID(recordName: "\(prefix)-\(digest)", zoneID: zoneID)
     }
 
     private func persistCachedTabs(_ devices: [CloudTabDeviceSnapshot]) {
@@ -306,5 +479,13 @@ final class ICloudSyncStore: ObservableObject {
             }
         }
         return error.localizedDescription
+    }
+
+    private static func isConflict(_ error: Error) -> Bool {
+        let cloudError = error as? CKError
+        if cloudError?.code == .serverRecordChanged { return true }
+        guard cloudError?.code == .partialFailure,
+              let partial = cloudError?.partialErrorsByItemID else { return false }
+        return partial.values.contains { ($0 as? CKError)?.code == .serverRecordChanged }
     }
 }

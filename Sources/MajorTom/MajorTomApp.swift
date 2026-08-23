@@ -23,6 +23,12 @@ struct MajorTomApp: App {
     @ObservedObject private var bookmarks = BookmarksModel.shared
     @ObservedObject private var settings = BrowserSettingsStore.shared
 
+    init() {
+        // Starts conflict-safe synchronization of user-established TOFU pins. The actor
+        // holding the local trust database remains the transport's immediate authority.
+        _ = TrustedIdentityCloudCoordinator.shared
+    }
+
     var body: some Scene {
         WindowGroup(for: BrowserWindowDestination.self) { destination in
             NativeFoundationView(

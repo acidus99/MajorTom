@@ -31,6 +31,15 @@ public actor BookmarkStore {
         return current
     }
 
+    /// Replaces the local cache after CloudKit records have been merged. The local file
+    /// remains complete and immediately usable while offline.
+    @discardableResult
+    public func replace(with collection: BookmarkCollection) throws -> BookmarkCollection {
+        current = collection
+        try persist()
+        return current
+    }
+
     private func persist() throws {
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),

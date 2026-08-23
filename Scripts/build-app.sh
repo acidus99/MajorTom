@@ -1,6 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
+local_config="$(cd "$(dirname "$0")" && pwd)/build-local.env"
+if [[ -f "$local_config" ]]; then
+    # Machine-specific signing identity and provisioning-profile path. This file is
+    # ignored by Git because neither value belongs in a shared build configuration.
+    source "$local_config"
+fi
+
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 configuration="${1:-debug}"
 
@@ -22,8 +29,9 @@ cd "$project_root"
 # be reached through different paths when it is shared over SMB, so sharing one
 # SwiftPM scratch directory causes otherwise valid cached modules to fail with
 # "compiled with module cache path ... but the path is currently ...". Keep a
-# separate scratch directory for each absolute checkout path while retaining the
-# finished app at the conventional .build/Major Tom.app location.
+# separate scratch directory for each absolute checkout path. SwiftPM's compiler
+# artifacts remain in its hidden .build directory, while the finished application
+# is packaged in the visible Build directory for convenient use from Finder.
 scratch_key="$(printf '%s' "$project_root" | shasum -a 256 | cut -c1-12)"
 scratch_path="$project_root/.build/swiftpm-$scratch_key"
 
@@ -39,11 +47,12 @@ if [[ "${MAJOR_TOM_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
 fi
 swift "${swift_arguments[@]}"
 
-app="$project_root/.build/Major Tom.app"
+app="$project_root/Build/Major Tom.app"
+legacy_app="$project_root/.build/Major Tom.app"
 contents="$app/Contents"
 executable="$scratch_path/$swift_configuration/MajorTom"
 
-rm -rf "$app"
+rm -rf "$app" "$legacy_app"
 mkdir -p "$contents/MacOS" "$contents/Resources"
 cp "$executable" "$contents/MacOS/MajorTom"
 cp "$project_root/Resources/Info.plist" "$contents/Info.plist"
@@ -89,6 +98,17 @@ if [[ "$signing_identity" == "-" ]]; then
     codesign --force --sign - "$app"
     echo "Note: iCloud sync is unavailable in this ad-hoc signed build." >&2
 else
+    provisioning_profile="${MAJOR_TOM_PROVISIONING_PROFILE:-}"
+    if [[ -n "$provisioning_profile" ]]; then
+        if [[ ! -f "$provisioning_profile" ]]; then
+            echo "Provisioning profile not found: $provisioning_profile" >&2
+            exit 2
+        fi
+        cp "$provisioning_profile" "$contents/embedded.provisionprofile"
+    else
+        echo "Note: CloudKit requires a provisioning profile authorizing iCloud.dev.gemi.major-tom." >&2
+        echo "Set MAJOR_TOM_PROVISIONING_PROFILE if the signing workflow does not embed one elsewhere." >&2
+    fi
     codesign --force --sign "$signing_identity" \
         --entitlements "$project_root/Resources/MajorTom.entitlements" "$app"
 fi

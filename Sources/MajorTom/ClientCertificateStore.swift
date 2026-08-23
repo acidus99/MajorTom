@@ -25,7 +25,10 @@ final class ClientCertificateStore: ObservableObject {
     private let defaults: UserDefaults
     private let keychain: ClientCertificateKeychain
     private let storageKey = "client-certificates-v1"
-    private var modifiedAt: Date = .distantPast
+    private let syncStorageKey = "client-certificate-sync-state-v2"
+    private let localStorageFlagsKey = "client-certificate-local-storage-v1"
+    private var syncState = ClientCertificateSyncState()
+    private var localSynchronizationFlags: [UUID: Bool] = [:]
     private var isApplyingRemote = false
     private var cloudObserver: AnyCancellable?
     private var uploadTask: Task<Void, Never>?
@@ -39,20 +42,36 @@ final class ClientCertificateStore: ObservableObject {
     ) {
         self.defaults = defaults
         self.keychain = keychain
-        let stored: SyncedClientCertificates?
-        if let data = defaults.data(forKey: storageKey),
+        localSynchronizationFlags = (defaults.dictionary(forKey: localStorageFlagsKey) ?? [:])
+            .reduce(into: [:]) { result, entry in
+                if let id = UUID(uuidString: entry.key), let value = entry.value as? Bool {
+                    result[id] = value
+                }
+            }
+        if let data = defaults.data(forKey: syncStorageKey),
+           let state = try? JSONDecoder().decode(ClientCertificateSyncState.self, from: data) {
+            syncState = state
+            certificates = state.activeCertificates(preservingLocalStorageFrom: [])
+            associations = state.activeAssociations
+        } else if let data = defaults.data(forKey: storageKey),
            let snapshot = try? JSONDecoder().decode(SyncedClientCertificates.self, from: data) {
-            stored = snapshot
+            syncState = ClientCertificateSyncState(legacy: snapshot)
             certificates = snapshot.certificates
             associations = snapshot.associations
-            modifiedAt = snapshot.modifiedAt
-        } else {
-            stored = nil
+            for descriptor in snapshot.certificates {
+                localSynchronizationFlags[descriptor.id] = descriptor.synchronizesWithICloud
+            }
         }
-        cloudObserver = ICloudSyncStore.shared.receivedClientCertificates.sink { [weak self] snapshot in
-            self?.apply(snapshot)
+        applyLocalStorageFlags()
+        cloudObserver = ICloudSyncStore.shared.receivedClientCertificates.sink { [weak self] state in
+            self?.apply(state)
         }
-        ICloudSyncStore.shared.configure(clientCertificates: stored)
+        persist(syncState)
+        ICloudSyncStore.shared.configure(
+            clientCertificates: syncState.certificates.isEmpty && syncState.associations.isEmpty
+                ? nil
+                : syncState
+        )
         refreshAvailability()
     }
 
@@ -83,6 +102,7 @@ final class ClientCertificateStore: ObservableObject {
             try keychain.create(request)
         }.value
         certificates.append(descriptor)
+        localSynchronizationFlags[descriptor.id] = descriptor.synchronizesWithICloud
         availability[descriptor.id] = true
         signingValidated.insert(descriptor.id)
         changed()
@@ -110,6 +130,7 @@ final class ClientCertificateStore: ObservableObject {
             if let index = certificates.firstIndex(where: { $0.id == existing.id }) {
                 certificates[index] = descriptor
             }
+            localSynchronizationFlags[descriptor.id] = descriptor.synchronizesWithICloud
             identityCache.removeValue(forKey: existing.id)
             availability[existing.id] = true
             signingValidated.insert(existing.id)
@@ -121,6 +142,7 @@ final class ClientCertificateStore: ObservableObject {
             try keychain.importIdentity(imported)
         }.value
         certificates.append(descriptor)
+        localSynchronizationFlags[descriptor.id] = descriptor.synchronizesWithICloud
         availability[descriptor.id] = true
         signingValidated.insert(descriptor.id)
         changed()
@@ -135,6 +157,7 @@ final class ClientCertificateStore: ObservableObject {
         certificates.removeAll { $0.id == descriptor.id }
         associations.removeAll { $0.certificateID == descriptor.id }
         availability.removeValue(forKey: descriptor.id)
+        localSynchronizationFlags.removeValue(forKey: descriptor.id)
         identityCache.removeValue(forKey: descriptor.id)
         signingValidated.remove(descriptor.id)
         changed()
@@ -272,46 +295,64 @@ final class ClientCertificateStore: ObservableObject {
 
     private func changed() {
         guard !isApplyingRemote else { return }
-        modifiedAt = Date()
-        let snapshot = currentSnapshot
-        persist(snapshot)
-        scheduleUpload(snapshot)
-    }
-
-    private var currentSnapshot: SyncedClientCertificates {
-        SyncedClientCertificates(
+        syncState = syncState.reconciled(
             certificates: certificates,
             associations: associations,
-            modifiedAt: modifiedAt
+            at: Date()
         )
+        persist(syncState)
+        scheduleUpload(syncState)
     }
 
-    private func apply(_ snapshot: SyncedClientCertificates) {
-        guard snapshot.shouldReplace(currentSnapshot) else { return }
+    private func apply(_ incoming: ClientCertificateSyncState) {
+        let merged = syncState.merging(incoming)
+        guard merged != syncState else { return }
         uploadTask?.cancel()
         isApplyingRemote = true
-        certificates = snapshot.certificates
+        let activeIDs = Set(merged.certificates.filter { $0.deletedAt == nil }.map(\.id))
+        let removedIDs = Set(certificates.map(\.id)).subtracting(activeIDs)
+        for id in removedIDs {
+            // A descriptor tombstone represents deletion of the identity, not merely
+            // hiding it from this catalogue. Remove any local/synchronizable Keychain
+            // material too; a missing item is harmless and needs no user-facing error.
+            try? keychain.delete(id: id)
+            localSynchronizationFlags.removeValue(forKey: id)
+        }
+        certificates = merged.activeCertificates(preservingLocalStorageFrom: certificates)
+        applyLocalStorageFlags()
         identityCache = identityCache.filter { id, _ in
-            snapshot.certificates.contains { $0.id == id }
+            certificates.contains { $0.id == id }
         }
         signingValidated = signingValidated.filter { id in
-            snapshot.certificates.contains { $0.id == id }
+            certificates.contains { $0.id == id }
         }
-        associations = snapshot.associations.filter { association in
-            snapshot.certificates.contains { $0.id == association.certificateID }
-        }
-        modifiedAt = snapshot.modifiedAt
+        associations = merged.activeAssociations
+        syncState = merged
         isApplyingRemote = false
-        persist(currentSnapshot)
+        persist(syncState)
         refreshAvailability()
     }
 
-    private func persist(_ snapshot: SyncedClientCertificates) {
-        guard let data = try? JSONEncoder().encode(snapshot) else { return }
-        defaults.set(data, forKey: storageKey)
+    private func persist(_ state: ClientCertificateSyncState) {
+        guard let data = try? JSONEncoder().encode(state) else { return }
+        defaults.set(data, forKey: syncStorageKey)
+        defaults.set(
+            Dictionary(uniqueKeysWithValues: localSynchronizationFlags.map {
+                ($0.key.uuidString, $0.value)
+            }),
+            forKey: localStorageFlagsKey
+        )
     }
 
-    private func scheduleUpload(_ snapshot: SyncedClientCertificates) {
+    private func applyLocalStorageFlags() {
+        for index in certificates.indices {
+            if let value = localSynchronizationFlags[certificates[index].id] {
+                certificates[index].synchronizesWithICloud = value
+            }
+        }
+    }
+
+    private func scheduleUpload(_ snapshot: ClientCertificateSyncState) {
         uploadTask?.cancel()
         uploadTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(500))

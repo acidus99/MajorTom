@@ -16,6 +16,10 @@ final class BookmarksModel: ObservableObject {
     @Published private(set) var favicons: [CapsuleEndpoint: String] = [:]
 
     private let store: BookmarkStore?
+    private let defaults = UserDefaults.standard
+    private let syncStorageKey = "bookmarks-cloud-metadata-v1"
+    private var syncState: SyncedBookmarks?
+    private var cloudObserver: AnyCancellable?
 
     init() {
         if let root = FileManager.default.urls(
@@ -27,6 +31,9 @@ final class BookmarksModel: ObservableObject {
                 .appendingPathComponent("bookmarks.json"))
         } else {
             store = nil
+        }
+        cloudObserver = ICloudSyncStore.shared.receivedBookmarks.sink { [weak self] state in
+            Task { await self?.applyCloudState(state) }
         }
         Task { [weak self] in await self?.reload() }
     }
@@ -91,7 +98,16 @@ final class BookmarksModel: ObservableObject {
 
     private func reload() async {
         guard let store else { return }
-        collection = await store.collection()
+        let localCollection = await store.collection()
+        collection = localCollection
+        if let data = defaults.data(forKey: syncStorageKey),
+           let stored = try? JSONDecoder().decode(SyncedBookmarks.self, from: data) {
+            syncState = stored.reconciled(with: localCollection, at: Date())
+        } else {
+            syncState = SyncedBookmarks(collection: localCollection, modifiedAt: Date())
+        }
+        persistSyncState()
+        ICloudSyncStore.shared.configure(bookmarks: syncState)
     }
 
     /// Every change goes through the store, which applies it and returns the result, so no
@@ -104,6 +120,32 @@ final class BookmarksModel: ObservableObject {
         Task { [weak self] in
             guard let updated = try? await store.update(change) else { return }
             self?.collection = updated
+            guard let self else { return }
+            let previous = self.syncState
+                ?? SyncedBookmarks(collection: updated, modifiedAt: .distantPast)
+            let next = previous.reconciled(with: updated, at: Date())
+            self.syncState = next
+            self.persistSyncState()
+            ICloudSyncStore.shared.updateBookmarks(next)
         }
+    }
+
+    private func applyCloudState(_ incoming: SyncedBookmarks) async {
+        let merged = syncState.map { $0.merging(incoming) } ?? incoming
+        let mergedCollection = merged.collection
+        if let store {
+            _ = try? await store.replace(with: mergedCollection)
+        }
+        syncState = merged.reconciled(with: mergedCollection, at: Date())
+        collection = mergedCollection
+        persistSyncState()
+        if syncState != merged, let syncState {
+            ICloudSyncStore.shared.updateBookmarks(syncState)
+        }
+    }
+
+    private func persistSyncState() {
+        guard let syncState, let data = try? JSONEncoder().encode(syncState) else { return }
+        defaults.set(data, forKey: syncStorageKey)
     }
 }

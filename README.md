@@ -23,6 +23,8 @@ The product requirements are in [`docs/design/major-tom-specification.md`](docs/
 - Application/content themes, inline formatting controls, and bounded same-capsule image loading.
 - Gemini proxy for web links, idle timeout, response-size limits, find, native commands, and browsing-data controls.
 - Bookmarks with folders, a Favourites bar, and a manager at `about:bookmarks`.
+- Private CloudKit synchronization for bookmarks, reading preferences, certificate
+  approvals, conflict-safe TOFU pins, and privacy-limited open-tab snapshots.
 - Self-signed Gemini client certificates in Keychain, scoped capsule/path approvals,
   6x authentication prompts, and a manager at `about:client-certs`.
 - Capsule favicons per the favicon RFC, cached for a week and never prefetched.
@@ -52,8 +54,23 @@ Or build an ad-hoc signed development application bundle:
 
 ```bash
 Scripts/build-app.sh
-open ".build/Major Tom.app"
+open "Build/Major Tom.app"
 ```
+
+An ad-hoc build deliberately has no iCloud entitlements. To exercise CloudKit and iCloud
+Keychain, sign with the stable Apple Development identity and provisioning profile that
+authorize the `iCloud.dev.gemi.major-tom` container:
+
+```bash
+MAJOR_TOM_CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
+MAJOR_TOM_PROVISIONING_PROFILE="/absolute/path/to/Major Tom Development.provisionprofile" \
+Scripts/build-app.sh
+```
+
+The development container creates Major Tom's private custom zone and record types on
+first use. Before distributing a production build, deploy that development schema to the
+production environment in CloudKit Console. All synchronized user payloads are stored in
+encrypted record values.
 
 The restricted Codex environment needs its Swift caches redirected to a writable location; normal local Terminal and Xcode use do not.
 

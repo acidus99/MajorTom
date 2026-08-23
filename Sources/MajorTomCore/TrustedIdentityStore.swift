@@ -3,6 +3,7 @@ import Foundation
 public actor TrustedIdentityStore {
     private let fileURL: URL
     private var records: [CapsuleEndpoint: TrustedServerIdentity]
+    private var changeHandler: (@Sendable ([TrustedServerIdentity]) -> Void)?
 
     public init(fileURL: URL) throws {
         self.fileURL = fileURL
@@ -25,13 +26,22 @@ public actor TrustedIdentityStore {
         }
     }
 
+    public func setChangeHandler(
+        _ handler: (@Sendable ([TrustedServerIdentity]) -> Void)?
+    ) {
+        changeHandler = handler
+        handler?(sortedIdentities())
+    }
+
     public func trust(
         _ presented: PresentedServerIdentity,
         source: TrustedServerIdentity.Source,
         at date: Date = Date()
     ) throws {
+        let decisionChanged: Bool
         if var existing = records[presented.endpoint],
            existing.publicKeySHA256.caseInsensitiveCompare(presented.publicKeySHA256) == .orderedSame {
+            decisionChanged = false
             existing.lastSeenAt = date
             existing.timesSeen += 1
             // Refreshed on every sighting, but only when a certificate was actually
@@ -46,6 +56,7 @@ public actor TrustedIdentityStore {
             }
             records[presented.endpoint] = existing
         } else {
+            decisionChanged = true
             records[presented.endpoint] = TrustedServerIdentity(
                 endpoint: presented.endpoint,
                 publicKeySHA256: presented.publicKeySHA256,
@@ -58,10 +69,41 @@ public actor TrustedIdentityStore {
             )
         }
         try persist()
+        if decisionChanged { changeHandler?(sortedIdentities()) }
     }
 
     public func removeTrust(for endpoint: CapsuleEndpoint) throws {
         records.removeValue(forKey: endpoint)
+        try persist()
+        changeHandler?(sortedIdentities())
+    }
+
+    /// Applies unambiguous user trust decisions received from CloudKit. Seed policy and
+    /// locally observed certificate details remain local. Callers must exclude endpoints
+    /// with more than one active fingerprint so a conflict can never become silent trust.
+    public func applySyncedUserTrust(_ decisions: [SyncedServerTrustDecision]) throws {
+        var updated = records.filter { $0.value.source == .seed }
+        for decision in decisions where decision.deletedAt == nil {
+            // A bundled/local seed is machine policy and remains authoritative over a
+            // cloud decision. A mismatch will continue through the normal warning flow.
+            guard updated[decision.endpoint]?.source != .seed else { continue }
+            if let existing = records[decision.endpoint],
+               existing.publicKeySHA256.caseInsensitiveCompare(
+                    decision.publicKeySHA256
+               ) == .orderedSame {
+                updated[decision.endpoint] = existing
+            } else {
+                updated[decision.endpoint] = TrustedServerIdentity(
+                    endpoint: decision.endpoint,
+                    publicKeySHA256: decision.publicKeySHA256,
+                    source: .user,
+                    firstTrustedAt: decision.firstTrustedAt,
+                    lastSeenAt: decision.firstTrustedAt,
+                    timesSeen: 0
+                )
+            }
+        }
+        records = updated
         try persist()
     }
 
@@ -70,8 +112,14 @@ public actor TrustedIdentityStore {
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        let data = try JSONEncoder.majorTom.encode(allIdentities())
+        let data = try JSONEncoder.majorTom.encode(sortedIdentities())
         try data.write(to: fileURL, options: [.atomic])
+    }
+
+    private func sortedIdentities() -> [TrustedServerIdentity] {
+        records.values.sorted {
+            ($0.endpoint.host, $0.endpoint.port) < ($1.endpoint.host, $1.endpoint.port)
+        }
     }
 }
 

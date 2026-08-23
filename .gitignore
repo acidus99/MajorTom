@@ -1,5 +1,8 @@
 .DS_Store
 .build/
+Build/
 .swiftpm/
 DerivedData/
 xcuserdata/
+/Scripts/build-local.env
+/LocalSigning/

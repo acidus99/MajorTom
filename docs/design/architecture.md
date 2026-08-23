@@ -63,7 +63,9 @@ The renderer boundary is narrow enough to permit a TextKit implementation if per
 
 ### 2.8 Persistence
 
-Persistence stores settings, trust records, seeds, cached responses, browsing history, and 1.0 session restoration through repositories expressed in domain types.
+Persistence stores settings, trust records, seeds, cached responses, browsing history, bookmarks, client-certificate metadata, and 1.0 session restoration through repositories expressed in domain types. Local repositories remain authoritative while offline.
+
+A private CloudKit custom zone mirrors durable user intent: bookmarks, device-independent reading preferences, client-certificate descriptors and activation rules, user-approved TOFU pins, and privacy-limited open-tab snapshots. Independently editable collections use per-item records with modification dates and tombstones. Server-key conflicts fail closed instead of using last-write-wins. Network configuration, application chrome, window/session state, history, caches, observations, and seed policy remain local. Client private keys and certificates use iCloud Keychain exclusively.
 
 Database records never contain live views, WebKit objects, networking tasks, or framework-specific attributed strings. Schema migrations and explicit completeness metadata are required for durable data.
 

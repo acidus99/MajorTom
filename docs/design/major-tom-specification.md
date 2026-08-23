@@ -408,6 +408,8 @@ Malformed responses, unsupported protocol behavior, TLS failures, and local conn
 
 Major Tom uses trust on first use (TOFU) for Gemini server identity. Trust is associated with a capsule host and port and is persisted for later connections.
 
+User-approved public-key pins are mirrored through the user's private CloudKit database. Certificate copies, last-seen observations, counters, expiration caches, and seed-file policy remain local. When independent devices have approved different keys for one endpoint, synchronization retains the conflict and Major Tom keeps the current Mac's decision; it never resolves a trust conflict by last-write-wins replacement. Removing trust or explicitly approving a newly presented key resolves the decision and synchronizes the corresponding tombstones.
+
 The trusted identity is the SHA-256 fingerprint of the certificate's Subject Public Key Info (SPKI). It represents the capsule's public key rather than the complete certificate.
 
 A newly issued certificate using the already trusted public key is not an identity change. A certificate containing a different public key is an identity change, regardless of its subject, issuer, signature chain, or presence in a subsequently updated seed list.
@@ -603,6 +605,16 @@ Initial configurable values include:
 - Trusted capsule identities, with details and a Remove Trust action.
 
 Removing trust causes the next connection to that host and port to use the applicable seed or first-use workflow. Settings changes that affect visible content update open documents without requiring another Gemini request.
+
+### 23.1 Local and synchronized state
+
+Major Tom remains fully functional offline. Local stores are the immediate source of truth and CloudKit is a synchronization layer, not a launch dependency. The private CloudKit zone uses encrypted values for user data.
+
+Bookmarks and folders, homepage and search choices, document theme and width, rendering and image-loading preferences, favicon visibility, public client-certificate descriptors and capsule/path approvals, user-established server-key pins, and the title and URL of each open tab are synchronized. Bookmarks, certificate descriptors, activation rules, and server-key decisions use stable per-item records and deletion tombstones so an offline Mac cannot resurrect removed data.
+
+Application appearance, Favorites-bar visibility, Gemini proxy configuration, window and file-panel state, browsing history, complete navigation/session restoration, cached response bodies, favicon cache entries, seed identities, input drafts, and transient navigation state remain local. Open-tab synchronization never includes back/forward history, page bodies, scroll state, response metadata, or the client identity used by a response.
+
+Client-certificate private keys and certificates synchronize only through iCloud Keychain and are never stored in CloudKit. Whether an identity is currently available is evaluated separately on each Mac.
 
 ## 24. Networking Requirements
 

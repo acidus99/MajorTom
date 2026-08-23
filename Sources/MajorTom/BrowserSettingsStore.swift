@@ -15,12 +15,14 @@ final class BrowserSettingsStore: ObservableObject {
     @Published var preferences: BrowserPreferences {
         didSet {
             let changeCameFromICloud = isApplyingRemotePreferences
-            if !changeCameFromICloud {
+            let synchronizedValuesChanged = SyncedBrowserPreferenceValues(preferences: oldValue)
+                != SyncedBrowserPreferenceValues(preferences: preferences)
+            if !changeCameFromICloud, synchronizedValuesChanged {
                 modifiedAt = Date()
             }
             persist()
             preferencesDidChange.send(preferences)
-            if !changeCameFromICloud {
+            if !changeCameFromICloud, synchronizedValuesChanged {
                 scheduleICloudUpload()
             }
         }
@@ -78,7 +80,9 @@ final class BrowserSettingsStore: ObservableObject {
         uploadTask?.cancel()
         modifiedAt = snapshot.modifiedAt
         isApplyingRemotePreferences = true
-        preferences = snapshot.preferences
+        // Proxy, application appearance, and Favorites-bar visibility belong to this
+        // Mac. Only overlay the durable reading and navigation preferences from iCloud.
+        preferences = snapshot.applying(to: preferences)
         isApplyingRemotePreferences = false
     }
 
