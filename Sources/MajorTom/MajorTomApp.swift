@@ -1371,11 +1371,10 @@ private struct BrowserTabView: View {
                             browser.hasPresentedInitialDocument
                                 && !browser.isRestoringHistoryScroll ? 1 : 0
                         )
-                        // Move WebKit and its native Find bar below the floating chrome,
-                        // but leave the content-theme background in place underneath the
-                        // title bar and tabs so Liquid Glass continues sampling it.
-                        .padding(.top, showsFind ? chromeHeight : 0)
-                        .animation(.easeOut(duration: 0.15), value: showsFind)
+                        // Keep WebKit's native NSView frame below the chrome. Drawing it
+                        // underneath a transparent SwiftUI overlay lets AppKit hit-test
+                        // favorites-bar drags straight through to WKWebView.
+                        .padding(.top, chromeHeight)
                 }
                 .dropDestination(for: URL.self) { urls, _ in
                     // A dropped file becomes a file:// page, as in Safari. A dropped
@@ -1520,12 +1519,20 @@ private struct BrowserTabView: View {
                     Divider()
                     FavoritesBar(bookmarks: bookmarks) { url, inNewTab in
                         openBookmark(url, inNewTab: inNewTab)
+                    } openInNewWindow: { url in
+                        browser.openInNewWindow?(url)
                     }
+                    .frame(height: 28)
                 }
 
                 Divider()
             }
             .background(.ultraThinMaterial)
+            // WebKit deliberately extends underneath the floating chrome. Give the
+            // chrome a concrete interaction plane so AppKit cannot hit-test through
+            // transparent parts of the Favorites Bar into the web view.
+            .contentShape(Rectangle())
+            .zIndex(1)
             .padding(.top, chromeTopInset)
             .onGeometryChange(for: CGFloat.self) { proxy in
                 proxy.size.height

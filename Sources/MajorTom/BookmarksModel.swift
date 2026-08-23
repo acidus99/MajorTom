@@ -76,6 +76,10 @@ final class BookmarksModel: ObservableObject {
         mutate { $0.rename(bookmarkWith: id, to: title) }
     }
 
+    func updateAddress(bookmarkWith id: UUID, to url: URL) {
+        mutate { $0.updateAddress(bookmarkWith: id, to: url) }
+    }
+
     func move(bookmarkWith id: UUID, toFolderWith folderID: UUID) {
         mutate { $0.move(bookmarkWith: id, toFolderWith: folderID) }
     }

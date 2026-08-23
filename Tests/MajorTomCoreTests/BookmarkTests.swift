@@ -147,6 +147,19 @@ final class BookmarkCollectionTests: XCTestCase {
         XCTAssertFalse(collection.contains(url: first))
     }
 
+    func testEditingAnAddressPreservesBookmarkIdentityTitleAndPosition() {
+        var collection = BookmarkCollection()
+        let bookmark = collection.add(title: "One", url: first)
+        let secondBookmark = collection.add(title: "Two", url: second)
+        let replacement = URL(string: "gemini://example.com/revised")!
+
+        collection.updateAddress(bookmarkWith: bookmark.id, to: replacement)
+
+        XCTAssertEqual(collection.favorites.bookmarks.map(\.id), [bookmark.id, secondBookmark.id])
+        XCTAssertEqual(collection.favorites.bookmarks[0].title, "One")
+        XCTAssertEqual(collection.favorites.bookmarks[0].url, replacement)
+    }
+
     func testFavoritesCannotBeRemovedOrRenamed() {
         var collection = BookmarkCollection()
         collection.removeFolder(with: collection.favoritesID)

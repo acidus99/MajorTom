@@ -119,6 +119,18 @@ public struct BookmarkCollection: Codable, Equatable, Sendable {
         }
     }
 
+    /// Replaces a bookmark's destination without disturbing its title, identity, folder,
+    /// or position. Address validation belongs to the editing UI because this model also
+    /// stores non-Gemini URLs that Major Tom hands to other applications.
+    public mutating func updateAddress(bookmarkWith id: UUID, to url: URL) {
+        for folderIndex in folders.indices {
+            for bookmarkIndex in folders[folderIndex].bookmarks.indices
+            where folders[folderIndex].bookmarks[bookmarkIndex].id == id {
+                folders[folderIndex].bookmarks[bookmarkIndex].url = url
+            }
+        }
+    }
+
     public mutating func move(bookmarkWith id: UUID, toFolderWith folderID: UUID) {
         guard let bookmark = bookmark(with: id),
               folders.contains(where: { $0.id == folderID }) else { return }
