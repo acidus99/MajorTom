@@ -292,6 +292,7 @@ struct AddBookmarkView: View {
 struct FavoritesBar: View {
     @ObservedObject var bookmarks: BookmarksModel
     let open: (URL, Bool) -> Void
+    @State private var hoveredBookmarkID: UUID?
 
     var body: some View {
         ScrollView(.horizontal) {
@@ -308,10 +309,16 @@ struct FavoritesBar: View {
                                 .lineLimit(1)
                         }
                     }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .contentShape(Rectangle())
+                    .buttonStyle(FavoriteBarButtonStyle(
+                        isHovered: hoveredBookmarkID == bookmark.id
+                    ))
+                    .onHover { hovering in
+                        if hovering {
+                            hoveredBookmarkID = bookmark.id
+                        } else if hoveredBookmarkID == bookmark.id {
+                            hoveredBookmarkID = nil
+                        }
+                    }
                     .help(bookmark.url.absoluteString)
                     .contextMenu {
                         Button("Open in New Tab") { open(bookmark.url, true) }
@@ -327,5 +334,33 @@ struct FavoritesBar: View {
         }
         .scrollIndicators(.never)
         .onAppear { bookmarks.refreshFavicons() }
+    }
+}
+
+/// Safari uses a quiet, neutral hover lozenge for Favorites rather than the accent
+/// selection color. `Color.primary` follows the effective appearance, so its translucent
+/// fill darkens Light Mode and lightens Dark Mode while retaining the same visual weight.
+@available(macOS 26.0, *)
+private struct FavoriteBarButtonStyle: ButtonStyle {
+    let isHovered: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(backgroundOpacity(
+                        isPressed: configuration.isPressed
+                    )))
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .animation(.easeOut(duration: 0.1), value: isHovered)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+
+    private func backgroundOpacity(isPressed: Bool) -> Double {
+        if isPressed { return 0.14 }
+        return isHovered ? 0.08 : 0
     }
 }
