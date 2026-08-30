@@ -1,9 +1,28 @@
-# Major Tom Agent Guidance
+# Major Tom
 
-## Native macOS interface first
+Major Tom is a native macOS 26 Gemini browser. Native Mac quality is part of correctness.
 
-- Use public, standard macOS controls by default for common platform concepts such as certificates, identities, files, colors, fonts, sharing, printing, search, tables, source lists, alerts, and settings.
-- Before designing a custom control for a familiar macOS system concept, check the current macOS SDK and Apple developer documentation for an appropriate SwiftUI or AppKit control.
-- Prefer a native SwiftUI control when one exists. When Apple provides only an AppKit control, bridge it into SwiftUI with `NSViewRepresentable` or `NSViewControllerRepresentable` instead of recreating the system interface.
-- Keep custom UI for Major Tom-specific behavior that the platform control does not model, such as Gemini capsule/path certificate associations.
-- Depart from a public native control only when it cannot meet the product requirement, creates a material accessibility or security problem, or is unavailable for the deployment target. Document the reason in code or the design specification.
+## Source of truth
+
+- Product behavior: `docs/design/major-tom-specification.md`.
+- Engineering decisions: `docs/design/architecture.md`.
+- Update the relevant document when a change alters user-visible behavior or an architectural decision.
+
+## UI
+
+- Follow established macOS and Safari conventions unless Gemini-specific behavior requires otherwise.
+- Use public SwiftUI controls first. Bridge AppKit controls when SwiftUI has no appropriate native control.
+- Keep custom UI for Major Tom-specific concepts only.
+- Preserve accessibility, keyboard navigation, focus, selection, and system-appearance behavior.
+- Document intentional departures from native conventions.
+
+## Engineering
+
+- Keep protocol, trust, parsing, persistence, and rendering independent of SwiftUI views.
+- Preserve received source bytes; presentation enhancements must not alter source, View Source, or saved output.
+- Prefer small, focused changes with tests for Core behavior.
+
+## Verification
+
+- Run `swift test` after code changes.
+- Run `Scripts/build-app.sh` for changes affecting the app target, bundle resources, signing, or packaging.
