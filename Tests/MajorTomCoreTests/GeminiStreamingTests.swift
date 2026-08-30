@@ -137,16 +137,18 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertFalse(ContentTheme.sandDunes.usesDarkPalette(effectiveDarkAppearance: true))
     }
 
-    func testAutomaticThemePreferenceMigratesToDraculaLight() throws {
+    func testAutomaticThemePreferenceMigratesToDraculaDark() throws {
         let decoded = try JSONDecoder().decode(
             BrowserPreferences.self,
             from: Data(#"{"contentTheme":"automatic"}"#.utf8)
         )
-        XCTAssertEqual(decoded.contentTheme, .draculaLight)
+        XCTAssertEqual(decoded.contentTheme, .draculaDark)
     }
 
-    func testBrowserPreferencesDefaultToDraculaLight() {
-        XCTAssertEqual(BrowserPreferences().contentTheme, .draculaLight)
+    func testBrowserPreferencesUseMajorTomHomepageAndDraculaDarkByDefault() {
+        let preferences = BrowserPreferences()
+        XCTAssertEqual(preferences.homepage, "gemini://gemi.dev/major-tom/")
+        XCTAssertEqual(preferences.contentTheme, .draculaDark)
     }
 
     func testDraculaClassicMapsSemanticTextAndLineRoles() {

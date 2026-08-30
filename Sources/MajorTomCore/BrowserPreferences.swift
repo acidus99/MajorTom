@@ -233,7 +233,7 @@ public enum ContentTheme: String, CaseIterable, Codable, Sendable {
         let container = try decoder.singleValueContainer()
         let value = try container.decode(String.self)
         if value == "automatic" {
-            self = .draculaLight
+            self = .draculaDark
         } else if let theme = Self(rawValue: value) {
             self = theme
         } else {
@@ -354,11 +354,11 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
     public var showsFavoritesBar: Bool
 
     public init(
-        homepage: String = "gemini://gemi.dev/",
+        homepage: String = "gemini://gemi.dev/major-tom/",
         searchProvider: SearchProvider = .kennedy,
         customSearchEndpoint: String = "",
         applicationAppearance: ApplicationAppearance = .system,
-        contentTheme: ContentTheme = .draculaLight,
+        contentTheme: ContentTheme = .draculaDark,
         contentWidth: ContentWidth = .narrow,
         proxy: GeminiProxyConfiguration? = nil,
         automaticallyLoadsSameCapsuleImages: Bool = true,
