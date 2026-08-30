@@ -1,22 +1,30 @@
 #!/bin/bash
 set -euo pipefail
 
-local_config="$(cd "$(dirname "$0")" && pwd)/build-local.env"
+project_root="$(cd "$(dirname "$0")/.." && pwd)"
+local_config="$project_root/private/env/build-local.env"
+requested_signing_identity="${MAJOR_TOM_CODESIGN_IDENTITY:-}"
+requested_provisioning_profile="${MAJOR_TOM_PROVISIONING_PROFILE:-}"
 if [[ -f "$local_config" ]]; then
     # Machine-specific signing identity and provisioning-profile path. This file is
     # ignored by Git because neither value belongs in a shared build configuration.
     source "$local_config"
 fi
+# A caller can deliberately override the development defaults in private/env/build-local.env,
+# for example when the local release script switches to a Developer ID identity.
+[[ -z "$requested_signing_identity" ]] || MAJOR_TOM_CODESIGN_IDENTITY="$requested_signing_identity"
+[[ -z "$requested_provisioning_profile" ]] || MAJOR_TOM_PROVISIONING_PROFILE="$requested_provisioning_profile"
 
-project_root="$(cd "$(dirname "$0")/.." && pwd)"
 configuration="${1:-debug}"
 
 case "$configuration" in
     debug)
         swift_configuration="debug"
+        output_directory="Development"
         ;;
     release)
         swift_configuration="release"
+        output_directory="Release"
         ;;
     *)
         echo "Usage: $0 [debug|release]" >&2
@@ -47,7 +55,7 @@ if [[ "${MAJOR_TOM_DISABLE_SWIFTPM_SANDBOX:-0}" == "1" ]]; then
 fi
 swift "${swift_arguments[@]}"
 
-app="$project_root/Build/Major Tom.app"
+app="$project_root/Build/$output_directory/Major Tom.app"
 legacy_app="$project_root/.build/Major Tom.app"
 contents="$app/Contents"
 executable="$scratch_path/$swift_configuration/MajorTom"
@@ -73,15 +81,24 @@ branch="$(git -C "$project_root" branch --show-current 2>/dev/null || true)"
 
 # Commit count is monotonically increasing, which is exactly what CFBundleVersion
 # requires between builds of the same short version.
-build_number="$(git -C "$project_root" rev-list --count HEAD 2>/dev/null || true)"
+build_number="${MAJOR_TOM_BUILD_NUMBER:-}"
+if [[ -z "$build_number" ]]; then
+    build_number="$(git -C "$project_root" rev-list --count HEAD 2>/dev/null || true)"
+fi
 [[ -n "$build_number" ]] || build_number="0"
 
 # CFBundleShortVersionString must be dot-separated integers, so strip leading zeros.
-short_version="$(echo "$commit_date" | awk -F/ '{ printf "%d.%d.%d", $1, $2, $3 }')"
+short_version="${MAJOR_TOM_SHORT_VERSION:-}"
+if [[ -z "$short_version" ]]; then
+    short_version="$(echo "$commit_date" | awk -F/ '{ printf "%d.%d.%d", $1, $2, $3 }')"
+fi
 
-build_info="$commit_date - $commit_sha - $branch"
-if ! git -C "$project_root" diff --quiet HEAD 2>/dev/null; then
-    build_info="$build_info (modified)"
+build_info="${MAJOR_TOM_BUILD_INFO:-}"
+if [[ -z "$build_info" ]]; then
+    build_info="$commit_date - $commit_sha - $branch"
+    if ! git -C "$project_root" diff --quiet HEAD 2>/dev/null; then
+        build_info="$build_info (modified)"
+    fi
 fi
 
 plist="$contents/Info.plist"
@@ -91,6 +108,7 @@ plist="$contents/Info.plist"
     || /usr/libexec/PlistBuddy -c "Add :MTBuildInfo string $build_info" "$plist"
 
 signing_identity="${MAJOR_TOM_CODESIGN_IDENTITY:--}"
+entitlements_path="${MAJOR_TOM_ENTITLEMENTS_PATH:-$project_root/Entitlements/MajorTom.development.entitlements}"
 if [[ "$signing_identity" == "-" ]]; then
     # Restricted iCloud entitlements require an Apple-issued signing identity.
     # Putting them on an ad-hoc signature makes macOS kill the executable before
@@ -98,6 +116,10 @@ if [[ "$signing_identity" == "-" ]]; then
     codesign --force --sign - "$app"
     echo "Note: iCloud sync is unavailable in this ad-hoc signed build." >&2
 else
+    if [[ ! -f "$entitlements_path" ]]; then
+        echo "Entitlements file not found: $entitlements_path" >&2
+        exit 2
+    fi
     provisioning_profile="${MAJOR_TOM_PROVISIONING_PROFILE:-}"
     if [[ -n "$provisioning_profile" ]]; then
         if [[ ! -f "$provisioning_profile" ]]; then
@@ -110,7 +132,7 @@ else
         echo "Set MAJOR_TOM_PROVISIONING_PROFILE if the signing workflow does not embed one elsewhere." >&2
     fi
     codesign --force --sign "$signing_identity" \
-        --entitlements "$project_root/Resources/MajorTom.entitlements" "$app"
+        --entitlements "$entitlements_path" "$app"
 fi
 
 echo "$app"

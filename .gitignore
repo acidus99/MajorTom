@@ -4,5 +4,4 @@ Build/
 .swiftpm/
 DerivedData/
 xcuserdata/
-/Scripts/build-local.env
-/LocalSigning/
+/private/
