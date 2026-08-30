@@ -37,7 +37,7 @@ Major Tom begins presenting safe displayable content while it is still arriving.
 
 Gemtext receives a polished semantic reading presentation. Other text remains selectable and faithful to its line structure; images display directly; unsupported content explains what happened and offers appropriate user-initiated actions.
 
-Reading preferences control application appearance separately from the document theme and width. Changes to appearance-only preferences update open content without another request. Optional enhancements—such as conservative inline formatting and automatic same-capsule images—must be individually controllable, bounded, and fail without disrupting the original document or link.
+Reading preferences control application appearance separately from the document theme and width. Changes to appearance-only preferences update open content without another request. Optional enhancements—such as conservative inline formatting and automatic same-capsule images—must be individually controllable, bounded, and fail without disrupting the original document or link. Automatic same-capsule images are off by default; this default is applied once to existing installations too.
 
 View Source and Save Page As always use the original response body. Caching must preserve response metadata, completion state, and enough source to reproduce a page under changed reading preferences.
 

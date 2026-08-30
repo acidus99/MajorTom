@@ -361,7 +361,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         contentTheme: ContentTheme = .draculaDark,
         contentWidth: ContentWidth = .narrow,
         proxy: GeminiProxyConfiguration? = nil,
-        automaticallyLoadsSameCapsuleImages: Bool = true,
+        automaticallyLoadsSameCapsuleImages: Bool = false,
         automaticallyLoadsDataImages: Bool = true,
         renderingOptions: HTMLRenderingOptions = HTMLRenderingOptions(),
         showsFavicons: Bool = true,

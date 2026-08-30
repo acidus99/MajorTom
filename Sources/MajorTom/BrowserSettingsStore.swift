@@ -31,6 +31,9 @@ final class BrowserSettingsStore: ObservableObject {
     private let defaults: UserDefaults
     private let key = "browser-preferences-v1"
     private let modifiedAtKey = "browser-preferences-modified-at-v1"
+    /// Marks the one-time migration that disables automatic same-capsule images for
+    /// existing installations, including installations that previously enabled it.
+    private let sameCapsuleImageDefaultMigrationKey = "browser-preferences-same-capsule-images-disabled-v1"
     private var modifiedAt: Date
     private var isApplyingRemotePreferences = false
     private var iCloudObserver: AnyCancellable?
@@ -39,13 +42,28 @@ final class BrowserSettingsStore: ObservableObject {
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         let storedData = defaults.data(forKey: key)
+        var loadedPreferences: BrowserPreferences
+        var loadedModifiedAt: Date
         if let data = storedData,
            let decoded = try? JSONDecoder().decode(BrowserPreferences.self, from: data) {
-            preferences = decoded
-            modifiedAt = defaults.object(forKey: modifiedAtKey) as? Date ?? Date()
+            loadedPreferences = decoded
+            loadedModifiedAt = defaults.object(forKey: modifiedAtKey) as? Date ?? Date()
         } else {
-            preferences = BrowserPreferences()
-            modifiedAt = .distantPast
+            loadedPreferences = BrowserPreferences()
+            loadedModifiedAt = .distantPast
+        }
+
+        let needsSameCapsuleImageMigration = !defaults.bool(forKey: sameCapsuleImageDefaultMigrationKey)
+        if needsSameCapsuleImageMigration {
+            loadedPreferences.automaticallyLoadsSameCapsuleImages = false
+            loadedModifiedAt = Date()
+            defaults.set(true, forKey: sameCapsuleImageDefaultMigrationKey)
+        }
+        preferences = loadedPreferences
+        modifiedAt = loadedModifiedAt
+
+        if needsSameCapsuleImageMigration, storedData != nil {
+            persist()
         }
 
         iCloudObserver = ICloudSyncStore.shared.receivedPreferences.sink { [weak self] snapshot in

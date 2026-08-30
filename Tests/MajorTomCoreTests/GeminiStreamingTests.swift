@@ -149,6 +149,7 @@ final class GeminiStreamingTests: XCTestCase {
         let preferences = BrowserPreferences()
         XCTAssertEqual(preferences.homepage, "gemini://gemi.dev/major-tom/")
         XCTAssertEqual(preferences.contentTheme, .draculaDark)
+        XCTAssertFalse(preferences.automaticallyLoadsSameCapsuleImages)
     }
 
     func testDraculaClassicMapsSemanticTextAndLineRoles() {
