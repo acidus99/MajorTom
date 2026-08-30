@@ -4,7 +4,7 @@
 
 Major Tom aims to be the best client for browsing [Geminispace](https://geminiprotocol.net/) on macOS. Unapologetically a [Mac-assed Mac App](https://macassedmacapps.com), Major Tom features beautiful typography, full-color Emoji, iCloud-syncing, and all the macOS native controls and features you should expect. It feels like Safari, but for the smolweb.
 
-![Screen shot of Major Tom browser](Assets/GitHub/screenshot-1.png)
+![Screen shot of Major Tom browser](Assets/GitHub/screenshot1.png)
 
 ## Features
 
