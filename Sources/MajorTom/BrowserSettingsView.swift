@@ -55,7 +55,6 @@ struct BrowserSettingsView: View {
                 Text("Dark").tag(ApplicationAppearance.dark)
             }
             Picker("Content theme", selection: store.binding(\.contentTheme)) {
-                Text("Automatic").tag(ContentTheme.automatic)
                 Text("Dracula Light").tag(ContentTheme.draculaLight)
                 Text("Dracula Dark").tag(ContentTheme.draculaDark)
                 Text("Dracula Classic").tag(ContentTheme.draculaClassic)

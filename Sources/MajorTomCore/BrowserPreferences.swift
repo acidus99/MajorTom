@@ -68,7 +68,6 @@ public struct ContentThemePalette: Equatable, Sendable {
 }
 
 public enum ContentTheme: String, CaseIterable, Codable, Sendable {
-    case automatic
     case draculaLight
     case draculaDark
     case draculaClassic
@@ -84,7 +83,6 @@ public enum ContentTheme: String, CaseIterable, Codable, Sendable {
 
         let useDarkPalette: Bool
         switch self {
-        case .automatic: useDarkPalette = effectiveDarkAppearance
         case .draculaLight: useDarkPalette = false
         case .draculaDark: useDarkPalette = true
         case .draculaClassic, .ocean, .forest, .creamsicle, .sandDunes:
@@ -224,9 +222,31 @@ public enum ContentTheme: String, CaseIterable, Codable, Sendable {
                 emphasis: 0x6d5a00, code: 0x27624c, danger: 0xa83232,
                 selection: 0xdabf8d
             )
-        case .automatic, .draculaLight, .draculaDark:
+        case .draculaLight, .draculaDark:
             nil
         }
+    }
+
+    /// Older preferences stored an appearance-following theme. Preserve every other
+    /// preference while moving those installations to the new fixed default.
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        if value == "automatic" {
+            self = .draculaLight
+        } else if let theme = Self(rawValue: value) {
+            self = theme
+        } else {
+            throw DecodingError.dataCorruptedError(
+                in: container,
+                debugDescription: "Unknown content theme: \(value)"
+            )
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(rawValue)
     }
 }
 
@@ -338,7 +358,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         searchProvider: SearchProvider = .kennedy,
         customSearchEndpoint: String = "",
         applicationAppearance: ApplicationAppearance = .system,
-        contentTheme: ContentTheme = .automatic,
+        contentTheme: ContentTheme = .draculaLight,
         contentWidth: ContentWidth = .narrow,
         proxy: GeminiProxyConfiguration? = nil,
         automaticallyLoadsSameCapsuleImages: Bool = true,

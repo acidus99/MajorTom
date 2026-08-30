@@ -25,6 +25,8 @@ Major Tom is a multiwindow, tabbed macOS browser. Each tab independently owns it
 
 The unified address field accepts Gemini locations and searches. A submitted explicit Gemini URL navigates; probable hostnames are normalized as Gemini locations; allowed external URLs are handed to macOS; other text is sent to the selected Gemini search provider. Invalid explicit Gemini URLs must produce useful feedback rather than silently becoming searches.
 
+Document themes are independent of application appearance. Dracula Light is the default document theme.
+
 When a visited capsule provides a favicon, its full-color emoji appears on the Page Information control and the tab. Without a favicon, the Page Information control uses the standard information-in-a-circle symbol.
 
 Navigation distinguishes the page currently being read from the destination being loaded. Stop cancels the request. Back and Forward behave predictably, redirects commit only their final location, and failures are clearly browser-generated pages. Browser commands, shortcuts, menus, gestures, context menus, saving, find, zoom, and source viewing use normal Mac conventions.
