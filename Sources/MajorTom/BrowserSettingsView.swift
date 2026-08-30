@@ -43,6 +43,14 @@ struct BrowserSettingsView: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
+            Section {
+                Button("Restore Default Settings", role: .destructive) {
+                    store.restoreDefaultSettings()
+                }
+                Text("Restores browser settings only. Trusted capsule identities and client certificates are kept.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
     }

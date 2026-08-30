@@ -114,4 +114,10 @@ final class BrowserSettingsStore: ObservableObject {
             }
         )
     }
+
+    /// Restores the browser's configurable preferences without touching capsule trust
+    /// decisions or client certificates, which are stored independently.
+    func restoreDefaultSettings() {
+        preferences = BrowserPreferences()
+    }
 }
