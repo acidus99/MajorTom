@@ -1397,10 +1397,12 @@ private struct BrowserTabView: View {
                             browser.hasPresentedInitialDocument
                                 && !browser.isRestoringHistoryScroll ? 1 : 0
                         )
-                        // Keep WebKit's native NSView frame below the chrome. Drawing it
-                        // underneath a transparent SwiftUI overlay lets AppKit hit-test
-                        // favorites-bar drags straight through to WKWebView.
-                        .padding(.top, chromeHeight)
+                        // Keep the document behind the floating chrome so its colors and
+                        // imagery continue through the title, tab, toolbar, and Favorites
+                        // bars. The generated document CSS reserves reading space beneath
+                        // the chrome; only WebKit's native Find bar needs the view inset.
+                        .padding(.top, showsFind ? chromeHeight : 0)
+                        .animation(.easeOut(duration: 0.15), value: showsFind)
                 }
                 .dropDestination(for: URL.self) { urls, _ in
                     // A dropped file becomes a file:// page, as in Safari. A dropped
