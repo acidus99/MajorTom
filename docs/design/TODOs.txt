@@ -16,3 +16,29 @@ if you go to "unsupported content", and go back and forth, the content doesn't c
 
 
 redo the "error screens
+
+
+
+
+Franch for translating:
+gemini://ploum.net/2026-08-03-offpunk_manifesto.gmi
+
+-make multiple row preformatted text collapsible?
+
+- implement SQlite-based cachingIf I
+- unified history
+- export cache as WARC
+- offline mode?
+
+- subscribe to page?
+- feeds view?
+- convert ATOM/RSS to page
+- Viewing text content make it better
+- viewing non-text content
+
+- view source: on binary file show a hex editor?
+
+
+- Tree view for a capsule?
+
+

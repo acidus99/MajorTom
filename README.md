@@ -1,83 +1,39 @@
 # Major Tom
 
-This directory contains the Swift/SwiftUI implementation of Major Tom. It is being developed alongside the existing C#/Avalonia application until native feature parity and product acceptance make the legacy implementation unnecessary.
+![Major Tom, voyager of both Time and Space](Assets/GitHub/logo.png)
 
-The product requirements are in [`docs/design/major-tom-specification.md`](docs/design/major-tom-specification.md). The proposed native architecture is in [`docs/design/architecture.md`](docs/design/architecture.md).
+Major Tom aims to be the best client for browsing [Geminispace](https://geminiprotocol.net/) on macOS. Unapologetically a [Mac-assed Mac App](https://macassedmacapps.com), Major Tom features beautiful typography, full-color Emoji, iCloud-syncing, and all the macOS native controls and features you should expect. It feels like Safari, but for the smolweb.
 
-## Current implementation
+![Screen shot of Major Tom browser](Assets/GitHub/screenshot-1.png)
 
-- Native multiwindow SwiftUI application with independent tabs and durable session restoration.
-- Unified capsule-address and configurable Kennedy, TLGS, or custom search.
-- Live Gemini navigation with redirects, input prompts, cancellation, and status pages.
-- Implicit trust on first use, with persistent public-key fingerprints and warnings for later identity changes.
-- macOS 26 SwiftUI WebKit streaming renderer with Gemini-link interception and controlled resources.
-- Gemini URL normalization and request serialization.
-- Network.framework Gemini transport with TLS 1.2+, cancellation, and incremental response events.
-- Strict incremental response-header decoder.
-- Chunk-safe UTF-8 decoder and Gemtext parser.
-- Safe streaming HTML presentation with a restrictive content security policy.
-- SHA-256 Subject Public Key Info fingerprint extraction.
-- Seed, first-use, changed-key, seed-mismatch, and certificate-date trust decisions.
-- Atomic persistent trusted-identity store.
-- Per-tab history/cache/zoom, persistent browsing history, source viewing, saving, and downloads.
-- Application/content themes, inline formatting controls, and bounded same-capsule image loading.
-- Gemini proxy for web links, idle timeout, response-size limits, find, native commands, and browsing-data controls.
-- Bookmarks with folders, a Favourites bar, and a manager at `about:bookmarks`.
-- Private CloudKit synchronization for bookmarks, reading preferences, certificate
-  approvals, conflict-safe TOFU pins, and privacy-limited open-tab snapshots.
-- Self-signed Gemini client certificates in Keychain, scoped capsule/path approvals,
-  6x authentication prompts, and a manager at `about:client-certs`.
-- Capsule favicons per the favicon RFC, cached for a week and never prefetched.
-- Page Info with server trust details, client-certificate usage and revocation controls,
-  and copyable certificate and public-key fingerprints.
-- Link hints for destination and type, and image links that expand in place on click.
-- Archived captures offered through Delorean when a capsule is gone or unreachable.
-- Seeded capsule identities read from `certs.csv` in Application Support.
-- Request-budget feedback and retained drafts when answering a capsule's input prompt.
-- `view-source:` and `about:` addresses, and local files opened by drag or from Finder.
+## Features
 
-## Build and test
+### UI
+* Multiple windows, multiple tabs per window.
+* Native controls, menus, context menus, keyboard shortcuts, text selection, find dialogs, drag and drop, save panels, and other macOS conventions in the places they belong.
+* Light mode / Dark mode support for application appearance.
+* A unified address and search bar, with custom search providers for [Kennedy](gemini://kennedy.gemi.dev/), [TLGS](gemini://tlgs.one), and other Gemini search engines.
 
-From this directory:
+### Experience
+* Bookmarks with folders, a Favorites bar, and a built-in bookmark manager.
+* Private iCloud sync for bookmarks, settings, reading preferences, and trusted identities.
+* Self-signed client certificates stored in Apple's native Keychain, with iCloud syncing.
+* Suggestions from [Delorean Time Machine](gemini://kennedy.gemi.dev/archive/) when a capsule or resource is unavailable.
 
-```bash
-swift test
-```
+### Content
+* Beautiful, native typography with full Unicode and color-emoji support 🎨🌮!
+* Content Themes which styles capsule content.
+* Inline rendering of images.
+* Optional [Favicons](gemini://mozz.us/files/rfc_gemini_favicon.gmi).
+* Optional rendering of inline styles like **\*\*bold\*\***, *\*italics\**, and ``monospace`` while keeping surrounding characters. 
+* Stream support: pages start to render while content is still arriving, allowing for streaming applications.
 
-Run the development executable directly:
+## Getting Major Tom
 
-```bash
-swift run MajorTom
-```
+Soon to be available via Apple's Mac App Store!
 
-Or build an ad-hoc signed development application bundle:
+Release available via GitHub [GitHub Releases page](https://github.com/acidus99/MajorTom/releases).
 
-```bash
-Scripts/build-app.sh
-open "Build/Major Tom.app"
-```
+## Help Wanted
 
-An ad-hoc build deliberately has no iCloud entitlements. To exercise CloudKit and iCloud
-Keychain, sign with the stable Apple Development identity and provisioning profile that
-authorize the `iCloud.dev.gemi.major-tom` container:
-
-```bash
-MAJOR_TOM_CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" \
-MAJOR_TOM_PROVISIONING_PROFILE="/absolute/path/to/Major Tom Development.provisionprofile" \
-Scripts/build-app.sh
-```
-
-The development container creates Major Tom's private custom zone and record types on
-first use. Before distributing a production build, deploy that development schema to the
-production environment in CloudKit Console. All synchronized user payloads are stored in
-encrypted record values.
-
-The restricted Codex environment needs its Swift caches redirected to a writable location; normal local Terminal and Xcode use do not.
-
-The live transport test is opt-in:
-
-```bash
-MAJOR_TOM_LIVE_TEST=1 swift test --filter GeminiTransportIntegrationTests
-```
-
-The Swift package can also be opened directly in Xcode. Major Tom currently targets macOS 26 because its renderer uses the native SwiftUI WebKit streaming APIs introduced in that release. The application-bundle script is intended for local development; Developer ID signing, notarization, and distributable packaging remain release work.
+I'm not taking code contributions/PRs. But I would appreciate users opening bugs/feature requests.
