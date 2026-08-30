@@ -65,6 +65,7 @@ mkdir -p "$contents/MacOS" "$contents/Resources"
 cp "$executable" "$contents/MacOS/MajorTom"
 cp "$project_root/Resources/Info.plist" "$contents/Info.plist"
 cp "$project_root/Resources/AppIcon.icns" "$contents/Resources/AppIcon.icns"
+cp "$project_root/Resources/funpack.dat" "$contents/Resources/funpack.dat"
 
 # --- Version stamping -------------------------------------------------------
 # Mirrors Kennedy's scheme (Server/Kennedy.Server.csproj): identify a build by the

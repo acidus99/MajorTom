@@ -256,7 +256,7 @@ private final class AboutMIDILooper {
     }
 
     private func prepare() throws {
-        guard let encodedURL = Bundle.module.url(forResource: "funpack", withExtension: "dat") else {
+        guard let encodedURL = Bundle.main.url(forResource: "funpack", withExtension: "dat") else {
             throw MIDIPlaybackError.missingResource
         }
         let encodedData = try Data(contentsOf: encodedURL)
