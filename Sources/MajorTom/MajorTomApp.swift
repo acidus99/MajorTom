@@ -2043,6 +2043,7 @@ private extension View {
 
 extension Notification.Name {
     static let majorTomAbout = Notification.Name("MajorTomAbout")
+    static let majorTomAboutWindowWillClose = Notification.Name("MajorTomAboutWindowWillClose")
     static let majorTomNewTab = Notification.Name("MajorTomNewTab")
     static let majorTomCloseTab = Notification.Name("MajorTomCloseTab")
     static let majorTomCloseWindow = Notification.Name("MajorTomCloseWindow")

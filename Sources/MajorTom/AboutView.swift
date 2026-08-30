@@ -15,6 +15,8 @@ import SwiftUI
 @MainActor
 enum AboutWindowPresenter {
     private static var window: NSWindow?
+    private static var closeObserver: (any NSObjectProtocol)?
+    private static let contentSize = NSSize(width: 420, height: 440)
 
     static func show() {
         if let window {
@@ -23,10 +25,30 @@ enum AboutWindowPresenter {
             return
         }
 
-        let created = NSWindow(contentViewController: NSHostingController(rootView: AboutView()))
+        let hostingController = NSHostingController(rootView: AboutView())
+        // This window has a deliberately fixed content size. On macOS 26, allowing
+        // NSHostingController to resize its containing NSWindow while the window is
+        // laying out can re-enter constraint updates and crash AppKit. The explicit
+        // size also matches AboutView's fixed-width presentation.
+        hostingController.sizingOptions = []
+        let created = NSWindow(
+            contentRect: NSRect(origin: .zero, size: contentSize),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        created.contentViewController = hostingController
         created.title = "About Major Tom"
-        created.styleMask = [.titled, .closable]
         applyAppearance(to: created)
+        closeObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: created,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated {
+                NotificationCenter.default.post(name: .majorTomAboutWindowWillClose, object: nil)
+            }
+        }
         // The window outlives this call; without this it is deallocated on close and the
         // next About would reach a freed object.
         created.isReleasedWhenClosed = false
@@ -109,10 +131,11 @@ struct AboutView: View {
                 .font(.callout)
                 .foregroundStyle(.secondary)
 
-            Text("Copyright \u{00A9} 2026 Major Tom\nAll rights reserved.")
+            Text("Copyright \u{00A9} 2026 Acidus\nAll rights reserved.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: true, vertical: true)
         }
         .padding(.horizontal, 32)
         .padding(.top, 26)
@@ -122,13 +145,11 @@ struct AboutView: View {
         .onReceive(settings.preferencesDidChange) { _ in
             AboutWindowPresenter.refreshAppearance()
         }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomAboutWindowWillClose)) { _ in
+            resetPresentationState()
+        }
         .onDisappear {
-            midiPlayer.stop()
-            isLogoPressed = false
-            if isIconHovered {
-                NSCursor.pop()
-                isIconHovered = false
-            }
+            resetPresentationState()
         }
         .alert(
             "MIDI Playback Failed",
@@ -150,6 +171,15 @@ struct AboutView: View {
         case .system: nil
         case .light: .light
         case .dark: .dark
+        }
+    }
+
+    private func resetPresentationState() {
+        midiPlayer.stop()
+        isLogoPressed = false
+        if isIconHovered {
+            NSCursor.pop()
+            isIconHovered = false
         }
     }
 }
