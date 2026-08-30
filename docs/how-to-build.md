@@ -72,7 +72,7 @@ The first production build stores the notary credential in the login keychain as
 Build and test a release:
 
 ```bash
-make prod VERSION=v0.1.0
+make prod VERSION=v2026.08.30
 ```
 
 The ZIP and checksum are written to `Build/Release/`. Test the unzipped app before release.
@@ -81,7 +81,15 @@ When the release is ready for review, authenticate the GitHub CLI and create a d
 
 ```bash
 gh auth login
-make release VERSION=v0.1.0
+make release VERSION=v2026.08.30
 ```
+
+For a second release on the same day, append a numeric suffix to the GitHub tag:
+
+```bash
+make release VERSION=v2026.08.30-2
+```
+
+The app continues to use `2026.8.30` as its marketing version; its monotonically increasing build number distinguishes the builds.
 
 Review the generated notes and assets in GitHub, then publish the draft manually.

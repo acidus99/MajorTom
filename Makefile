@@ -1,7 +1,7 @@
 .DEFAULT_GOAL := dev
 
-# Override when preparing a named release, for example:
-#   make release VERSION=v0.1.0
+# Override when preparing another release on the same day, for example:
+#   make release VERSION=v2026.08.30-2
 VERSION ?= v$(shell git log -1 --format=%cd --date=format:%Y.%m.%d)
 BRANCH := $(shell git branch --show-current)
 RELEASE_ARCHIVE := Build/Release/MajorTom-$(VERSION)-macos.zip
