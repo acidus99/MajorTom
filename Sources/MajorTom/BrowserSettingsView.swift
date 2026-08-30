@@ -109,7 +109,7 @@ struct BrowserSettingsView: View {
     private var qualityOfLife: some View {
         Form {
             Toggle("Show capsule favicons", isOn: store.binding(\.showsFavicons))
-            Text("A capsule may publish one emoji at /favicon.txt. Major Tom shows it beside the address and on the tab, asks for it only after you visit the capsule, and remembers the answer for a week.")
+            Text("A capsule may publish one emoji at /favicon.txt. Major Tom shows it on the Page Information button and on the tab, asks for it only after you visit the capsule, and remembers the answer for a week.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             HStack {

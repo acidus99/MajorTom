@@ -1245,17 +1245,35 @@ private struct BrowserTabButton: View {
 private struct BrowserToolbarButton: View {
     let title: String
     let systemImage: String
+    /// A capsule favicon replaces the system glyph while retaining the button's native
+    /// hit target, hover treatment, help text, and accessibility name.
+    var favicon: String?
     var isEnabled = true
     let action: () -> Void
     @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: systemImage)
+            Group {
+                if let favicon {
+                    // Emoji favicons are rendered by Apple Color Emoji, so do not apply
+                    // a tint that would turn them into a monochrome toolbar glyph.
+                    Text(favicon)
+                        .font(.system(size: 15))
+                } else {
+                    Image(systemName: systemImage)
+                }
+            }
                 .frame(width: 38, height: 30)
                 .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
-        .buttonStyle(SafariToolbarButtonStyle(isHovered: isHovered, isEnabled: isEnabled))
+        .buttonStyle(
+            SafariToolbarButtonStyle(
+                isHovered: isHovered,
+                isEnabled: isEnabled,
+                preservesFaviconColors: favicon != nil
+            )
+        )
         .disabled(!isEnabled)
         .onHover { hovering in
             isHovered = isEnabled && hovering
@@ -1272,11 +1290,19 @@ private struct BrowserToolbarButton: View {
 private struct SafariToolbarButtonStyle: ButtonStyle {
     let isHovered: Bool
     let isEnabled: Bool
+    let preservesFaviconColors: Bool
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundStyle(Color(nsColor: .labelColor))
-            .opacity(isEnabled ? 0.72 : 0.25)
+        Group {
+            if preservesFaviconColors {
+                configuration.label
+            } else {
+                configuration.label.foregroundStyle(Color(nsColor: .labelColor))
+            }
+        }
+            // Emoji favicons retain their intrinsic colors and are not dimmed into a
+            // toolbar-glyph appearance.
+            .opacity(isEnabled ? (preservesFaviconColors ? 1 : 0.72) : 0.25)
             .background {
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .fill(
@@ -1455,21 +1481,15 @@ private struct BrowserTabView: View {
                 )
 
                 // Safari puts page-level information behind a control at the leading edge
-                // of the address field; info.circle is the system's idiom for it.
+                // of the address field. A capsule favicon personalizes that control; the
+                // standard info.circle remains its fallback.
                 BrowserToolbarButton(
                     title: "Page Information",
                     systemImage: "info.circle",
+                    favicon: browser.favicon,
                     isEnabled: browser.committedURL != nil,
                     action: browser.showPageInformation
                 )
-
-                // The capsule's favicon, immediately left of the address it belongs to.
-                if let favicon = browser.favicon {
-                    Text(favicon)
-                        .font(.system(size: 15))
-                        .transition(.opacity)
-                        .accessibilityLabel("Capsule favicon \(favicon)")
-                }
 
                 TextField("Search or enter capsule address", text: $browser.locationText)
                     .textFieldStyle(.roundedBorder)
