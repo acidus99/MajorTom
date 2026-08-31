@@ -541,6 +541,8 @@ final class BrowserModel: ObservableObject {
 
     private var navigationTask: Task<Void, Never>?
     private var documentContinuation: AsyncThrowingStream<Data, any Error>.Continuation?
+    /// Rendered HTML waiting to be handed to WebKit. See `yieldToDocument`.
+    private var documentBuffer = Data()
     private var trustContinuation: CheckedContinuation<Bool, Never>?
     private var history: [URL] = []
     private var historyIndex = -1
@@ -840,6 +842,7 @@ final class BrowserModel: ObservableObject {
         slowDownTask = nil
         documentContinuation?.finish()
         documentContinuation = nil
+        documentBuffer.removeAll(keepingCapacity: false)
         activeWebDocumentURL = nil
 
         // A prompt still on screen belongs to the request being abandoned. Resuming the
@@ -1837,9 +1840,12 @@ final class BrowserModel: ObservableObject {
                         for parsedEvent in gemtextParser.receive(decoded) {
                             emit(parsedEvent, baseURL: target.url)
                         }
+                        // One write per network chunk, not one per line.
+                        flushDocument()
                     } else if mimeType.hasPrefix("text/") {
                         let decoded = utf8Decoder.decode(data)
-                        documentContinuation?.yield(Data(HTMLDocumentStreamRenderer.escape(decoded).utf8))
+                        yieldToDocument(Data(HTMLDocumentStreamRenderer.escape(decoded).utf8))
+                        flushDocument()
                     }
 
                 case .completed:
@@ -1871,8 +1877,8 @@ final class BrowserModel: ObservableObject {
                         }
                         finishCurrentDocument()
                     } else if mimeType.hasPrefix("text/") {
-                        documentContinuation?.yield(Data(HTMLDocumentStreamRenderer.escape(utf8Decoder.finish()).utf8))
-                        documentContinuation?.yield(Data("</code></pre>".utf8))
+                        yieldToDocument(Data(HTMLDocumentStreamRenderer.escape(utf8Decoder.finish()).utf8))
+                        yieldToDocument(Data("</code></pre>".utf8))
                         finishCurrentDocument()
                     } else if mimeType.hasPrefix("image/") {
                         showImagePage(data: sourceBytes, mimeType: mimeType, url: target.url, disposition: disposition)
@@ -2082,6 +2088,11 @@ final class BrowserModel: ObservableObject {
 
     private func beginDocument(at sourceURL: URL) -> AsyncThrowingStream<Data, any Error>.Continuation {
         documentContinuation?.finish()
+        // Whatever was buffered belongs to the document just abandoned. Only a caller
+        // that streams sets `documentContinuation` again; the one-shot pages that render
+        // straight into their own continuation deliberately leave it nil.
+        documentContinuation = nil
+        documentBuffer.removeAll(keepingCapacity: false)
         // Line numbering restarts with each document, and no expansion survives it.
         linkSequence = 0
         expandedInlineImages.removeAll()
@@ -2150,11 +2161,39 @@ final class BrowserModel: ObservableObject {
         isRestoringHistoryScroll = false
     }
 
+    /// Buffers rendered HTML for the document currently streaming.
+    ///
+    /// Every yield is a separate `Data` crossing the custom `majortom-document` scheme
+    /// handler into WebKit's networking process, and the renderer produces one per
+    /// Gemtext event — five thousand of them for a five-thousand-line page. The source
+    /// view already batches for exactly this reason.
+    ///
+    /// The buffer is flushed once per network chunk as well as on this threshold, so a
+    /// page still renders visibly incrementally: content arrives no less often than the
+    /// capsule sends it, just not in fragments smaller than the network delivered.
+    private func yieldToDocument(_ data: Data) {
+        guard documentContinuation != nil else { return }
+        documentBuffer.append(data)
+        if documentBuffer.count >= Self.documentFlushByteCount {
+            flushDocument()
+        }
+    }
+
+    private func flushDocument() {
+        guard !documentBuffer.isEmpty else { return }
+        documentContinuation?.yield(documentBuffer)
+        documentBuffer.removeAll(keepingCapacity: true)
+    }
+
+    private static let documentFlushByteCount = 16 * 1_024
+
     private func finishCurrentDocument(message: String? = nil) {
         guard let continuation = documentContinuation else { return }
+        flushDocument()
         continuation.yield(renderer.documentEnd(incompleteMessage: message))
         continuation.finish()
         documentContinuation = nil
+        documentBuffer.removeAll(keepingCapacity: false)
     }
 
     /// - Parameter archiveURL: when present, the page offers a link to past captures of
@@ -2440,14 +2479,14 @@ final class BrowserModel: ObservableObject {
             var parser = IncrementalGemtextParser()
             let events = parser.receive(decoder.decode(currentSourceBytes) + decoder.finish()) + parser.finish()
             let continuation = beginDocument(at: committedURL)
+            // Set once, before emitting: `emit` writes through this property, and
+            // reassigning it inside the loop was routing rather than expressing state.
+            documentContinuation = continuation
             continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: committedURL))
             for event in events {
-                documentContinuation = continuation
                 emit(event, baseURL: committedURL)
             }
-            documentContinuation = nil
-            continuation.yield(renderer.documentEnd())
-            continuation.finish()
+            finishCurrentDocument()
         } else if currentMIMEType.hasPrefix("text/") {
             let continuation = beginDocument(at: committedURL)
             continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: committedURL))
@@ -2515,7 +2554,7 @@ final class BrowserModel: ObservableObject {
                 && GemtextLinkHint.isInlineImageCandidate(destination: destination, relativeTo: baseURL)
         }
 
-        documentContinuation?.yield(renderer.render(
+        yieldToDocument(renderer.render(
             event,
             options: settings.preferences.renderingOptions,
             baseURL: baseURL,
@@ -2529,7 +2568,7 @@ final class BrowserModel: ObservableObject {
            let dataURL = URL(string: destination) {
             let fileName = label ?? "Inline image"
             let metadata = inlineDataImageMetadata(destination)
-            documentContinuation?.yield(renderer.renderInlineImage(
+            yieldToDocument(renderer.renderInlineImage(
                 resourceURL: dataURL,
                 linkURL: dataURL,
                 altText: fileName,
@@ -2546,7 +2585,7 @@ final class BrowserModel: ObservableObject {
         let figureIdentifier = "mt-inline-\(linkIdentifier ?? String(linkSequence))"
         let fileName = inlineImageFileName(for: url, fallback: label)
         let resource = resourceStore.createResource()
-        documentContinuation?.yield(renderer.renderInlineImage(
+        yieldToDocument(renderer.renderInlineImage(
             resourceURL: resource.url,
             linkURL: url,
             altText: label ?? fileName,

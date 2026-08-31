@@ -24,16 +24,31 @@ public struct IncrementalGemtextParser: Sendable {
         lineBuffer.append(text)
 
         var events: [GemtextEvent] = []
-        while let newline = lineEnding(in: lineBuffer) {
-            let terminator = lineBuffer[newline]
+        var consumed = lineBuffer.startIndex
+        var index = lineBuffer.startIndex
+        while index < lineBuffer.endIndex {
+            guard isLineEnding(lineBuffer[index]) else {
+                index = lineBuffer.index(after: index)
+                continue
+            }
+            let next = lineBuffer.index(after: index)
             // A trailing CR may be the first half of a CRLF sequence split across
             // network chunks. Keep it until the next chunk makes that clear.
-            if terminator == "\r", newline == lineBuffer.index(before: lineBuffer.endIndex) {
-                break
-            }
-            let line = String(lineBuffer[..<newline])
-            lineBuffer.removeSubrange(...newline)
-            events.append(contentsOf: parseCompletedLine(line))
+            if lineBuffer[index] == "\r", next == lineBuffer.endIndex { break }
+            events.append(contentsOf: parseCompletedLine(String(lineBuffer[consumed..<index])))
+            consumed = next
+            index = next
+        }
+
+        // One removal for everything consumed, rather than one per line.
+        //
+        // Removing each line from the front as it was parsed shifted the whole remainder
+        // of the buffer every time, and the scan for the next line ending restarted from
+        // the front as well. Both are linear, so a single 64 KB network chunk carrying a
+        // thousand lines did on the order of a thousand shifts over a shrinking 64 KB
+        // buffer — quadratic in the size of the chunk, for one screen of text.
+        if consumed > lineBuffer.startIndex {
+            lineBuffer.removeSubrange(lineBuffer.startIndex..<consumed)
         }
         return events
     }
@@ -41,8 +56,8 @@ public struct IncrementalGemtextParser: Sendable {
     /// Gemtext terminates lines with CRLF, and tolerates a bare LF. `Character.isNewline`
     /// additionally matches VT, FF, NEL, U+2028 and U+2029, which are ordinary text in a
     /// capsule and must not split a line. Note that Swift treats "\r\n" as one Character.
-    private func lineEnding(in value: String) -> String.Index? {
-        value.firstIndex { $0 == "\n" || $0 == "\r\n" || $0 == "\r" }
+    private func isLineEnding(_ character: Character) -> Bool {
+        character == "\n" || character == "\r\n" || character == "\r"
     }
 
     public mutating func finish() -> [GemtextEvent] {

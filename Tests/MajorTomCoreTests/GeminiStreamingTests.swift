@@ -74,6 +74,63 @@ final class GeminiStreamingTests: XCTestCase {
         }
     }
 
+    func testGemtextParserEmitsEveryLineOfALargeSingleChunk() {
+        // The parser used to remove each line from the front of its buffer as it was
+        // parsed, and rescan from the front for the next line ending. A single network
+        // chunk carrying a thousand lines therefore did on the order of a thousand
+        // shifts over a shrinking buffer. This pins the behaviour that replaced it.
+        let lineCount = 2_000
+        let source = (0..<lineCount).map { "=> /page/\($0) Page \($0)" }.joined(separator: "\r\n") + "\r\n"
+
+        var parser = IncrementalGemtextParser()
+        let events = parser.receive(source) + parser.finish()
+
+        XCTAssertEqual(events.count, lineCount)
+        XCTAssertEqual(events.first, .link(destination: "/page/0", label: "Page 0"))
+        XCTAssertEqual(events.last, .link(destination: "/page/\(lineCount - 1)", label: "Page \(lineCount - 1)"))
+    }
+
+    func testGemtextParserIsInvariantAcrossChunkCountForTheSameSource() {
+        let source = "# One\r\nTwo\n=> /three Three\r\n* Four\n> Five\r\n"
+        var baselineParser = IncrementalGemtextParser()
+        let baseline = baselineParser.receive(source) + baselineParser.finish()
+
+        // Same bytes, delivered in every possible number of equal-sized pieces.
+        for chunkLength in 1...source.count {
+            var parser = IncrementalGemtextParser()
+            var events: [GemtextEvent] = []
+            var index = source.startIndex
+            while index < source.endIndex {
+                let end = source.index(index, offsetBy: chunkLength, limitedBy: source.endIndex)
+                    ?? source.endIndex
+                events += parser.receive(String(source[index..<end]))
+                index = end
+            }
+            events += parser.finish()
+            XCTAssertEqual(events, baseline, "chunk length \(chunkLength)")
+        }
+    }
+
+    func testGemtextParserHoldsBackABareTrailingCarriageReturn() {
+        // A trailing CR may be the first half of a CRLF split across chunks. Emitting
+        // the line early would produce two events where the source has one line.
+        var parser = IncrementalGemtextParser()
+        XCTAssertEqual(parser.receive("Only line\r"), [])
+        XCTAssertEqual(parser.receive("\nSecond\n"), [.text("Only line"), .text("Second")])
+    }
+
+    func testGemtextParserTreatsABareCarriageReturnAtEndOfResponseAsALineEnding() {
+        var parser = IncrementalGemtextParser()
+        let events = parser.receive("Only line\r") + parser.finish()
+        XCTAssertEqual(events, [.text("Only line")])
+    }
+
+    func testGemtextParserKeepsTrailingUnterminatedContentUntilFinish() {
+        var parser = IncrementalGemtextParser()
+        XCTAssertEqual(parser.receive("# Heading\nno newline here"), [.heading(level: 1, text: "Heading")])
+        XCTAssertEqual(parser.finish(), [.text("no newline here")])
+    }
+
     func testHTMLRendererEscapesCapsuleContentAndDestinations() {
         let renderer = HTMLDocumentStreamRenderer()
         let paragraph = String(decoding: renderer.render(.text("<script>&")), as: UTF8.self)
