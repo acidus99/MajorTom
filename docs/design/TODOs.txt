@@ -8,8 +8,15 @@ Functionality:
 * Themes as CSS. User supplied themes
 
 
+* More Tabs
+	Safari has a ton of option on close tab, close tab to the right, close all other tabs, etc
+
 * Titan Support
 * Unified history
+
+* Import From Browser 
+	Looks like it detects installed apps (Safari shows Firefox)
+	Goes to a model where you check what you want to import (History, Bookmarks)
 
 
 * Add a TOC/Outline view, using headings
@@ -37,6 +44,8 @@ Functionality:
 
 
 Reworking/Bugs:
+	
+* option "up" doesn't work. Only optin +_ shift + up. One time, in a window even the menu items didn't work to "go up"
 	
 * No "Delete" option in context menu of bookmark in favorites bar
 	
@@ -75,4 +84,3 @@ things to check:
 
 - the image itself should be clickable, show the URL in the hover in the bottom
 and it will open image in the current tab. When openning the image in a new tab, ideally it should use the cached content instead of having to redownload it. Perhaps we should be smart and use cached content for images always, for at least 30 minutes or something? what do you suggest about the caching before we implement that part
-
