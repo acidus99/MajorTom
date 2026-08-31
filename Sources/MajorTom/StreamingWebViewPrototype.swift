@@ -1648,7 +1648,7 @@ final class BrowserModel: ObservableObject {
         var gemtextParser = IncrementalGemtextParser()
         var contentStarted = false
 
-        let resolvedClientCertificate = clientCertificates.resolvedCertificate(for: target.url)
+        let resolvedClientCertificate = await clientCertificates.resolvedCertificate(for: target.url)
         let sentClientCertificate = resolvedClientCertificate?.tlsIdentity == nil
             ? nil
             : resolvedClientCertificate?.descriptor

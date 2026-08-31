@@ -206,6 +206,15 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         // first SwiftUI WindowGroup window is created so a tab dragged from any Major
         // Tom window can join another compatible Major Tom window.
         NSWindow.allowsAutomaticWindowTabbing = true
+
+        // Both stores read and decode their whole file inside an actor's initialiser,
+        // which runs on whichever thread first touches them. That was the main actor,
+        // while the first tab was being created: BrowserModel.init reaches for both. Warm
+        // them here instead, before any window exists.
+        Task.detached(priority: .utility) {
+            _ = SharedTrustedIdentityStore.shared
+            _ = SharedFaviconStore.shared
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {

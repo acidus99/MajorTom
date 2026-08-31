@@ -65,6 +65,15 @@ public final class GeminiTransport: @unchecked Sendable {
 
 }
 
+/// One Gemini request, from connection through to the last body byte.
+///
+/// Every mutable property here is confined to `queue`. `@unchecked Sendable` used to
+/// paper over the fact that it was not: `start()` ran on whichever thread built the
+/// stream — the main actor — while the receive and state handlers ran on `queue`, and
+/// `cancel()` is invoked from `continuation.onTermination`, which Swift may run on any
+/// thread. That last one raced `finish()` clearing `connection` on the queue, on every
+/// cancelled navigation, which is the ordinary case: navigating, stopping, opening a
+/// file and showing an internal page all cancel the request in flight.
 private final class GeminiConnectionSession: @unchecked Sendable {
     private let target: GeminiRequestTarget
     private let clientIdentity: ClientTLSIdentity?
@@ -85,6 +94,7 @@ private final class GeminiConnectionSession: @unchecked Sendable {
         set { declinedLock.withLock { _trustWasDeclined = newValue } }
     }
     private var hasFinished = false
+    private var isCancelled = false
     private var receivedByteCount = 0
     private var timeoutTask: Task<Void, Never>?
 
@@ -103,6 +113,13 @@ private final class GeminiConnectionSession: @unchecked Sendable {
     }
 
     func start() {
+        queue.async { [weak self] in self?.startOnQueue() }
+    }
+
+    private func startOnQueue() {
+        // A cancel can arrive before this runs. Without the check, the stream's consumer
+        // would already be gone and this would still open a connection for it.
+        guard !isCancelled, !hasFinished else { return }
         resetTimeout()
         let tlsOptions = NWProtocolTLS.Options()
         sec_protocol_options_set_min_tls_protocol_version(
@@ -181,7 +198,14 @@ private final class GeminiConnectionSession: @unchecked Sendable {
     }
 
     func cancel() {
-        connection?.cancel()
+        queue.async { [weak self] in
+            guard let self else { return }
+            isCancelled = true
+            connection?.cancel()
+            // Covers a cancel that lands before `startOnQueue`, where there is no
+            // connection whose `.cancelled` state would otherwise finish the stream.
+            finish()
+        }
     }
 
     private func stateChanged(_ state: NWConnection.State) {

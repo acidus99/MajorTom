@@ -229,24 +229,42 @@ final class ClientCertificateStore: ObservableObject {
         changed()
     }
 
-    func resolvedCertificate(for url: URL) -> ResolvedClientCertificate? {
+    /// Resolves the identity to offer for `url`, loading it from the Keychain if this is
+    /// the first request that needs it.
+    ///
+    /// Async because the first resolution of a certificate performs a real Keychain
+    /// signing operation to check the private key is usable, and this is called on the
+    /// main actor from every navigation. create, importIdentity, delete and
+    /// exportIdentityPEM have always detached the same keychain; the read path used to
+    /// run it inline and block the main actor while a page was being opened.
+    func resolvedCertificate(for url: URL) async -> ResolvedClientCertificate? {
         guard let association = ClientCertificateAssociation.mostSpecific(
             matching: url,
             in: associations
         ), let descriptor = descriptor(id: association.certificateID) else { return nil }
-        let identity: ClientTLSIdentity?
+
+        var identity: ClientTLSIdentity?
         if descriptor.isValid() {
-            do {
-                if !signingValidated.contains(descriptor.id) {
-                    try keychain.validateIdentityCanSign(for: descriptor.id)
-                    signingValidated.insert(descriptor.id)
+            let id = descriptor.id
+            if let cached = identityCache[id], signingValidated.contains(id) {
+                identity = cached
+            } else {
+                let keychain = self.keychain
+                let needsSigningCheck = !signingValidated.contains(id)
+                identity = await Task.detached(priority: .userInitiated) {
+                    () -> ClientTLSIdentity? in
+                    do {
+                        if needsSigningCheck { try keychain.validateIdentityCanSign(for: id) }
+                        return try keychain.identity(for: id)
+                    } catch {
+                        return nil
+                    }
+                }.value
+                if let identity {
+                    identityCache[id] = identity
+                    signingValidated.insert(id)
                 }
-                identity = cachedIdentity(for: descriptor.id)
-            } catch {
-                identity = nil
             }
-        } else {
-            identity = nil
         }
         availability[descriptor.id] = identity != nil
         return ResolvedClientCertificate(
@@ -280,17 +298,29 @@ final class ClientCertificateStore: ObservableObject {
         }
     }
 
+    /// Refreshes which identities are actually usable.
+    ///
+    /// One Keychain query per stored certificate. Called from `init`, so doing it inline
+    /// blocked the main actor for the whole catalogue while the first tab was created.
     func refreshAvailability() {
-        for certificate in certificates {
-            availability[certificate.id] = cachedIdentity(for: certificate.id) != nil
+        let identifiers = certificates.map(\.id)
+        guard !identifiers.isEmpty else { return }
+        let keychain = self.keychain
+        Task { [weak self] in
+            let found = await Task.detached(priority: .utility) {
+                () -> [UUID: ClientTLSIdentity] in
+                var result: [UUID: ClientTLSIdentity] = [:]
+                for id in identifiers {
+                    if let identity = try? keychain.identity(for: id) { result[id] = identity }
+                }
+                return result
+            }.value
+            guard let self else { return }
+            for id in identifiers {
+                self.availability[id] = found[id] != nil
+            }
+            self.identityCache.merge(found) { _, refreshed in refreshed }
         }
-    }
-
-    private func cachedIdentity(for certificateID: UUID) -> ClientTLSIdentity? {
-        if let identity = identityCache[certificateID] { return identity }
-        guard let identity = try? keychain.identity(for: certificateID) else { return nil }
-        identityCache[certificateID] = identity
-        return identity
     }
 
     private func changed() {
