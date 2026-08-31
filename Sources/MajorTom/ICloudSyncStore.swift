@@ -56,6 +56,11 @@ final class ICloudSyncStore: ObservableObject {
     private var localTabs: CloudTabDeviceSnapshot?
     private var syncTask: Task<Void, Never>?
     private var pendingSync = false
+    /// Set by any local mutation, cleared by a sync that completes successfully.
+    private var hasLocalChangesSinceSync = true
+    private var lastSuccessfulSync: Date?
+    /// How long a refresh with nothing local to push will trust the last result.
+    private static let refreshCoalescingInterval: TimeInterval = 5 * 60
 
     private static let deviceIDKey = "icloud-device-id-v1"
     private static let cachedTabsKey = "icloud-tabs-cache-v1"
@@ -93,55 +98,73 @@ final class ICloudSyncStore: ObservableObject {
 
     func configure(preferences: SyncedBrowserPreferences?) {
         localPreferences = preferences
-        requestSync()
+        markLocalChange()
     }
 
     func updatePreferences(_ snapshot: SyncedBrowserPreferences) {
         localPreferences = snapshot
-        requestSync()
+        markLocalChange()
     }
 
     func configure(clientCertificates: ClientCertificateSyncState?) {
         localClientCertificates = clientCertificates
-        requestSync()
+        markLocalChange()
     }
 
     func updateClientCertificates(_ snapshot: ClientCertificateSyncState) {
         localClientCertificates = snapshot
-        requestSync()
+        markLocalChange()
     }
 
     func configure(bookmarks: SyncedBookmarks?) {
         localBookmarks = bookmarks
-        requestSync()
+        markLocalChange()
     }
 
     func updateBookmarks(_ snapshot: SyncedBookmarks) {
         localBookmarks = snapshot
-        requestSync()
+        markLocalChange()
     }
 
     func configure(serverTrust: SyncedServerTrust?) {
         localServerTrust = serverTrust
-        requestSync()
+        markLocalChange()
     }
 
     func updateServerTrust(_ snapshot: SyncedServerTrust) {
         localServerTrust = snapshot
-        requestSync()
+        markLocalChange()
     }
 
     func updateTabs(_ tabs: [CloudTabSnapshot]) {
+        // Compare the tabs themselves, not the snapshot: it carries a fresh updatedAt
+        // every time, so an unchanged set still looked like a change. The hourly
+        // heartbeat calls straight through to here, and every title change during a page
+        // load reaches it too, so this is the difference between a sync an hour and a
+        // sync whenever a heading streams in.
+        guard localTabs?.tabs != tabs else { return }
         localTabs = CloudTabDeviceSnapshot(
             deviceID: localDeviceID,
             deviceName: localDeviceName,
             updatedAt: Date(),
             tabs: tabs
         )
+        markLocalChange()
+    }
+
+    /// Pulls anything new from CloudKit. Called on activation and on demand, so it may
+    /// arrive many times in a row with nothing to contribute.
+    func refresh() {
+        if !hasLocalChangesSinceSync,
+           let lastSuccessfulSync,
+           Date().timeIntervalSince(lastSuccessfulSync) < Self.refreshCoalescingInterval {
+            return
+        }
         requestSync()
     }
 
-    func refresh() {
+    private func markLocalChange() {
+        hasLocalChangesSinceSync = true
         requestSync()
     }
 
@@ -287,6 +310,8 @@ final class ICloudSyncStore: ObservableObject {
                 receivedServerTrust.send(mergedTrust)
             }
 
+            hasLocalChangesSinceSync = false
+            lastSuccessfulSync = Date()
             remoteTabDevices = devices.visibleCloudTabDevices(excluding: localDeviceID)
             persistCachedTabs(devices)
 
