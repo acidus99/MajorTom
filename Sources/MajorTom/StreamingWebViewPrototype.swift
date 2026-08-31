@@ -814,13 +814,22 @@ final class BrowserModel: ObservableObject {
         navigate(to: target, disposition: .reload)
     }
 
-    /// Opens a local file, e.g. a `.gmi` dragged onto the window or opened from Finder.
+    /// Tears down everything belonging to the page being replaced.
     ///
-    /// Local files go through the same document pipeline, cache and history as capsule
-    /// responses, so View Source, Save Page As, Back/Forward and the content theme all
-    /// behave identically. Nothing is fetched over the network.
-    func openFile(_ url: URL, disposition: HistoryDisposition = .new) {
-        guard url.isFileURL else { return }
+    /// Every entry point into a new page needs this: a capsule navigation, a local file,
+    /// a `data:` image, and one of Major Tom's own pages. All four used to do it by hand
+    /// and had drifted apart. Only `showInternalPage` finished the abandoned document
+    /// stream and cleared the favicon, the hovered link and `activeWebDocumentURL`, so
+    /// dropping a local file onto a tab left the previous capsule's glyph in the toolbar
+    /// and on the native tab title, and left a stale continuation that made `stop()`
+    /// believe the *previous* page had been interrupted partway.
+    ///
+    /// - Parameter keepsFavicon: true while moving between pages of one capsule, so the
+    ///   glyph does not flicker on every navigation within a site.
+    private func beginNavigation(
+        disposition: HistoryDisposition,
+        keepsFavicon: Bool = false
+    ) {
         abandonScrollRestoration(for: disposition)
 
         navigationTask?.cancel()
@@ -829,16 +838,43 @@ final class BrowserModel: ObservableObject {
         imageTasks.removeAll()
         slowDownTask?.cancel()
         slowDownTask = nil
-        retryNotBefore = nil
-        isLoading = false
-        validationMessage = nil
-        internalPage = nil
+        documentContinuation?.finish()
+        documentContinuation = nil
+        activeWebDocumentURL = nil
+
+        // A prompt still on screen belongs to the request being abandoned. Resuming the
+        // continuation releases the transport that is waiting on the reader's answer.
+        trustContinuation?.resume(returning: false)
+        trustContinuation = nil
+        trustPrompt = nil
+        inputPrompt = nil
+        inputValidationMessage = nil
         clientCertificatePrompt = nil
         pendingClientCertificateChallenge = nil
+
+        retryNotBefore = nil
+        validationMessage = nil
+        internalPage = nil
+        // Belongs to the page being replaced. A stale identity in Page Info would
+        // describe a different capsule's certificate.
         serverIdentity = nil
         usedClientCertificate = nil
         responseStatus = nil
         responseMeta = ""
+        // The document is going away, so its hover state is stale.
+        hoveredLinkURL = nil
+        if !keepsFavicon { favicon = nil }
+        isLoading = false
+    }
+
+    /// Opens a local file, e.g. a `.gmi` dragged onto the window or opened from Finder.
+    ///
+    /// Local files go through the same document pipeline, cache and history as capsule
+    /// responses, so View Source, Save Page As, Back/Forward and the content theme all
+    /// behave identically. Nothing is fetched over the network.
+    func openFile(_ url: URL, disposition: HistoryDisposition = .new) {
+        guard url.isFileURL else { return }
+        beginNavigation(disposition: disposition)
 
         let mimeType = Self.mimeType(forPathExtension: url.pathExtension)
 
@@ -1398,34 +1434,17 @@ final class BrowserModel: ObservableObject {
     /// tab replaces the web view with a native view while one of these is showing, because
     /// the document pipeline forbids script and could not host an interactive manager.
     func showInternalPage(_ page: InternalPage, disposition: HistoryDisposition = .new) {
-        navigationTask?.cancel()
-        navigationTask = nil
-        imageTasks.forEach { $0.cancel() }
-        imageTasks.removeAll()
-        slowDownTask?.cancel()
-        slowDownTask = nil
-        documentContinuation?.finish()
-        documentContinuation = nil
-        retryNotBefore = nil
-        isLoading = false
-        validationMessage = nil
-        hoveredLinkURL = nil
-        favicon = nil
-        serverIdentity = nil
-        usedClientCertificate = nil
-        clientCertificatePrompt = nil
-        pendingClientCertificateChallenge = nil
-        responseStatus = nil
-        responseMeta = ""
+        beginNavigation(disposition: disposition)
+
         currentSourceBytes = Data()
         currentMIMEType = ""
         canSavePage = false
         canShowSource = false
         internalPage = page
-        activeWebDocumentURL = nil
 
         // Internal pages use native SwiftUI views, not the WebKit document whose scroll
-        // reporter drives this state. There is therefore nothing to restore here.
+        // reporter drives this state. A traversal to one therefore has nothing to
+        // restore, which `beginNavigation` cannot assume for the other entry points.
         pendingScrollRestoration = nil
         isRestoringHistoryScroll = false
 
@@ -1576,35 +1595,12 @@ final class BrowserModel: ObservableObject {
         disposition: HistoryDisposition,
         renderAsSource: Bool = false
     ) {
-        abandonScrollRestoration(for: disposition)
-        navigationTask?.cancel()
-        slowDownTask?.cancel()
-        slowDownTask = nil
-        retryNotBefore = nil
-        imageTasks.forEach { $0.cancel() }
-        imageTasks.removeAll()
-        trustContinuation?.resume(returning: false)
-        trustContinuation = nil
-        trustPrompt = nil
-        inputPrompt = nil
-        inputValidationMessage = nil
-        // Leaving one of Major Tom's own pages for a real document.
-        internalPage = nil
-        // Belongs to the page being replaced, and a stale identity in Page Info would
-        // describe the wrong capsule.
-        serverIdentity = nil
-        usedClientCertificate = nil
-        clientCertificatePrompt = nil
-        pendingClientCertificateChallenge = nil
-        responseStatus = nil
-        responseMeta = ""
-        // The document is going away, so its hover state is stale.
-        hoveredLinkURL = nil
-        // Drop the glyph only when leaving the capsule, so it does not flicker while
-        // moving between pages of the one capsule.
-        if CapsuleEndpoint(url: target.url) != committedURL.flatMap(CapsuleEndpoint.init(url:)) {
-            favicon = nil
-        }
+        // Keep the glyph while moving within one capsule, so it does not flicker
+        // between pages of the same site.
+        let staysWithinCapsule = CapsuleEndpoint(url: target.url)
+            == committedURL.flatMap(CapsuleEndpoint.init(url:))
+        beginNavigation(disposition: disposition, keepsFavicon: staysWithinCapsule)
+
         isLoading = true
         statusText = "Connecting to \(target.endpoint.host)…"
         locationText = target.url.absoluteString
@@ -2050,24 +2046,8 @@ final class BrowserModel: ObservableObject {
         disposition: HistoryDisposition = .new
     ) {
         guard let decoded = decodedDataImage(url.absoluteString) else { return }
-        abandonScrollRestoration(for: disposition)
+        beginNavigation(disposition: disposition)
 
-        navigationTask?.cancel()
-        navigationTask = nil
-        imageTasks.forEach { $0.cancel() }
-        imageTasks.removeAll()
-        slowDownTask?.cancel()
-        slowDownTask = nil
-        retryNotBefore = nil
-        validationMessage = nil
-        internalPage = nil
-        clientCertificatePrompt = nil
-        pendingClientCertificateChallenge = nil
-        serverIdentity = nil
-        usedClientCertificate = nil
-        responseStatus = nil
-        responseMeta = ""
-        isLoading = false
         currentSourceBytes = decoded.data
         currentMIMEType = decoded.mimeType
         canSavePage = true
