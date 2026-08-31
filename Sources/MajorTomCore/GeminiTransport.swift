@@ -168,9 +168,9 @@ private final class GeminiConnectionSession: @unchecked Sendable {
                 continuation.yield(.serverIdentity(identity))
 
                 let completion = TrustVerificationCompletion(complete)
-                Task { [weak self] in
+                Task {
                     let isAllowed = await authorizeTrust(identity, certificateDER)
-                    if !isAllowed { self?.trustWasDeclined = true }
+                    if !isAllowed { self.trustWasDeclined = true }
                     completion.call(isAllowed)
                 }
             },
