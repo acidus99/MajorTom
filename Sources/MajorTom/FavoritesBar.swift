@@ -1,7 +1,6 @@
 import AppKit
 import MajorTomAppKitSupport
 import MajorTomCore
-import os
 import SwiftUI
 
 /// A native SwiftUI Favorites Bar with whole-item overflow and pointer reordering.
@@ -100,14 +99,7 @@ struct FavoritesBar: View {
                     ended: finishDrag
                 )
             }
-            .onAppear {
-                FavoritesDragDiagnostics.shared.start()
-                availableWidth = proxy.size.width
-                FavoritesDragDiagnostics.shared.barAppeared(
-                    visibleIDs: visibleFavorites.map(\.id),
-                    width: proxy.size.width
-                )
-            }
+            .onAppear { availableWidth = proxy.size.width }
             .onChange(of: proxy.size.width) { _, width in availableWidth = width }
         }
         .onAppear { bookmarks.refreshFavicons() }
@@ -115,7 +107,6 @@ struct FavoritesBar: View {
 
     private func favoriteButton(_ bookmark: Bookmark) -> some View {
         Button {
-            FavoritesDragDiagnostics.shared.buttonActivated(id: bookmark.id)
             open(bookmark.url, NSEvent.modifierFlags.contains(.command))
         } label: {
             Text(displayTitle(for: bookmark))
@@ -134,7 +125,6 @@ struct FavoritesBar: View {
         }
         .onHover { hovering in
             hoveredBookmarkID = hovering ? bookmark.id : nil
-            FavoritesDragDiagnostics.shared.hoverChanged(id: bookmark.id, hovering: hovering)
         }
         .help(bookmark.url.absoluteString)
         .accessibilityLabel(bookmark.title)
@@ -255,17 +245,14 @@ struct FavoritesBar: View {
     private func updateDrag(id: UUID, translation: CGSize, start: CGPoint) {
         if draggedBookmarkID == nil {
             draggedBookmarkID = id
-            FavoritesDragDiagnostics.shared.gestureBegan(id: id, start: start)
         }
         guard draggedBookmarkID == id else { return }
         dragTranslation = translation
         dropInsertionIndex = insertionIndex(for: id, translation: translation)
-        FavoritesDragDiagnostics.shared.gestureChanged(id: id, translation: translation)
     }
 
     private func finishDrag(id: UUID, translation: CGSize) {
         guard draggedBookmarkID == id else { return }
-        FavoritesDragDiagnostics.shared.gestureEnded(id: id, translation: translation)
         reorder(id, translation: translation)
         draggedBookmarkID = nil
         dragTranslation = .zero
@@ -291,21 +278,11 @@ struct FavoritesBar: View {
             sourceIndex: sourceIndex,
             translation: translation.width
         )
-        FavoritesDragDiagnostics.shared.calculatedInsertion(
-            id: sourceID,
-            sourceIndex: sourceIndex,
-            insertionIndex: insertionIndex,
-            translation: translation
-        )
         return insertionIndex
     }
 
     private func persistOrder(_ reordered: [Bookmark]) {
-        guard reordered != favorites else {
-            FavoritesDragDiagnostics.shared.orderUnchanged(ids: reordered.map(\.id))
-            return
-        }
-        FavoritesDragDiagnostics.shared.persistingOrder(ids: reordered.map(\.id))
+        guard reordered != favorites else { return }
         bookmarks.reorder(
             folderWith: bookmarks.collection.favoritesID,
             to: reordered.map(\.id)
@@ -424,109 +401,6 @@ private struct FavoritesDragGestureBridge: NSViewRepresentable {
         }
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
-    }
-}
-
-@available(macOS 26.0, *)
-@MainActor
-private final class FavoritesDragDiagnostics {
-    static let shared = FavoritesDragDiagnostics()
-
-    private let logger = Logger(
-        subsystem: "dev.gemi.major-tom",
-        category: "FavoritesDrag"
-    )
-    private var eventMonitor: Any?
-
-    func start() {
-        guard eventMonitor == nil else { return }
-        logger.notice("diagnostics-started")
-        eventMonitor = NSEvent.addLocalMonitorForEvents(
-            matching: [.leftMouseDown, .leftMouseDragged, .leftMouseUp]
-        ) { [weak self] event in
-            self?.recordRawEvent(event)
-            return event
-        }
-    }
-
-    func barAppeared(visibleIDs: some Collection<UUID>, width: CGFloat) {
-        logger.notice("bar-appeared width=\(width) visible=\(self.idList(visibleIDs), privacy: .public)")
-    }
-
-    func buttonActivated(id: UUID) {
-        logger.notice("button-activated id=\(id.uuidString, privacy: .public)")
-    }
-
-    func hoverChanged(id: UUID, hovering: Bool) {
-        logger.debug("hover id=\(id.uuidString, privacy: .public) active=\(hovering)")
-    }
-
-    func gestureBegan(id: UUID, start: CGPoint) {
-        logger.notice(
-            "gesture-began id=\(id.uuidString, privacy: .public) start=\(self.point(start), privacy: .public)"
-        )
-    }
-
-    func gestureChanged(id: UUID, translation: CGSize) {
-        logger.debug(
-            "gesture-changed id=\(id.uuidString, privacy: .public) translation=\(self.size(translation), privacy: .public)"
-        )
-    }
-
-    func gestureEnded(id: UUID, translation: CGSize) {
-        logger.notice(
-            "gesture-ended id=\(id.uuidString, privacy: .public) translation=\(self.size(translation), privacy: .public)"
-        )
-    }
-
-    func calculatedInsertion(
-        id: UUID,
-        sourceIndex: Int,
-        insertionIndex: Int,
-        translation: CGSize
-    ) {
-        logger.notice(
-            "calculated-insertion id=\(id.uuidString, privacy: .public) source=\(sourceIndex) destination=\(insertionIndex) translation=\(self.size(translation), privacy: .public)"
-        )
-    }
-
-    func persistingOrder(ids: [UUID]) {
-        logger.notice("persisting-order ids=\(self.idList(ids), privacy: .public)")
-    }
-
-    func orderUnchanged(ids: [UUID]) {
-        logger.notice("order-unchanged ids=\(self.idList(ids), privacy: .public)")
-    }
-
-    private func recordRawEvent(_ event: NSEvent) {
-        let hitChain: String
-        if let contentView = event.window?.contentView {
-            let point = contentView.convert(event.locationInWindow, from: nil)
-            var view = contentView.hitTest(point)
-            var names: [String] = []
-            while let current = view, names.count < 6 {
-                names.append(String(describing: type(of: current)))
-                view = current.superview
-            }
-            hitChain = names.joined(separator: ">")
-        } else {
-            hitChain = "no-window"
-        }
-        logger.notice(
-            "raw-event type=\(String(describing: event.type), privacy: .public) location=\(self.point(event.locationInWindow), privacy: .public) clicks=\(event.clickCount) hit=\(hitChain, privacy: .public)"
-        )
-    }
-
-    private func idList(_ ids: some Collection<UUID>) -> String {
-        ids.map { String($0.uuidString.prefix(8)) }.joined(separator: ",")
-    }
-
-    private func point(_ point: CGPoint) -> String {
-        String(format: "%.1f,%.1f", point.x, point.y)
-    }
-
-    private func size(_ size: CGSize) -> String {
-        String(format: "%.1f,%.1f", size.width, size.height)
     }
 }
 

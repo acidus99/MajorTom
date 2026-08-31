@@ -591,7 +591,6 @@ final class BrowserModel: ObservableObject {
     private var expandedInlineImages: Set<String> = []
     private var contextSharingPicker: NSSharingServicePicker?
     private var lastPreferences: BrowserPreferences
-    private var modifierFlagsMonitor: Any?
 
     init(restoredState: RestoredTabState? = nil, initialURL: URL? = nil) {
         let documentStore = BrowserDocumentStore()
@@ -710,10 +709,9 @@ final class BrowserModel: ObservableObject {
         settings.preferencesDidChange
             .sink { [weak self] preferences in self?.preferencesChanged(to: preferences) }
             .store(in: &cancellables)
-        modifierFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
-            self?.updateHoveredLinkModifiers(event.modifierFlags)
-            return event
-        }
+        ModifierFlagsMonitor.shared.flagsDidChange
+            .sink { [weak self] flags in self?.updateHoveredLinkModifiers(flags) }
+            .store(in: &cancellables)
         updateNavigationAvailability()
     }
 
