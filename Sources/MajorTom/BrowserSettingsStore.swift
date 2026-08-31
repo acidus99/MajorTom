@@ -20,7 +20,7 @@ final class BrowserSettingsStore: ObservableObject {
             if !changeCameFromICloud, synchronizedValuesChanged {
                 modifiedAt = Date()
             }
-            persist()
+            schedulePersist()
             preferencesDidChange.send(preferences)
             if !changeCameFromICloud, synchronizedValuesChanged {
                 scheduleICloudUpload()
@@ -38,6 +38,7 @@ final class BrowserSettingsStore: ObservableObject {
     private var isApplyingRemotePreferences = false
     private var iCloudObserver: AnyCancellable?
     private var uploadTask: Task<Void, Never>?
+    private var persistTask: Task<Void, Never>?
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -77,9 +78,33 @@ final class BrowserSettingsStore: ObservableObject {
     }
 
     private func persist() {
+        persistTask?.cancel()
+        persistTask = nil
         guard let data = try? JSONEncoder().encode(preferences) else { return }
         defaults.set(data, forKey: key)
         defaults.set(modifiedAt, forKey: modifiedAtKey)
+    }
+
+    /// Coalesces writes while a control is being driven continuously.
+    ///
+    /// `binding(_:)` writes the whole struct back on every change, so typing a homepage
+    /// or a custom search endpoint in Settings encoded the preferences and hit
+    /// UserDefaults once per keystroke. The published value still updates synchronously,
+    /// so the UI and every open tab react immediately; only the write is deferred.
+    private func schedulePersist() {
+        persistTask?.cancel()
+        persistTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+            self?.persist()
+        }
+    }
+
+    /// Writes any coalesced change immediately. Call before quitting, so a preference
+    /// changed a moment earlier is not lost.
+    func flushPendingWrites() {
+        guard persistTask != nil else { return }
+        persist()
     }
 
     private func scheduleICloudUpload() {

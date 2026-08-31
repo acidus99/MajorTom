@@ -228,6 +228,85 @@ final class ServerTrustPolicyTests: XCTestCase {
         XCTAssertNil(removedIdentity)
     }
 
+    // MARK: - Write coalescing
+
+    func testRepeatSightingIsCoalescedUntilFlushed() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MajorTomTrustTests-\(UUID().uuidString)", isDirectory: true)
+        let file = directory.appendingPathComponent("trusted-identities.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try TrustedIdentityStore(fileURL: file)
+        let presented = validIdentity(fingerprint: fingerprint)
+
+        // A decision reaches disk straight away.
+        try await store.trust(presented, source: .user, at: now)
+        let afterDecision = try TrustedIdentityStore(fileURL: file)
+        let firstCount = await afterDecision.identity(for: endpoint)?.timesSeen
+        XCTAssertEqual(firstCount, 1)
+
+        // A repeat visit only bumps counters, so it is held back rather than rewriting
+        // the whole file — which holds every record and its certificate PEM.
+        try await store.trust(presented, source: .user, at: now.addingTimeInterval(60))
+        let seenInMemory = await store.identity(for: endpoint)?.timesSeen
+        XCTAssertEqual(seenInMemory, 2)
+
+        let beforeFlush = try TrustedIdentityStore(fileURL: file)
+        let unflushedCount = await beforeFlush.identity(for: endpoint)?.timesSeen
+        XCTAssertEqual(unflushedCount, 1, "a sighting must not rewrite the file immediately")
+
+        try await store.flushPendingWrites()
+        let afterFlush = try TrustedIdentityStore(fileURL: file)
+        let flushedCount = await afterFlush.identity(for: endpoint)?.timesSeen
+        XCTAssertEqual(flushedCount, 2)
+    }
+
+    func testDecisionAfterCoalescedSightingsPersistsBoth() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MajorTomTrustTests-\(UUID().uuidString)", isDirectory: true)
+        let file = directory.appendingPathComponent("trusted-identities.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try TrustedIdentityStore(fileURL: file)
+        let presented = validIdentity(fingerprint: fingerprint)
+        try await store.trust(presented, source: .user, at: now)
+        try await store.trust(presented, source: .user, at: now.addingTimeInterval(60))
+
+        // Trusting a second capsule is a decision, and writes the whole file — carrying
+        // the pending counter for the first capsule with it.
+        let other = CapsuleEndpoint(host: "other.example")
+        try await store.trust(
+            PresentedServerIdentity(endpoint: other, publicKeySHA256: otherFingerprint),
+            source: .user,
+            at: now
+        )
+
+        let reopened = try TrustedIdentityStore(fileURL: file)
+        let firstCount = await reopened.identity(for: endpoint)?.timesSeen
+        let secondFingerprint = await reopened.identity(for: other)?.publicKeySHA256
+        XCTAssertEqual(firstCount, 2)
+        XCTAssertEqual(secondFingerprint, otherFingerprint)
+    }
+
+    func testRemovingTrustDiscardsPendingSightings() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MajorTomTrustTests-\(UUID().uuidString)", isDirectory: true)
+        let file = directory.appendingPathComponent("trusted-identities.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try TrustedIdentityStore(fileURL: file)
+        let presented = validIdentity(fingerprint: fingerprint)
+        try await store.trust(presented, source: .user, at: now)
+        try await store.trust(presented, source: .user, at: now.addingTimeInterval(60))
+        try await store.removeTrust(for: endpoint)
+
+        // A held-back counter must never resurrect a record the reader removed.
+        try await store.flushPendingWrites()
+        let reopened = try TrustedIdentityStore(fileURL: file)
+        let identity = await reopened.identity(for: endpoint)
+        XCTAssertNil(identity)
+    }
+
     func testCloudTrustCannotOverrideLocalSeedPolicy() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("MajorTomTrustTests-\(UUID().uuidString)", isDirectory: true)

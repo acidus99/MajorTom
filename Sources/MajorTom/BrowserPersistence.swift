@@ -260,6 +260,7 @@ final class BrowsingHistoryStore: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let key = "browsing-history-v1"
+    private var persistTask: Task<Void, Never>?
 
     init() {
         if let data = defaults.data(forKey: key),
@@ -271,15 +272,39 @@ final class BrowsingHistoryStore: ObservableObject {
     func record(_ url: URL) {
         records.insert(BrowsingHistoryRecord(id: UUID(), url: url, visitedAt: Date()), at: 0)
         if records.count > 5_000 { records.removeLast(records.count - 5_000) }
-        persist()
+        schedulePersist()
     }
 
     func clear() {
+        persistTask?.cancel()
+        persistTask = nil
         records = []
         defaults.removeObject(forKey: key)
     }
 
+    /// Writes any coalesced visits immediately. Call before quitting.
+    func flushPendingWrites() {
+        guard persistTask != nil else { return }
+        persist()
+    }
+
+    /// Coalesces visits into one write.
+    ///
+    /// The whole list — up to five thousand records — is re-encoded on every write, so
+    /// doing it per navigation meant a growing JSON encode and a UserDefaults write on
+    /// every page load.
+    private func schedulePersist() {
+        persistTask?.cancel()
+        persistTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(2))
+            guard !Task.isCancelled else { return }
+            self?.persist()
+        }
+    }
+
     private func persist() {
+        persistTask?.cancel()
+        persistTask = nil
         guard let data = try? JSONEncoder().encode(records) else { return }
         defaults.set(data, forKey: key)
     }

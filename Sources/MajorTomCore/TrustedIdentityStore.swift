@@ -1,9 +1,13 @@
 import Foundation
 
 public actor TrustedIdentityStore {
+    /// How long a sighting-only update may sit in memory before it reaches disk.
+    public static let sightingFlushInterval: Duration = .seconds(5)
+
     private let fileURL: URL
     private var records: [CapsuleEndpoint: TrustedServerIdentity]
     private var changeHandler: (@Sendable ([TrustedServerIdentity]) -> Void)?
+    private var pendingSightingFlush: Task<Void, Never>?
 
     public init(fileURL: URL) throws {
         self.fileURL = fileURL
@@ -68,12 +72,51 @@ public actor TrustedIdentityStore {
                 certificatePEM: presented.certificatePEM
             )
         }
+        // Persisting is all-or-nothing: the file holds every record, each with its own
+        // certificate PEM, so one write rewrites the entire trust database. A decision is
+        // worth that; a sighting is not. Bumping lastSeenAt and timesSeen on a capsule
+        // already trusted used to rewrite the whole file on every single page view.
+        if decisionChanged {
+            pendingSightingFlush?.cancel()
+            pendingSightingFlush = nil
+            try persist()
+            changeHandler?(sortedIdentities())
+        } else {
+            scheduleSightingFlush()
+        }
+    }
+
+    /// Coalesces sighting counters into one write.
+    ///
+    /// The counters are advisory, so losing a few seconds of them to an abrupt quit is
+    /// acceptable in a way that losing a trust decision would not be. Any later decision
+    /// writes the whole file anyway, which carries the coalesced counters with it.
+    private func scheduleSightingFlush() {
+        guard pendingSightingFlush == nil else { return }
+        pendingSightingFlush = Task { [weak self] in
+            try? await Task.sleep(for: Self.sightingFlushInterval)
+            guard !Task.isCancelled else { return }
+            await self?.flushSightings()
+        }
+    }
+
+    private func flushSightings() {
+        pendingSightingFlush = nil
+        try? persist()
+    }
+
+    /// Writes any coalesced sighting counters immediately. Call before quitting.
+    public func flushPendingWrites() throws {
+        guard pendingSightingFlush != nil else { return }
+        pendingSightingFlush?.cancel()
+        pendingSightingFlush = nil
         try persist()
-        if decisionChanged { changeHandler?(sortedIdentities()) }
     }
 
     public func removeTrust(for endpoint: CapsuleEndpoint) throws {
         records.removeValue(forKey: endpoint)
+        pendingSightingFlush?.cancel()
+        pendingSightingFlush = nil
         try persist()
         changeHandler?(sortedIdentities())
     }
@@ -82,6 +125,8 @@ public actor TrustedIdentityStore {
     /// locally observed certificate details remain local. Callers must exclude endpoints
     /// with more than one active fingerprint so a conflict can never become silent trust.
     public func applySyncedUserTrust(_ decisions: [SyncedServerTrustDecision]) throws {
+        pendingSightingFlush?.cancel()
+        pendingSightingFlush = nil
         var updated = records.filter { $0.value.source == .seed }
         for decision in decisions where decision.deletedAt == nil {
             // A bundled/local seed is machine policy and remains authoritative over a
