@@ -185,6 +185,10 @@ struct RestoredTabState: Codable {
     var documentTitle: String? = nil
 }
 
+/// The single-window session format written by releases before native window tabs.
+///
+/// Nothing writes this any more. It is retained so `loadApplication()` can migrate a
+/// session saved by an older build instead of discarding its tab caches.
 struct RestoredWindowState: Codable {
     var tabs: [RestoredTabState]
     var selectedIndex: Int
@@ -208,14 +212,11 @@ final class SessionRestorationStore {
     private let key = "last-window-session-v1"
     private let applicationKey = "last-application-session-v2"
 
+    /// Migration only: reads a session written by a release that predates native
+    /// window tabs. `saveApplication(_:)` is the only writer of session state now.
     func load() -> RestoredWindowState? {
         guard let data = defaults.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(RestoredWindowState.self, from: data)
-    }
-
-    func save(_ state: RestoredWindowState) {
-        guard let data = try? JSONEncoder().encode(state) else { return }
-        defaults.set(data, forKey: key)
     }
 
     func loadApplication() -> RestoredApplicationState? {
