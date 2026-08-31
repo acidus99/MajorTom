@@ -544,12 +544,10 @@ final class BrowserModel: ObservableObject {
     /// Rendered HTML waiting to be handed to WebKit. See `yieldToDocument`.
     private var documentBuffer = Data()
     private var trustContinuation: CheckedContinuation<Bool, Never>?
-    private var history: [URL] = []
-    private var historyIndex = -1
-    /// Session-only page offsets, keyed by history entry rather than URL so two visits to
-    /// the same address can retain different reading positions. Deliberately excluded
-    /// from `RestoredTabState`: quitting the app starts these positions over at the top.
-    private var historyScrollPositions: [Int: Double] = [:]
+    /// This tab's position in its own history, the pages it has kept, and the reading
+    /// position in each of them. Owned by Core so those rules can be tested without
+    /// WebKit; see `NavigationState`.
+    private var navigation = NavigationState()
     /// While a traversal's replacement document is loading, its initial scroll events
     /// must not overwrite the offset we are about to restore.
     private var pendingScrollRestoration: (historyIndex: Int, offset: Double)?
@@ -557,7 +555,6 @@ final class BrowserModel: ObservableObject {
     /// a page being replaced can arrive just after the next entry commits; checking this
     /// identity prevents that late message from being filed under the new history entry.
     private var activeWebDocumentURL: URL?
-    private var cachedPages: [URL: CachedPage] = [:]
     /// Answers typed but not submitted, so cancelling a prompt and returning to it does
     /// not lose the work. Sensitive prompts are deliberately never recorded here.
     private var inputDrafts: [URL: String] = [:]
@@ -663,19 +660,13 @@ final class BrowserModel: ObservableObject {
         self.trustStore = SharedTrustedIdentityStore.shared
         self.lastPreferences = settings.preferences
         if let restoredState {
-            self.history = restoredState.history
-            // Clamp at both ends. A negative or out-of-range index from an older or
-            // corrupted blob previously left committedURL nil, silently discarding the
-            // whole restored history.
-            self.historyIndex = restoredState.history.isEmpty
-                ? -1
-                : min(max(restoredState.historyIndex, 0), restoredState.history.count - 1)
-            self.cachedPages = Dictionary(uniqueKeysWithValues: restoredState.cachedPages.map { ($0.url, $0) })
+            // NavigationState clamps the index at both ends. A negative or out-of-range
+            // value from an older or corrupted blob previously left committedURL nil,
+            // silently discarding the whole restored history.
+            self.navigation = NavigationState(restoring: restoredState)
             self.pageZoom = restoredState.zoom
-            self.committedURL = self.history.indices.contains(self.historyIndex)
-                ? self.history[self.historyIndex]
-                : nil
-            let currentCachedPage = self.committedURL.flatMap { self.cachedPages[$0] }
+            self.committedURL = self.navigation.committedURL
+            let currentCachedPage = self.committedURL.flatMap { self.navigation.cachedPage(for: $0) }
             self.locationText = self.committedURL?.absoluteString ?? settings.preferences.homepage
             self.title = restoredState.title
                 ?? currentCachedPage?.title
@@ -724,7 +715,7 @@ final class BrowserModel: ObservableObject {
         guard !hasStarted else { return }
         hasStarted = true
 
-        if let committedURL, let cached = cachedPages[committedURL] {
+        if let committedURL, let cached = navigation.cachedPage(for: committedURL) {
             displayCachedPage(cached)
             return
         }
@@ -733,7 +724,7 @@ final class BrowserModel: ObservableObject {
         // committed with .new, and commit(.new) truncates the forward branch — so a
         // session saved mid-history lost every entry ahead of the cursor before the
         // user touched anything. Re-fetch as a traversal, which leaves history alone.
-        if let committedURL, !history.isEmpty {
+        if let committedURL, !navigation.isEmpty {
             if let page = InternalPage.page(for: committedURL) {
                 showInternalPage(page, disposition: .traversal)
             } else if committedURL.isFileURL {
@@ -750,10 +741,7 @@ final class BrowserModel: ObservableObject {
     }
 
     var restorationState: RestoredTabState {
-        RestoredTabState(
-            history: history,
-            historyIndex: historyIndex,
-            cachedPages: Array(cachedPages.values),
+        navigation.restorationState(
             zoom: pageZoom,
             title: title,
             documentTitle: documentTitle
@@ -792,7 +780,7 @@ final class BrowserModel: ObservableObject {
             return
         }
         if let committedURL, ViewSourceURL.isViewSource(committedURL) {
-            if let cached = cachedPages[committedURL] {
+            if let cached = navigation.cachedPage(for: committedURL) {
                 displayCachedPage(cached)
                 return
             }
@@ -916,7 +904,7 @@ final class BrowserModel: ObservableObject {
         commit(url, disposition: disposition)
         renderCurrentContent()
 
-        cachedPages[url] = CachedPage(
+        navigation.cache(CachedPage(
             url: url,
             mimeType: mimeType,
             body: data,
@@ -924,7 +912,7 @@ final class BrowserModel: ObservableObject {
             receivedAt: Date(),
             title: title,
             documentTitle: documentTitle
-        )
+        ))
         statusText = "Local file • \(data.count) bytes"
     }
 
@@ -968,7 +956,7 @@ final class BrowserModel: ObservableObject {
 
         finishCurrentDocument(message: "Loading was stopped.")
         if wasStreamingIntoDocument, let committedURL, !currentSourceBytes.isEmpty {
-            cachedPages[committedURL] = CachedPage(
+            navigation.cache(CachedPage(
                 url: committedURL,
                 mimeType: currentMIMEType,
                 body: currentSourceBytes,
@@ -979,7 +967,7 @@ final class BrowserModel: ObservableObject {
                 responseStatus: responseStatus,
                 responseMeta: responseMeta,
                 clientCertificateID: usedClientCertificate?.id
-            )
+            ))
         }
         isLoading = false
         statusText = "Stopped"
@@ -987,30 +975,29 @@ final class BrowserModel: ObservableObject {
     }
 
     func goBack() {
-        guard canGoBack else { return }
-        prepareScrollRestoration(for: historyIndex - 1)
-        historyIndex -= 1
+        guard navigation.canGoBack else { return }
+        prepareScrollRestoration(for: navigation.historyIndex - 1)
+        guard let url = navigation.goBack() else { return }
         updateNavigationAvailability()
-        navigateHistory(to: history[historyIndex])
+        navigateHistory(to: url)
     }
 
     func goForward() {
-        guard canGoForward else { return }
-        prepareScrollRestoration(for: historyIndex + 1)
-        historyIndex += 1
+        guard navigation.canGoForward else { return }
+        prepareScrollRestoration(for: navigation.historyIndex + 1)
+        guard let url = navigation.goForward() else { return }
         updateNavigationAvailability()
-        navigateHistory(to: history[historyIndex])
+        navigateHistory(to: url)
     }
 
     fileprivate func recordScrollPosition(_ offset: Double, from documentURL: URL?) {
-        guard history.indices.contains(historyIndex),
-              documentURL == activeWebDocumentURL,
-              pendingScrollRestoration?.historyIndex != historyIndex else { return }
-        historyScrollPositions[historyIndex] = max(0, offset)
+        guard documentURL == activeWebDocumentURL,
+              pendingScrollRestoration?.historyIndex != navigation.historyIndex else { return }
+        navigation.recordScrollOffset(offset)
     }
 
     private func prepareScrollRestoration(for index: Int) {
-        let offset = historyScrollPositions[index] ?? 0
+        let offset = navigation.scrollOffset(forHistoryIndex: index)
         pendingScrollRestoration = (
             historyIndex: index,
             offset: offset
@@ -1233,7 +1220,7 @@ final class BrowserModel: ObservableObject {
         let heading = "Source: \(displayTitle(for: resourceURL))"
         // commit() resets the title, so the heading is applied after it.
         commit(sourceURL, disposition: disposition)
-        cachedPages[sourceURL] = CachedPage(
+        navigation.cache(CachedPage(
             url: sourceURL,
             mimeType: mimeType,
             body: bytes,
@@ -1243,7 +1230,7 @@ final class BrowserModel: ObservableObject {
             responseStatus: responseStatus,
             responseMeta: responseMeta,
             clientCertificateID: usedClientCertificate?.id
-        )
+        ))
         currentSourceBytes = bytes
         currentMIMEType = mimeType
         canSavePage = !bytes.isEmpty
@@ -1569,7 +1556,7 @@ final class BrowserModel: ObservableObject {
             showInternalPage(page, disposition: .traversal)
             return
         }
-        if let cached = cachedPages[url] {
+        if let cached = navigation.cachedPage(for: url) {
             displayCachedPage(cached)
             return
         }
@@ -1896,7 +1883,7 @@ final class BrowserModel: ObservableObject {
                     currentMIMEType = mimeType
                     canSavePage = true
                     canShowSource = mimeType.hasPrefix("text/")
-                    cachedPages[target.url] = CachedPage(
+                    navigation.cache(CachedPage(
                         url: target.url,
                         mimeType: mimeType,
                         body: sourceBytes,
@@ -1907,7 +1894,7 @@ final class BrowserModel: ObservableObject {
                         responseStatus: header.status,
                         responseMeta: header.meta,
                         clientCertificateID: sentClientCertificate?.id
-                    )
+                    ))
                     statusText = "Loaded \(sourceBytes.count) bytes"
                     // Only now, once the reader has actually landed on this capsule: the
                     // RFC forbids probing for a favicon any earlier.
@@ -1938,7 +1925,7 @@ final class BrowserModel: ObservableObject {
                 canSavePage = !sourceBytes.isEmpty
                 canShowSource = mimeType.hasPrefix("text/") && !sourceBytes.isEmpty
                 if let committedURL {
-                    cachedPages[committedURL] = CachedPage(
+                    navigation.cache(CachedPage(
                         url: committedURL,
                         mimeType: mimeType,
                         body: sourceBytes,
@@ -1947,7 +1934,7 @@ final class BrowserModel: ObservableObject {
                         responseStatus: responseHeader?.status,
                         responseMeta: responseHeader?.meta,
                         clientCertificateID: usedClientCertificate?.id
-                    )
+                    ))
                 }
                 isLoading = false
                 statusText = "Incomplete response"
@@ -2127,7 +2114,7 @@ final class BrowserModel: ObservableObject {
     private func restoreScrollPosition(
         _ restoration: (historyIndex: Int, offset: Double)
     ) async {
-        guard historyIndex == restoration.historyIndex,
+        guard navigation.historyIndex == restoration.historyIndex,
               pendingScrollRestoration?.historyIndex == restoration.historyIndex else { return }
         do {
             _ = try await page.callJavaScript(
@@ -2279,31 +2266,22 @@ final class BrowserModel: ObservableObject {
         documentTitle = nil
         titleClaim = GemtextTitleClaim()
         locationText = url.absoluteString
-        switch disposition {
-        case .new:
+        if case .new = disposition {
             // A new branch supersedes any Back/Forward restoration whose WebKit load
             // had not yet finished.
             pendingScrollRestoration = nil
             isRestoringHistoryScroll = false
-            if historyIndex + 1 < history.count {
-                history.removeSubrange((historyIndex + 1)...)
-                historyScrollPositions = historyScrollPositions.filter { $0.key <= historyIndex }
-            }
-            if history.last != url {
-                history.append(url)
-                historyIndex = history.count - 1
-                historyScrollPositions[historyIndex] = 0
-            }
+        }
+        navigation.commit(url, disposition: NavigationState.Disposition(disposition))
+        if case .new = disposition {
             BrowsingHistoryStore.shared.record(url)
-        case .reload, .traversal:
-            break
         }
         updateNavigationAvailability()
     }
 
     private func updateNavigationAvailability() {
-        canGoBack = historyIndex > 0
-        canGoForward = historyIndex >= 0 && historyIndex + 1 < history.count
+        canGoBack = navigation.canGoBack
+        canGoForward = navigation.canGoForward
     }
 
     private func displayCachedPage(_ cached: CachedPage) {
@@ -2404,7 +2382,7 @@ final class BrowserModel: ObservableObject {
         // This style arrives in the document's first HTML chunk, before WebKit can paint
         // its initial y=0 layout. restoreScrollPosition reveals it only after the saved
         // offset has crossed the compositor boundary, avoiding a one-frame top flash.
-        if pendingScrollRestoration?.historyIndex == historyIndex,
+        if pendingScrollRestoration?.historyIndex == navigation.historyIndex,
            pendingScrollRestoration?.offset ?? 0 > 0 {
             theme += "\nhtml { visibility: hidden !important; }"
         }
@@ -3016,6 +2994,17 @@ final class BrowserModel: ObservableObject {
 
     private func displayTitle(for url: URL) -> String {
         BrowserPageTitle.fallback(for: url)
+    }
+}
+
+@available(macOS 26.0, *)
+private extension NavigationState.Disposition {
+    init(_ disposition: BrowserModel.HistoryDisposition) {
+        switch disposition {
+        case .new: self = .new
+        case .reload: self = .reload
+        case .traversal: self = .traversal
+        }
     }
 }
 
