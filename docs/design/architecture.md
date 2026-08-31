@@ -22,6 +22,23 @@ Major Tom is a macOS 26 Swift application. This document records the durable bou
 
 The application shell observes state and sends user intent. It does not parse Gemini, make trust decisions, or embed persistence policy in views.
 
+### Native tab controls
+
+AppKit owns Major Tom's window tabs and Tab Overview. Each browser `NSWindow` creates
+one Safari-style Show Tab Overview control when the window is configured. Because AppKit
+creates its native tab bar only after a second window joins the group and exposes no
+public trailing tab-bar slot, Major Tom performs one attachment when that bar first
+exists and establishes a reserved trailing layout that follows ordinary window resizing.
+It then leaves the control and reserved space in place for the lifetime of that window
+chrome. AppKit swaps the selected
+window's complete chrome, so each peer owns an identical permanent control. Overview
+entry, exit, and tab selection never remove, recreate, rediscover, or reinstall it;
+layout observation is merely paused while AppKit constructs the overview. The
+private `NSTabBar` class name is used only as a one-time layout anchor; Major Tom invokes
+no private selectors. A permanent nonactivating panel owned by the same control supplies
+the overview's top-right icon-only Hide Tab Overview button and is ordered in or out as overview visibility
+changes.
+
 ## Navigation and content flow
 
 ```text

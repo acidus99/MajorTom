@@ -1,0 +1,12 @@
+major tom bugs
+
+- only use the hover text in the bottom right to show connections info. Have it disappear once the page is loaded
+
+- added a TOC. Maybe as a floating/collapible side panel?
+
+- add that capsule structural view 
+
+
+Bug: Highlight text in the address bar swiping in the content area to go back changes the content area to blank, and the address bar does not change and the highlight stays there
+
+
