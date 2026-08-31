@@ -565,7 +565,6 @@ final class BrowserModel: ObservableObject {
         renderAsSource: Bool
     )?
     private var hasStarted = false
-    private var trustWasDeclined = false
     private var currentSourceBytes = Data()
     private var currentMIMEType = ""
     /// Tracks what has named the current document while the opening Gemtext lines stream
@@ -1589,7 +1588,6 @@ final class BrowserModel: ObservableObject {
         trustPrompt = nil
         inputPrompt = nil
         inputValidationMessage = nil
-        trustWasDeclined = false
         // Leaving one of Major Tom's own pages for a real document.
         internalPage = nil
         // Belongs to the page being replaced, and a stale identity in Page Info would
@@ -1918,13 +1916,16 @@ final class BrowserModel: ObservableObject {
             }
         } catch is CancellationError {
             return
+        } catch GeminiTransportError.trustDeclined {
+            // The reader refused this capsule's identity, so the navigation was
+            // cancelled rather than failed. Leave the page that is on screen alone and
+            // say so in the status area; an error page here would read as though
+            // something had gone wrong.
+            isLoading = false
+            statusText = "Connection cancelled"
+            if let committedURL { locationText = committedURL.absoluteString }
+            return
         } catch {
-            if trustWasDeclined {
-                isLoading = false
-                statusText = "Connection cancelled"
-                if let committedURL { locationText = committedURL.absoluteString }
-                return
-            }
             if contentStarted {
                 for parsedEvent in gemtextParser.receive(utf8Decoder.finish()) + gemtextParser.finish() {
                     emit(parsedEvent, baseURL: target.url)
@@ -2000,10 +2001,7 @@ final class BrowserModel: ObservableObject {
                 trustContinuation = continuation
                 trustPrompt = prompt
             }
-            guard approved else {
-                trustWasDeclined = true
-                return false
-            }
+            guard approved else { return false }
             try? await trustStore?.trust(identity, source: .user)
             return true
         }

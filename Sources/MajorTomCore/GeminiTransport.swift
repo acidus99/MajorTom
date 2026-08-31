@@ -75,6 +75,15 @@ private final class GeminiConnectionSession: @unchecked Sendable {
 
     private var connection: NWConnection?
     private var responseDecoder = GeminiResponseStreamDecoder()
+    /// Set when `authorizeTrust` refuses the presented identity. The TLS handshake then
+    /// fails with an ordinary transport error, which says nothing about *why*; recording
+    /// the decision here lets `finish` report it as what it actually was.
+    private let declinedLock = NSLock()
+    private var _trustWasDeclined = false
+    private var trustWasDeclined: Bool {
+        get { declinedLock.withLock { _trustWasDeclined } }
+        set { declinedLock.withLock { _trustWasDeclined = newValue } }
+    }
     private var hasFinished = false
     private var receivedByteCount = 0
     private var timeoutTask: Task<Void, Never>?
@@ -142,8 +151,10 @@ private final class GeminiConnectionSession: @unchecked Sendable {
                 continuation.yield(.serverIdentity(identity))
 
                 let completion = TrustVerificationCompletion(complete)
-                Task {
-                    completion.call(await authorizeTrust(identity, certificateDER))
+                Task { [weak self] in
+                    let isAllowed = await authorizeTrust(identity, certificateDER)
+                    if !isAllowed { self?.trustWasDeclined = true }
+                    completion.call(isAllowed)
                 }
             },
             queue
@@ -252,11 +263,16 @@ private final class GeminiConnectionSession: @unchecked Sendable {
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
-        if let error {
-            continuation.finish(throwing: error)
-        } else {
+        guard let error else {
             continuation.finish()
+            return
         }
+        // Any failure after the identity was refused is a consequence of refusing it.
+        // Reporting the raw TLS error instead would describe a reader's own decision as
+        // a network fault.
+        continuation.finish(
+            throwing: trustWasDeclined ? GeminiTransportError.trustDeclined : error
+        )
     }
 
     private func resetTimeout() {

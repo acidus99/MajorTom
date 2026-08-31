@@ -148,33 +148,45 @@ public struct ServerTrustPolicy: Sendable {
         seeds: Set<SeedServerIdentity>,
         now: Date = Date()
     ) -> ServerTrustEvaluation {
-        if let locallyTrusted {
-            if fingerprintsMatch(locallyTrusted.publicKeySHA256, presented.publicKeySHA256) {
-                if let issue = presented.dateIssue(at: now) {
-                    return .requiresApproval(.invalidCertificateDates(presented: presented, issue: issue))
-                }
-                return .allowSilently(source: locallyTrusted.source)
-            }
+        // A key that disagrees with a pinned or seeded one is the interception signal,
+        // and outranks anything the certificate's own dates say. Reported first so a
+        // substituted certificate is never described merely as being out of date.
+        if let locallyTrusted,
+           !fingerprintsMatch(locallyTrusted.publicKeySHA256, presented.publicKeySHA256) {
             return .requiresApproval(.changed(presented: presented, previouslyTrusted: locallyTrusted))
         }
 
-        let endpointSeeds = seeds.filter { $0.endpoint == presented.endpoint }
-        if endpointSeeds.contains(where: {
+        // A local pin supersedes seed policy, so seeds are only consulted without one.
+        let endpointSeeds = locallyTrusted == nil
+            ? seeds.filter { $0.endpoint == presented.endpoint }
+            : []
+        let matchesSeed = endpointSeeds.contains {
             fingerprintsMatch($0.publicKeySHA256, presented.publicKeySHA256)
-        }) {
-            if let issue = presented.dateIssue(at: now) {
-                return .requiresApproval(.invalidCertificateDates(presented: presented, issue: issue))
-            }
-            return .allowSilently(source: .seed)
         }
-
-        if !endpointSeeds.isEmpty {
+        if !endpointSeeds.isEmpty, !matchesSeed {
             return .requiresApproval(.seedMismatch(
                 presented: presented,
                 expectedFingerprints: Set(endpointSeeds.map(\.publicKeySHA256))
             ))
         }
 
+        // Every path below ends with the connection proceeding: silently for a pinned or
+        // seeded key, and after an automatic trust-on-first-use for an unknown one. A
+        // certificate that has expired or is not yet valid has to interrupt all three.
+        // This check used to sit on the pinned and seeded branches only, so a capsule's
+        // very first certificate was accepted whatever its dates said — and the warning
+        // then appeared on every later visit but never on the one visit where the
+        // information was new.
+        if let issue = presented.dateIssue(at: now) {
+            return .requiresApproval(.invalidCertificateDates(presented: presented, issue: issue))
+        }
+
+        if let locallyTrusted {
+            return .allowSilently(source: locallyTrusted.source)
+        }
+        if matchesSeed {
+            return .allowSilently(source: .seed)
+        }
         return .requiresApproval(.firstUse(presented: presented))
     }
 

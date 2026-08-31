@@ -65,6 +65,140 @@ final class ServerTrustPolicyTests: XCTestCase {
         )
     }
 
+    // MARK: - Certificate dates
+
+    func testFirstUseWithExpiredCertificateRequiresDateApproval() {
+        let expiry = now.addingTimeInterval(-1)
+        let presented = PresentedServerIdentity(
+            endpoint: endpoint,
+            publicKeySHA256: fingerprint,
+            certificateNotBefore: now.addingTimeInterval(-1_000),
+            certificateNotAfter: expiry
+        )
+
+        // Trust on first use is granted automatically, so an unchecked date here meant a
+        // capsule's very first certificate was pinned however stale it was.
+        XCTAssertEqual(
+            ServerTrustPolicy().evaluate(presented: presented, locallyTrusted: nil, seeds: [], now: now),
+            .requiresApproval(.invalidCertificateDates(
+                presented: presented,
+                issue: .expired(expiredAt: expiry)
+            ))
+        )
+    }
+
+    func testFirstUseWithNotYetValidCertificateRequiresDateApproval() {
+        let validFrom = now.addingTimeInterval(1_000)
+        let presented = PresentedServerIdentity(
+            endpoint: endpoint,
+            publicKeySHA256: fingerprint,
+            certificateNotBefore: validFrom,
+            certificateNotAfter: now.addingTimeInterval(10_000)
+        )
+
+        XCTAssertEqual(
+            ServerTrustPolicy().evaluate(presented: presented, locallyTrusted: nil, seeds: [], now: now),
+            .requiresApproval(.invalidCertificateDates(
+                presented: presented,
+                issue: .notYetValid(validFrom: validFrom)
+            ))
+        )
+    }
+
+    func testFirstUseWithNoCertificateDatesStillRequiresFirstUseApproval() {
+        // Dates are optional. Their absence must not be mistaken for an invalid range.
+        let presented = PresentedServerIdentity(endpoint: endpoint, publicKeySHA256: fingerprint)
+
+        XCTAssertEqual(
+            ServerTrustPolicy().evaluate(presented: presented, locallyTrusted: nil, seeds: [], now: now),
+            .requiresApproval(.firstUse(presented: presented))
+        )
+    }
+
+    func testSeedMatchWithExpiredCertificateRequiresDateApproval() {
+        let expiry = now.addingTimeInterval(-1)
+        let presented = PresentedServerIdentity(
+            endpoint: endpoint,
+            publicKeySHA256: fingerprint,
+            certificateNotBefore: now.addingTimeInterval(-1_000),
+            certificateNotAfter: expiry
+        )
+        let seed = SeedServerIdentity(endpoint: endpoint, publicKeySHA256: fingerprint)
+
+        XCTAssertEqual(
+            ServerTrustPolicy().evaluate(presented: presented, locallyTrusted: nil, seeds: [seed], now: now),
+            .requiresApproval(.invalidCertificateDates(
+                presented: presented,
+                issue: .expired(expiredAt: expiry)
+            ))
+        )
+    }
+
+    // MARK: - Precedence between a key mismatch and a date problem
+
+    func testChangedKeyOutranksAnExpiredCertificate() {
+        let presented = PresentedServerIdentity(
+            endpoint: endpoint,
+            publicKeySHA256: otherFingerprint,
+            certificateNotBefore: now.addingTimeInterval(-1_000),
+            certificateNotAfter: now.addingTimeInterval(-1)
+        )
+        let previous = trustedIdentity(fingerprint: fingerprint)
+
+        // A substituted key is the interception signal. Describing it as merely out of
+        // date would understate what the reader is being asked to decide.
+        XCTAssertEqual(
+            ServerTrustPolicy().evaluate(presented: presented, locallyTrusted: previous, seeds: [], now: now),
+            .requiresApproval(.changed(presented: presented, previouslyTrusted: previous))
+        )
+    }
+
+    func testSeedMismatchOutranksAnExpiredCertificate() {
+        let presented = PresentedServerIdentity(
+            endpoint: endpoint,
+            publicKeySHA256: otherFingerprint,
+            certificateNotBefore: now.addingTimeInterval(-1_000),
+            certificateNotAfter: now.addingTimeInterval(-1)
+        )
+        let seed = SeedServerIdentity(endpoint: endpoint, publicKeySHA256: fingerprint)
+
+        XCTAssertEqual(
+            ServerTrustPolicy().evaluate(presented: presented, locallyTrusted: nil, seeds: [seed], now: now),
+            .requiresApproval(.seedMismatch(presented: presented, expectedFingerprints: [fingerprint]))
+        )
+    }
+
+    func testSeedsForOtherEndpointsAreIgnored() {
+        let presented = validIdentity(fingerprint: fingerprint)
+        let unrelated = SeedServerIdentity(
+            endpoint: CapsuleEndpoint(host: "other.example"),
+            publicKeySHA256: otherFingerprint
+        )
+
+        XCTAssertEqual(
+            ServerTrustPolicy().evaluate(presented: presented, locallyTrusted: nil, seeds: [unrelated], now: now),
+            .requiresApproval(.firstUse(presented: presented))
+        )
+    }
+
+    func testLocalPinSupersedesSeedPolicyForTheSameKey() {
+        // A seed for a different key must not turn an already-pinned, matching identity
+        // into a mismatch warning.
+        let presented = validIdentity(fingerprint: fingerprint)
+        let previous = trustedIdentity(fingerprint: fingerprint)
+        let staleSeed = SeedServerIdentity(endpoint: endpoint, publicKeySHA256: otherFingerprint)
+
+        XCTAssertEqual(
+            ServerTrustPolicy().evaluate(
+                presented: presented,
+                locallyTrusted: previous,
+                seeds: [staleSeed],
+                now: now
+            ),
+            .allowSilently(source: .user)
+        )
+    }
+
     func testCSVSeedParserAcceptsExistingFormat() {
         let csv = """
         host,port,public_key_sha256,last_seen_utc,times_seen,not_after_utc
