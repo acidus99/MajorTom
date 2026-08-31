@@ -153,37 +153,9 @@ enum SharedSeedIdentities {
     }
 }
 
-enum PageCompletionState: String, Codable {
-    case complete
-    case incomplete
-    case stopped
-    case failed
-}
-
-struct CachedPage: Codable {
-    var url: URL
-    var mimeType: String
-    var body: Data
-    var completion: PageCompletionState
-    var receivedAt: Date
-    var title: String? = nil
-    var documentTitle: String? = nil
-    /// The Gemini response header that produced this cached representation. Optional so
-    /// sessions written before these fields existed continue to decode.
-    var responseStatus: Int? = nil
-    var responseMeta: String? = nil
-    /// Identity actually offered in the TLS handshake that produced this representation.
-    var clientCertificateID: UUID? = nil
-}
-
-struct RestoredTabState: Codable {
-    var history: [URL]
-    var historyIndex: Int
-    var cachedPages: [CachedPage]
-    var zoom: Double
-    var title: String? = nil
-    var documentTitle: String? = nil
-}
+// PageCompletionState, CachedPage and RestoredTabState now live in MajorTomCore beside
+// NavigationState, which owns the rules that operate on them. They are durable domain
+// records, which the architecture document places in Core rather than in the app shell.
 
 /// The single-window session format written by releases before native window tabs.
 ///
