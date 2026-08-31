@@ -58,9 +58,15 @@ struct MajorTomApp: App {
                     NotificationCenter.default.post(name: .majorTomImportData, object: nil)
                 }
 
+                Button("New Tab at the End") {
+                    NotificationCenter.default.post(name: .majorTomNewTabAtEnd, object: nil)
+                }
+                .keyboardShortcut("t", modifiers: [.command, .option])
+
                 // Close Tab is not declared here. It is the standard File ▸ Close item
                 // that SwiftUI injects, retitled and retargeted at launch by
                 // FileMenuCustomization, so ⌘W belongs to exactly one menu item.
+
                 Button("Close Window") {
                     NotificationCenter.default.post(name: .majorTomCloseWindow, object: nil)
                 }
@@ -72,6 +78,16 @@ struct MajorTomApp: App {
                 // Safari's shortcut. ⌥⌘W is deliberately left alone: that is Close Other
                 // Tabs in Safari, so borrowing it here would misteach the gesture.
                 .keyboardShortcut("w", modifiers: [.command, .option, .shift])
+
+                Button("Close Tab") {
+                    NotificationCenter.default.post(name: .majorTomCloseTab, object: nil)
+                }
+                .keyboardShortcut("w", modifiers: .command)
+
+                Button("Close Other Tabs") {
+                    NotificationCenter.default.post(name: .majorTomCloseOtherTabs, object: nil)
+                }
+                .keyboardShortcut("w", modifiers: [.command, .option])
 
                 Divider()
 
@@ -247,7 +263,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         DispatchQueue.main.async {
             NSApplication.shared.activate()
             NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
-            FileMenuCustomization.apply()
+            FileMenuCustomization.install()
             MenuBarIconCustomization.install()
             NativeTabMenuCustomization.install()
         }
@@ -307,6 +323,33 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
             let keyCode = event.keyCode
             let hasCommandOnly = modifiers.contains(.command)
                 && modifiers.isDisjoint(with: [.shift, .option, .control])
+
+            // AppKit's native WindowGroup responder still treats Command-W as a window
+            // close even after its generated File-menu item is removed. Intercept the
+            // browser's tab shortcuts before they can reach that responder. Leave the
+            // Shift variants alone for Close Window and Close All Windows.
+            let isBrowserWindow = MainActor.assumeIsolated {
+                NSApplication.shared.keyWindow?.tabbingIdentifier
+                    == NativeTabCoordinator.tabbingIdentifier
+            }
+            let hasCommandAndOptionalOption = modifiers.contains(.command)
+                && modifiers.isDisjoint(with: [.shift, .control])
+            if isBrowserWindow,
+               hasCommandAndOptionalOption,
+               let character = event.charactersIgnoringModifiers?.lowercased(),
+               character == "t" || character == "w" {
+                let usesOption = modifiers.contains(.option)
+                let name: Notification.Name
+                switch (character, usesOption) {
+                case ("t", false): name = .majorTomNewTab
+                case ("t", true): name = .majorTomNewTabAtEnd
+                case ("w", false): name = .majorTomCloseTab
+                default: name = .majorTomCloseOtherTabs
+                }
+                NotificationCenter.default.post(name: name, object: nil)
+                return nil
+            }
+
             if hasCommandOnly, event.charactersIgnoringModifiers == "=" {
                 // Accept Command-= in addition to the standard Command-+ menu shortcut.
                 NotificationCenter.default.post(name: .majorTomZoomIn, object: nil)
@@ -804,13 +847,21 @@ private final class NativeTabCoordinator {
     /// too late and produces a visible blank-window/focus flash. Here the NSWindow is
     /// constructed hidden, populated, and joined to the tab group before AppKit can draw
     /// it independently.
-    func openTab(url: URL?, from parent: NSWindow, inBackground: Bool) {
+    func openTab(
+        url: URL?,
+        from parent: NSWindow,
+        inBackground: Bool,
+        atEnd: Bool = false
+    ) {
         let window = makeBrowserWindow(
             url: url,
             matching: parent,
             focusesLocationOnPresentation: url == nil && !inBackground
         )
-        parent.addTabbedWindow(window, ordered: .above)
+        let insertionAnchor = atEnd
+            ? NativeTabOrdering.endInsertionAnchor(for: parent)
+            : parent
+        insertionAnchor.addTabbedWindow(window, ordered: .above)
         let selectedWindow = inBackground ? parent : window
         prepareTabChrome(
             in: window.tabGroup?.windows ?? [parent, window],
@@ -819,6 +870,17 @@ private final class NativeTabCoordinator {
         if !inBackground {
             window.makeKeyAndOrderFront(nil)
         }
+    }
+
+    func closeOtherTabs(keeping selectedWindow: NSWindow) {
+        let otherWindows = (selectedWindow.tabGroup?.windows ?? [selectedWindow]).filter {
+            $0 !== selectedWindow
+        }
+        for window in otherWindows {
+            registeredTabs[ObjectIdentifier(window)]?.browser?.stop()
+            window.performClose(nil)
+        }
+        selectedWindow.makeKeyAndOrderFront(nil)
     }
 
     func openTabFromNativeControl() {
@@ -1332,9 +1394,17 @@ private struct BrowserWindowView: View {
             guard isCommandTarget else { return }
             openNativeTab(url: nil, inBackground: false)
         }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomNewTabAtEnd)) { _ in
+            guard isCommandTarget else { return }
+            openNativeTab(url: nil, inBackground: false, atEnd: true)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomCloseTab)) { _ in
             guard isCommandTarget else { return }
             hostWindow?.performClose(nil)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomCloseOtherTabs)) { _ in
+            guard isCommandTarget, let hostWindow else { return }
+            NativeTabCoordinator.shared.closeOtherTabs(keeping: hostWindow)
         }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomCloseWindow)) { _ in
             guard hostWindow?.isKeyWindow == true else { return }
@@ -1391,7 +1461,7 @@ private struct BrowserWindowView: View {
         NativeTabCoordinator.shared.scheduleCloudTabPublish()
     }
 
-    private func openNativeTab(url: URL?, inBackground: Bool) {
+    private func openNativeTab(url: URL?, inBackground: Bool, atEnd: Bool = false) {
         guard let hostWindow else {
             NativeTabCoordinator.shared.openWindow(url: url)
             return
@@ -1399,7 +1469,8 @@ private struct BrowserWindowView: View {
         NativeTabCoordinator.shared.openTab(
             url: url,
             from: hostWindow,
-            inBackground: inBackground
+            inBackground: inBackground,
+            atEnd: atEnd
         )
     }
 
@@ -1913,44 +1984,84 @@ private struct BrowserTabView: View {
     }
 }
 
-/// Receives menu actions that have to be delivered through AppKit's target/action rather
-/// than a SwiftUI `Button`.
-@MainActor
-private final class MenuCommandRelay: NSObject {
-    @objc func closeTab(_ sender: Any?) {
-        NotificationCenter.default.post(name: .majorTomCloseTab, object: nil)
-    }
-}
-
-/// Turns the standard File ▸ Close item into this app's Close Tab command.
-///
-/// SwiftUI injects a Close item for a `WindowGroup`, bound to ⌘W and to
-/// `performClose:`. Keeping that item is the right call — it is where a Mac user looks —
-/// but its title and its action are both wrong for a tabbed browser: `performClose:`
-/// closes the whole window, so retitling alone would produce a "Close Tab" that discards
-/// every tab in the window. Both are changed together.
-///
-/// Re-applied whenever a window becomes key, because SwiftUI rebuilds the main menu as
-/// scenes change and would otherwise restore the original title and action. Idempotent, so
-/// repeating it costs nothing.
+/// Removes SwiftUI's trailing window-level Close command and configures the browser's
+/// Option-key alternatives. SwiftUI does not expose `NSMenuItem.isAlternate`, so that
+/// native menu behavior is applied after its command items are materialized.
 @MainActor
 private enum FileMenuCustomization {
-    /// Menu items do not retain their target, so the relay has to be owned here.
-    private static let relay = MenuCommandRelay()
+    private static let observer = FileMenuObserver()
+    private static var isInstalled = false
+    private static var isApplying = false
+
+    static func install() {
+        apply()
+        guard !isInstalled else { return }
+        isInstalled = true
+        for name in [
+            NSMenu.didAddItemNotification,
+            NSMenu.didChangeItemNotification,
+            NSMenu.didBeginTrackingNotification
+        ] {
+            NotificationCenter.default.addObserver(
+                observer,
+                selector: #selector(FileMenuObserver.menuChanged(_:)),
+                name: name,
+                object: nil
+            )
+        }
+    }
 
     static func apply() {
         guard let fileMenu = NSApplication.shared.mainMenu?.item(withTitle: "File")?.submenu else {
             return
         }
-        // Matched on the action selector rather than the title, since titles are localised
-        // and this one is about to be replaced anyway.
-        for item in fileMenu.items where item.action == #selector(NSWindow.performClose(_:)) {
-            item.title = "Close Tab"
-            item.target = relay
-            item.action = #selector(MenuCommandRelay.closeTab(_:))
-            item.keyEquivalent = "w"
-            item.keyEquivalentModifierMask = [.command]
+        apply(to: fileMenu)
+    }
+
+    fileprivate static func apply(to fileMenu: NSMenu) {
+        guard !isApplying else { return }
+        isApplying = true
+        defer { isApplying = false }
+
+        // A WindowGroup always contributes its own Close/Close All item at the bottom.
+        // Browser tab/window commands are declared explicitly above, so retaining this
+        // system item creates a duplicate ⌘W action with the wrong semantics.
+        let stockCloseItems = fileMenu.items.filter { item in
+            let hasStockTitle = item.title == "Close" || item.title == "Close All"
+            let actionName = item.action.map(NSStringFromSelector)
+            return actionName == "closeTab:"
+                || actionName == "closeAll:"
+                || item.action == #selector(NSWindow.performClose(_:))
+                || (hasStockTitle && item.keyEquivalent.lowercased() == "w")
         }
+        for item in stockCloseItems { fileMenu.removeItem(item) }
+
+        for item in fileMenu.items {
+            switch item.title {
+            case "New Tab at the End":
+                configureAsAlternate(item, key: "t")
+            case "Close Other Tabs":
+                configureAsAlternate(item, key: "w")
+            default:
+                break
+            }
+        }
+    }
+
+    private static func configureAsAlternate(_ item: NSMenuItem, key: String) {
+        item.isAlternate = true
+        item.keyEquivalent = key
+        item.keyEquivalentModifierMask = [.command, .option]
+    }
+}
+
+@MainActor
+private final class FileMenuObserver: NSObject {
+    @objc func menuChanged(_ notification: Notification) {
+        // Main-menu tracking notifications are emitted by the root menu even when its
+        // File submenu is the one being opened. Always resolve the current File menu;
+        // SwiftUI may have replaced that submenu since the preceding notification.
+        FileMenuCustomization.apply()
     }
 }
 
@@ -2376,7 +2487,9 @@ extension Notification.Name {
     static let majorTomAboutWindowWillClose = Notification.Name("MajorTomAboutWindowWillClose")
     static let majorTomImportData = Notification.Name("MajorTomImportData")
     static let majorTomNewTab = Notification.Name("MajorTomNewTab")
+    static let majorTomNewTabAtEnd = Notification.Name("MajorTomNewTabAtEnd")
     static let majorTomCloseTab = Notification.Name("MajorTomCloseTab")
+    static let majorTomCloseOtherTabs = Notification.Name("MajorTomCloseOtherTabs")
     static let majorTomCloseWindow = Notification.Name("MajorTomCloseWindow")
     static let majorTomCloseAllWindows = Notification.Name("MajorTomCloseAllWindows")
     static let majorTomFocusLocation = Notification.Name("MajorTomFocusLocation")

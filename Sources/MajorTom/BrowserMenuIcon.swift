@@ -17,8 +17,6 @@ enum BrowserMenuIcon {
     static let copyLink = "doc.on.doc"
 
     static let menuBarSymbolByTitle: [String: String] = [
-        "New Tab": newTab,
-        "New Window": newWindow,
         "Back": back,
         "Forward": forward,
         "Reload Page": reload,

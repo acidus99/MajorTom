@@ -69,6 +69,32 @@ final class NativeTabCommandTargetTests: XCTestCase {
         XCTAssertTrue(first.tabGroup?.selectedWindow === third)
     }
 
+    func testEndInsertionAnchorIsTheRightmostTab() {
+        _ = NSApplication.shared
+        let first = makeWindow(title: "A")
+        let second = makeWindow(title: "B")
+        let third = makeWindow(title: "C")
+        defer {
+            first.tabGroup?.removeWindow(second)
+            first.tabGroup?.removeWindow(third)
+            [first, second, third].forEach { $0.orderOut(nil) }
+        }
+
+        first.addTabbedWindow(third, ordered: .above)
+        first.addTabbedWindow(second, ordered: .above)
+        first.tabGroup?.selectedWindow = second
+
+        XCTAssertTrue(NativeTabOrdering.endInsertionAnchor(for: second) === third)
+    }
+
+    func testEndInsertionAnchorForSingleWindowIsThatWindow() {
+        _ = NSApplication.shared
+        let window = makeWindow(title: "Only")
+        defer { window.orderOut(nil) }
+
+        XCTAssertTrue(NativeTabOrdering.endInsertionAnchor(for: window) === window)
+    }
+
     private func makeWindow(title: String) -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(x: 100, y: 100, width: 700, height: 500),
