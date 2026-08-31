@@ -1538,6 +1538,24 @@ final class BrowserModel: ObservableObject {
         if let committedURL { locationText = committedURL.absoluteString }
     }
 
+    /// Keeps an unanswered prompt's text so returning to the same address offers it back.
+    ///
+    /// Separate from `cancelInput` because the prompt may be going away for a reason that
+    /// has nothing to do with the reader answering it — navigating elsewhere, or closing
+    /// the window. In that case the status area, the loading state and the address field
+    /// belong to whatever replaced the prompt, and `cancelInput` would overwrite all
+    /// three. It also cannot read `inputPrompt`, which the navigation has already
+    /// cleared, so the target is passed in.
+    ///
+    /// A sensitive prompt's text never reaches here; the sheet does not report one.
+    func preserveInputDraft(_ draft: String, for target: GeminiRequestTarget) {
+        if draft.isEmpty {
+            inputDrafts.removeValue(forKey: target.url)
+        } else {
+            inputDrafts[target.url] = draft
+        }
+    }
+
     func submitInput(_ value: String) {
         guard let prompt = inputPrompt else { return }
         inputDrafts.removeValue(forKey: prompt.target.url)

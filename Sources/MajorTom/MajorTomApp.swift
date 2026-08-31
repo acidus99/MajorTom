@@ -1808,6 +1808,8 @@ private struct BrowserTabView: View {
                     browser.submitInput(value)
                 case .cancel(let draft):
                     browser.cancelInput(draft: draft)
+                case .dismissed(let draft):
+                    browser.preserveInputDraft(draft, for: prompt.target)
                 }
             }
         }
@@ -2139,6 +2141,10 @@ private enum CapsuleInputOutcome {
     case submit(String)
     /// Carries what was typed, so the same prompt can offer it back later.
     case cancel(draft: String)
+    /// The sheet went away without the reader answering it — a navigation elsewhere, or
+    /// the window closing. Keeps the draft, but claims none of the status area, loading
+    /// state or address field, which now belong to whatever replaced the prompt.
+    case dismissed(draft: String)
 }
 
 @available(macOS 26.0, *)
@@ -2146,9 +2152,21 @@ private struct CapsuleInputView: View {
     let prompt: BrowserModel.InputPrompt
     let validationMessage: String?
     let completion: (CapsuleInputOutcome) -> Void
+
     @State private var value: String
+    @State private var editorHeight: CGFloat
+    @State private var dragStartHeight: CGFloat?
+    /// Set once an outcome has been handed back, so dismissal by any other route can
+    /// still preserve what was typed without reporting a second outcome.
+    @State private var hasReportedOutcome = false
     @FocusState private var isFocused: Bool
     private let budget: GeminiInputBudget
+
+    /// The legacy dialog opened at 640x220 and could be resized to taste.
+    private static let sheetWidth: CGFloat = 620
+    private static let defaultEditorHeight: CGFloat = 108
+    private static let minimumEditorHeight: CGFloat = 56
+    private static let maximumEditorHeight: CGFloat = 520
 
     init(
         prompt: BrowserModel.InputPrompt,
@@ -2159,6 +2177,7 @@ private struct CapsuleInputView: View {
         self.validationMessage = validationMessage
         self.completion = completion
         _value = State(initialValue: prompt.initialText)
+        _editorHeight = State(initialValue: Self.defaultEditorHeight)
         budget = GeminiInputBudget(promptURL: prompt.target.url)
     }
 
@@ -2177,17 +2196,17 @@ private struct CapsuleInputView: View {
                 Text(prompt.message)
                     .font(.headline)
             }
-            Group {
-                if prompt.isSensitive {
-                    SecureField("Response", text: $value)
-                } else {
-                    TextField("Response", text: $value, axis: .vertical)
-                        .lineLimit(1...6)
-                }
+
+            if prompt.isSensitive {
+                // A sensitive prompt stays one line. There is no secure multiline control
+                // on the platform, and a password-style answer does not want one.
+                SecureField("Response", text: $value)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isFocused)
+                    .onSubmit { submit() }
+            } else {
+                responseEditor
             }
-            .textFieldStyle(.roundedBorder)
-            .focused($isFocused)
-            .onSubmit { submit() }
 
             HStack(alignment: .firstTextBaseline) {
                 if let validationMessage {
@@ -2195,6 +2214,10 @@ private struct CapsuleInputView: View {
                         .font(.callout)
                         .foregroundStyle(.orange)
                         .accessibilityLabel("Input error: \(validationMessage)")
+                } else if !prompt.isSensitive {
+                    Text("Return sends. Shift-Return for a line break.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer(minLength: 8)
                 Text(budgetLabel)
@@ -2205,7 +2228,7 @@ private struct CapsuleInputView: View {
 
             HStack {
                 Spacer()
-                Button("Cancel", role: .cancel) { completion(.cancel(draft: value)) }
+                Button("Cancel", role: .cancel) { report(.cancel(draft: value)) }
                     .keyboardShortcut(.cancelAction)
                 Button("Submit") { submit() }
                     .keyboardShortcut(.defaultAction)
@@ -2213,9 +2236,79 @@ private struct CapsuleInputView: View {
             }
         }
         .padding(24)
-        .frame(width: 480)
+        .frame(width: Self.sheetWidth)
         .onAppear { isFocused = true }
         .interactiveDismissDisabled()
+        // Dismissal by any route other than the two buttons — navigating away, closing
+        // the window — must still keep what was typed. Reporting a cancel here is what
+        // files the draft; `cancelInput` ignores it for a sensitive prompt.
+        .onDisappear {
+            // A sensitive answer is never kept, so there is nothing to report for one.
+            guard !hasReportedOutcome, !prompt.isSensitive else { return }
+            completion(.dismissed(draft: value))
+        }
+    }
+
+    private var responseEditor: some View {
+        VStack(spacing: 0) {
+            TextEditor(text: $value)
+                .font(.body)
+                .scrollContentBackground(.hidden)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 6)
+                .frame(height: editorHeight)
+                .focused($isFocused)
+                // Return sends the answer, because that is what a prompt's default
+                // action is. A line break therefore needs a modifier, and the text system
+                // already binds Shift-Return to one, inserted at the caret. Anything with
+                // a modifier is passed straight through to it.
+                .onKeyPress(.return, phases: .down) { press in
+                    guard press.modifiers.isEmpty else { return .ignored }
+                    submit()
+                    return .handled
+                }
+            resizeGrip
+        }
+        .background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+        .overlay {
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(Color(nsColor: .separatorColor))
+        }
+    }
+
+    /// Lets the reader make the field taller.
+    ///
+    /// A macOS sheet cannot be resized by dragging its edge, and the legacy dialog was a
+    /// real resizable window. Dragging this handle changes the field's height and the
+    /// sheet grows with it, which is the part that matters when composing a long answer.
+    private var resizeGrip: some View {
+        RoundedRectangle(cornerRadius: 2)
+            .fill(Color(nsColor: .tertiaryLabelColor))
+            .frame(width: 34, height: 4)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 4)
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture()
+                    .onChanged { gesture in
+                        let start = dragStartHeight ?? editorHeight
+                        dragStartHeight = start
+                        editorHeight = min(
+                            max(start + gesture.translation.height, Self.minimumEditorHeight),
+                            Self.maximumEditorHeight
+                        )
+                    }
+                    .onEnded { _ in dragStartHeight = nil }
+            )
+            .onHover { isInside in
+                if isInside {
+                    NSCursor.resizeUpDown.set()
+                } else {
+                    NSCursor.arrow.set()
+                }
+            }
+            .accessibilityLabel("Resize the response field")
+            .accessibilityAddTraits(.isButton)
     }
 
     private var capsuleLabel: String {
@@ -2240,7 +2333,12 @@ private struct CapsuleInputView: View {
 
     private func submit() {
         guard isWithinBudget else { return }
-        completion(.submit(value))
+        report(.submit(value))
+    }
+
+    private func report(_ outcome: CapsuleInputOutcome) {
+        hasReportedOutcome = true
+        completion(outcome)
     }
 }
 
