@@ -52,6 +52,12 @@ struct MajorTomApp: App {
                 }
                 .keyboardShortcut("t", modifiers: .command)
 
+                Divider()
+
+                Button("Import Data from Other Client…") {
+                    NotificationCenter.default.post(name: .majorTomImportData, object: nil)
+                }
+
                 // Close Tab is not declared here. It is the standard File ▸ Close item
                 // that SwiftUI injects, retitled and retargeted at launch by
                 // FileMenuCustomization, so ⌘W belongs to exactly one menu item.
@@ -198,6 +204,7 @@ struct MajorTomApp: App {
 private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate {
     private var commandKeyMonitor: Any?
     private var aboutObserver: (any NSObjectProtocol)?
+    private var importDataObserver: (any NSObjectProtocol)?
     private var menuObserver: (any NSObjectProtocol)?
     private var openICloudTabObserver: (any NSObjectProtocol)?
 
@@ -229,6 +236,13 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         ) { _ in
             // Delivered on the main queue, so main-actor isolation is guaranteed here.
             MainActor.assumeIsolated { AboutWindowPresenter.show() }
+        }
+        importDataObserver = NotificationCenter.default.addObserver(
+            forName: .majorTomImportData,
+            object: nil,
+            queue: .main
+        ) { _ in
+            MainActor.assumeIsolated { ImportDataWindowPresenter.show() }
         }
         DispatchQueue.main.async {
             NSApplication.shared.activate()
@@ -2360,6 +2374,7 @@ private extension View {
 extension Notification.Name {
     static let majorTomAbout = Notification.Name("MajorTomAbout")
     static let majorTomAboutWindowWillClose = Notification.Name("MajorTomAboutWindowWillClose")
+    static let majorTomImportData = Notification.Name("MajorTomImportData")
     static let majorTomNewTab = Notification.Name("MajorTomNewTab")
     static let majorTomCloseTab = Notification.Name("MajorTomCloseTab")
     static let majorTomCloseWindow = Notification.Name("MajorTomCloseWindow")

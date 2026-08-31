@@ -59,4 +59,14 @@ Major Tom respects system appearance and relevant accessibility settings. Color 
 
 The native app includes Gemini navigation, streaming, redirects, input prompts, trust management, client certificates, reading and source views, themes, history, bookmarks, downloads, session restoration, and private synchronization.
 
+## Importing client data
+
+File > Import Data from Other Client opens a native import wizard. It currently accepts
+Lagrange User Data ZIP exports (format major version 1) and verifies the selected archive
+before any user data changes. The import adds bookmarks to a Lagrange folder, uses the first
+bookmark tagged as Lagrange's homepage as Major Tom's homepage, imports usable RSA client
+identities into the Keychain, restores their explicitly exported path assignments, and imports
+Lagrange's trusted capsule public-key identities. It never extracts an archive to disk, and
+does not manufacture settings that Lagrange did not include in its export.
+
 Potential future work belongs in the working backlog until it has a user-facing purpose and acceptance criteria. Product requirements remain implementation-neutral unless a platform technology is itself part of the user experience.

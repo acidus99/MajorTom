@@ -100,6 +100,23 @@ final class BookmarksModel: ObservableObject {
         mutate { $0.renameFolder(with: id, to: name) }
     }
 
+    /// Imports a browser's bookmarks as one durable update, avoiding a race between
+    /// individual asynchronous bookmark writes. Existing URLs retain their normal
+    /// de-duplication behavior.
+    func importLagrangeBookmarks(_ bookmarks: [LagrangeUserDataExport.Bookmark]) {
+        mutate { collection in
+            let folderID = collection.folders.first(where: { $0.name == "Lagrange" })?.id
+                ?? collection.addFolder(named: "Lagrange")?.id
+                ?? collection.favoritesID
+            for bookmark in bookmarks {
+                // Importing must never retitle or move a bookmark the reader already
+                // has; their existing filing is more deliberate than the source's.
+                guard !collection.contains(url: bookmark.url) else { continue }
+                collection.add(title: bookmark.title, url: bookmark.url, toFolderWith: folderID)
+            }
+        }
+    }
+
     private func reload() async {
         guard let store else { return }
         let localCollection = await store.collection()
