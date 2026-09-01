@@ -103,17 +103,41 @@ final class BookmarksModel: ObservableObject {
     /// Imports a browser's bookmarks as one durable update, avoiding a race between
     /// individual asynchronous bookmark writes. Existing URLs retain their normal
     /// de-duplication behavior.
-    func importLagrangeBookmarks(_ bookmarks: [LagrangeUserDataExport.Bookmark]) {
-        mutate { collection in
-            let folderID = collection.folders.first(where: { $0.name == "Lagrange" })?.id
-                ?? collection.addFolder(named: "Lagrange")?.id
-                ?? collection.favoritesID
-            for bookmark in bookmarks {
-                // Importing must never retitle or move a bookmark the reader already
-                // has; their existing filing is more deliberate than the source's.
-                guard !collection.contains(url: bookmark.url) else { continue }
-                collection.add(title: bookmark.title, url: bookmark.url, toFolderWith: folderID)
+    func importLagrangeBookmarks(_ bookmarks: [LagrangeUserDataExport.Bookmark]) async -> Int {
+        await importBookmarks(
+            bookmarks.map { (title: $0.title, url: $0.url) },
+            intoFolderNamed: "Lagrange"
+        )
+    }
+
+    func importAlhenaBookmarks(_ bookmarks: [AlhenaUserDataExport.Bookmark]) async -> Int {
+        await importBookmarks(
+            bookmarks.map { (title: $0.title, url: $0.url) },
+            intoFolderNamed: "Alhena"
+        )
+    }
+
+    private func importBookmarks(
+        _ bookmarks: [(title: String, url: URL)],
+        intoFolderNamed folderName: String
+    ) async -> Int {
+        var seen = Set(collection.allBookmarks.map(\.url))
+        let additions = bookmarks.filter { seen.insert($0.url).inserted }
+        guard !additions.isEmpty else { return 0 }
+        do {
+            try await mutateAndWait { collection in
+                let folderID = collection.folders.first(where: { $0.name == folderName })?.id
+                    ?? collection.addFolder(named: folderName)?.id
+                    ?? collection.favoritesID
+                for bookmark in additions {
+                    // Never retitle or move a bookmark already saved in Major Tom.
+                    guard !collection.contains(url: bookmark.url) else { continue }
+                    collection.add(title: bookmark.title, url: bookmark.url, toFolderWith: folderID)
+                }
             }
+            return additions.count
+        } catch {
+            return 0
         }
     }
 
@@ -165,6 +189,23 @@ final class BookmarksModel: ObservableObject {
             self.persistSyncState()
             ICloudSyncStore.shared.updateBookmarks(next)
         }
+    }
+
+    private func mutateAndWait(
+        _ change: @escaping @Sendable (inout BookmarkCollection) -> Void
+    ) async throws {
+        guard let store else {
+            change(&collection)
+            return
+        }
+        let updated = try await store.update(change)
+        collection = updated
+        let previous = syncState
+            ?? SyncedBookmarks(collection: updated, modifiedAt: .distantPast)
+        let next = previous.reconciled(with: updated, at: Date())
+        syncState = next
+        persistSyncState()
+        ICloudSyncStore.shared.updateBookmarks(next)
     }
 
     private func applyCloudState(_ incoming: SyncedBookmarks) async {

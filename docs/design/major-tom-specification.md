@@ -61,17 +61,28 @@ The native app includes Gemini navigation, streaming, redirects, input prompts, 
 
 ## Importing client data
 
-File > Import Data from Other Clients opens a native import wizard. It currently accepts
-Lagrange User Data ZIP exports (format major version 1) and verifies the selected archive
-before any user data changes. The import adds bookmarks to a Lagrange folder, uses the first
-bookmark tagged as Lagrange's homepage as Major Tom's homepage, imports usable RSA client
-identities into the Keychain, restores their explicitly exported path assignments, and imports
-Lagrange's trusted capsule public-key identities. Existing Major Tom records always win, so an
-import never duplicates or replaces bookmarks, certificate rules, or trust decisions. The
-wizard is a stable, closable setup panel: its Lagrange instructions include a silent looping
-demonstration, and its final action is labelled Import with progress while work is in flight.
-It never extracts an archive to disk, and does not manufacture settings that Lagrange did not
-include in its export.
+File > Import Data from Other Clients opens a native import wizard. It accepts Lagrange User
+Data ZIP exports (format major version 1) and Alhena exports (format major version 2), and
+verifies the selected archive before any user data changes. Lagrange import adds bookmarks to
+a Lagrange folder, uses the first bookmark tagged as its homepage as Major Tom's homepage,
+imports usable RSA client identities into the Keychain, restores their exported path
+assignments, and imports trusted capsule public-key identities. Alhena import adds bookmarks
+to an Alhena folder; imports client identities and active path assignments; and restores the
+exported homepage, application appearance, HTTP proxy, and search URL when present. Alhena's
+favicon and link-hint preferences are intentionally not imported. Alhena's whole-certificate trust hashes cannot be safely converted
+to Major Tom's public-key trust identities and are not imported. Existing Major Tom records
+always win, so an import never duplicates or replaces bookmarks, certificate rules, or trust
+decisions. The wizard is a stable, closable three-step setup panel: each client's instructions
+include a silent looping demonstration that starts from the beginning when its screen appears
+and stops when that screen leaves. A successfully validated archive is identified by client
+and format version. Import opens a dedicated, responsive progress screen. Completion
+uses the standard success symbol and reports each imported data type separately, including
+counts for collections and individual rows for imported settings. It never executes exported
+SQL or extracts an archive to disk, and does not manufacture settings that the source client
+did not include in its export. The source-selection screen explains that available data varies
+by client and shows a client-specific summary of the data Major Tom can import without
+repeating support status. For Lagrange, a bookmark carrying the `.homepage` tag supplies the
+homepage; for Alhena, the optional `home` preference supplies it.
 
 General Settings provides Delete User Data beside Restore Default Settings. It presents a
 warning alert whose default action is Cancel; confirmation permanently deletes bookmarks, the
