@@ -501,7 +501,12 @@ private final class NativeTabCoordinator {
     }
 
     func toggleTabOverview(from window: NSWindow?) {
-        guard let window = window?.tabGroup?.selectedWindow ?? window else { return }
+        // WindowAccessor can briefly be nil while SwiftUI reconstructs browser chrome
+        // (notably after an appearance change). The toolbar action must remain enabled
+        // and use the same interactive-glass treatment as Reload, so resolve the
+        // current key window at activation time instead of disabling the control.
+        guard let window = (window ?? NSApplication.shared.keyWindow)?
+            .tabGroup?.selectedWindow ?? (window ?? NSApplication.shared.keyWindow) else { return }
         prepareTabOverviewControl(on: window)
         tabOverviewControls[ObjectIdentifier(window)]?.toggleOverview()
     }
@@ -1811,7 +1816,6 @@ private struct BrowserTabView: View {
                 BrowserToolbarButton(
                     title: "Show Tab Overview",
                     systemImage: "square.on.square",
-                    isEnabled: hostWindow != nil,
                     action: {
                         NativeTabCoordinator.shared.toggleTabOverview(from: hostWindow)
                     }
