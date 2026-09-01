@@ -41,7 +41,7 @@ cd "$project_root"
 # artifacts remain in its hidden .build directory, while the finished application
 # is packaged in the visible Build directory for convenient use from Finder.
 scratch_key="$(printf '%s' "$project_root" | shasum -a 256 | cut -c1-12)"
-scratch_path="$project_root/.build/swiftpm-$scratch_key"
+scratch_path="${MAJOR_TOM_SWIFTPM_SCRATCH_PATH:-$project_root/.build/swiftpm-$scratch_key}"
 
 # Indexing-while-building exists to feed an editor's index and does nothing for a
 # packaging build. It also writes thousands of small files into .build and renames each
