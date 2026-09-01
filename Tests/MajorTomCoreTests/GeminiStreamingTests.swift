@@ -152,6 +152,14 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertFalse(HTMLDocumentStreamRenderer.defaultThemeCSS.contains("text-wrap: balance"))
     }
 
+    func testDefaultThemeRendersBlockQuotesInItalics() {
+        XCTAssertTrue(
+            HTMLDocumentStreamRenderer.defaultThemeCSS.contains(
+                "blockquote { margin: 1rem 0; padding: .6rem 1rem; border-inline-start: .25rem solid AccentColor; font-style: italic; }"
+            )
+        )
+    }
+
     func testPreformattedLinesCarryStreamingMultilineMarkers() {
         let renderer = HTMLDocumentStreamRenderer()
         let first = String(decoding: renderer.render(.preformattedLine("one")), as: UTF8.self)

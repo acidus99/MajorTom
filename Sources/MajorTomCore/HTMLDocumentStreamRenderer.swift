@@ -292,7 +292,7 @@ public struct HTMLDocumentStreamRenderer: Sendable {
       animation: mt-spin .75s linear infinite; opacity: .8; vertical-align: -.08em;
     }
     .list-item { display: grid; grid-template-columns: 1.25rem 1fr; margin: .25rem 0; }
-    blockquote { margin: 1rem 0; padding: .6rem 1rem; border-inline-start: .25rem solid AccentColor; }
+    blockquote { margin: 1rem 0; padding: .6rem 1rem; border-inline-start: .25rem solid AccentColor; font-style: italic; }
     pre { overflow-x: auto; padding: 1rem; border-radius: .65rem; background: color-mix(in srgb, CanvasText 8%, Canvas); }
     .pre-block { margin: 1rem 0; }
     .pre-block > summary { display: flex; align-items: center; gap: .4rem; cursor: pointer; list-style: none; color: SecondaryLabelColor; font-size: .82rem; padding: .1rem 0; }
