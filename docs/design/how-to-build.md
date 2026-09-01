@@ -2,6 +2,9 @@
 
 Major Tom is a Swift package targeting macOS 26. You need macOS 26 and Xcode 26 (or its matching Swift toolchain).
 
+All development commands use SwiftPM's standard `.build` directory, so tests,
+direct executable builds, and application packaging reuse one build cache.
+
 ## Development
 
 Run the test suite from the repository root:

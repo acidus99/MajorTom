@@ -4,10 +4,6 @@
 #   make release VERSION=v2026.08.30-2
 VERSION ?= v$(shell git log -1 --format=%cd --date=format:%Y.%m.%d)
 BRANCH := $(shell git branch --show-current)
-PROJECT_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
-SWIFTPM_SCRATCH_KEY := $(shell printf '%s' '$(PROJECT_ROOT)' | shasum -a 256 | cut -c1-12)
-SWIFTPM_SCRATCH_PATH := $(PROJECT_ROOT)/.build/swiftpm-$(SWIFTPM_SCRATCH_KEY)
-SWIFTPM_FLAGS := --disable-index-store --scratch-path "$(SWIFTPM_SCRATCH_PATH)"
 RELEASE_ARCHIVE := Build/Release/MajorTom-$(VERSION)-macos.zip
 RELEASE_CHECKSUM := $(RELEASE_ARCHIVE).sha256
 APP_VIDEOS := $(wildcard Assets/App/*.mov)
@@ -17,10 +13,10 @@ APP_VIDEO_RESOURCES := $(patsubst Assets/App/%.mov,Resources/%.mp4,$(APP_VIDEOS)
 
 dev:
 	@$(MAKE) test
-	MAJOR_TOM_SWIFTPM_SCRATCH_PATH="$(SWIFTPM_SCRATCH_PATH)" Scripts/build-app.sh
+	Scripts/build-app.sh
 
 test:
-	swift test $(SWIFTPM_FLAGS)
+	swift test --disable-index-store
 
 videos: $(APP_VIDEO_RESOURCES)
 
