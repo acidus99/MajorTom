@@ -1976,14 +1976,11 @@ final class BrowserModel: ObservableObject {
         let evaluation = trustPolicy.evaluate(
             presented: identity,
             locallyTrusted: locallyTrusted,
-            seeds: SharedSeedIdentities.all
+            seeds: []
         )
 
         switch evaluation {
         case .allowSilently(let source):
-            // Recorded for a seed match too, not only for an already-trusted identity:
-            // pinning it locally means a later key substitution is a change to warn
-            // about rather than another silent seed acceptance.
             if let trustStore {
                 try? await trustStore.trust(identity, source: source)
             }

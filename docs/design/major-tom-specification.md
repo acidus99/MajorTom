@@ -29,7 +29,7 @@ Document themes are independent of application appearance. Dracula Dark is the d
 
 When a visited capsule provides a favicon, its full-color emoji appears on the Page Information control and the tab. Without a favicon, the Page Information control uses the standard information-in-a-circle symbol.
 
-Navigation distinguishes the page currently being read from the destination being loaded. Stop cancels the request. Back and Forward behave predictably, redirects commit only their final location, and failures are clearly browser-generated pages. The native tab bar includes Safari-style Add Tab and Show Tab Overview controls; the latter enters AppKit's Tab Overview, whose top-right icon-only Hide Tab Overview button and Escape key return to the selected tab. In the File menu, holding Option changes New Tab (⌘T) to New Tab at the End (⌥⌘T), which appends and selects a tab, and changes Close Tab (⌘W) to Close Other Tabs (⌥⌘W), which keeps only the selected tab in its window. Browser commands, shortcuts, menus, gestures, context menus, saving, find, zoom, and source viewing use normal Mac conventions.
+Navigation distinguishes the page currently being read from the destination being loaded. Stop cancels the request. Back and Forward behave predictably, redirects commit only their final location, and failures are clearly browser-generated pages. The native tab bar includes Safari-style Add Tab and Show Tab Overview controls; the latter enters AppKit's Tab Overview, whose top-right icon-only Hide Tab Overview button and Escape key return to the selected tab. In the File menu, holding Option changes New Tab (⌘T) to New Tab at the End (⌥⌘T), which appends and selects a tab, and changes Close Tab (⌘W) to Close Other Tabs (⌥⌘W), which keeps only the selected tab in its window. The Favorites Bar bookmark menu includes a destructive Delete command. Browser commands, shortcuts, menus, gestures, context menus, saving, find, zoom, and source viewing use normal Mac conventions.
 
 ## Progressive, faithful content
 
@@ -43,7 +43,7 @@ View Source and Save Page As always use the original response body. Caching must
 
 ## Trust, security, and privacy
 
-Gemini connections use TLS and trust on first use, keyed by host, port, and the server's SHA-256 SPKI fingerprint. A seeded match may proceed quietly. First use, changed identities, and invalid certificate dates require clear, deliberate user decisions that identify the capsule, explain the risk in plain language, expose relevant details, and always provide a safe cancellation path.
+Gemini connections use TLS and trust on first use, keyed by host, port, and the server's SHA-256 SPKI fingerprint. Changed identities and invalid certificate dates require clear, deliberate user decisions that identify the capsule, explain the risk in plain language, expose relevant details, and always provide a safe cancellation path.
 
 Client certificates are offered only after a user has explicitly approved a matching capsule or path scope. Private keys remain in the Keychain; they are never placed in preferences or CloudKit. A capsule's identity must never be sent to another capsule through a redirect or overly broad rule.
 

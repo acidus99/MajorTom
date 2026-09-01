@@ -119,40 +119,6 @@ enum SharedFaviconStore {
     }()
 }
 
-/// Capsule identities known ahead of first contact, read once per launch.
-///
-/// Legacy Major Tom read the same `certs.csv` from Application Support, with the path
-/// overridable by `MAJOR_TOM_CERT_SEED_CSV`. A seeded capsule is trusted silently on
-/// first connection and a *mismatch* against a seed is treated as a real warning rather
-/// than a first-use auto-trust, which is the whole point: without seeds, the very first
-/// connection to a capsule is the one moment an interception cannot be detected.
-///
-/// A missing or unreadable file yields no seeds, which simply restores trust-on-first-use
-/// for every capsule.
-enum SharedSeedIdentities {
-    static let all: Set<SeedServerIdentity> = load()
-
-    static var fileURL: URL? {
-        let override = ProcessInfo.processInfo.environment["MAJOR_TOM_CERT_SEED_CSV"] ?? ""
-        if !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return URL(fileURLWithPath: override)
-        }
-        guard let root = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else { return nil }
-        return root
-            .appendingPathComponent("Major Tom", isDirectory: true)
-            .appendingPathComponent("certs.csv")
-    }
-
-    private static func load() -> Set<SeedServerIdentity> {
-        guard let fileURL,
-              let text = try? String(contentsOf: fileURL, encoding: .utf8) else { return [] }
-        return SeedIdentityCSV.parse(text)
-    }
-}
-
 // PageCompletionState, CachedPage and RestoredTabState now live in MajorTomCore beside
 // NavigationState, which owns the rules that operate on them. They are durable domain
 // records, which the architecture document places in Core rather than in the app shell.

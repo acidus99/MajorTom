@@ -58,7 +58,7 @@ The tab owns its committed page, pending destination, history position, active r
 
 ## Trust and persistence
 
-The trust service computes SHA-256 SPKI fingerprints and resolves seed, first-use, changed-key, and certificate-date decisions before content is accepted. The UI presents a decision; the trust service records it.
+The trust service computes SHA-256 SPKI fingerprints and resolves first-use, changed-key, and certificate-date decisions before content is accepted. The UI presents a decision; the trust service records it.
 
 Persistent records use domain types, never views, WebKit objects, or network tasks. Local stores are authoritative while offline. CloudKit mirrors selected durable user intent; Keychain holds client identities and their private keys. Cloud synchronization queries the current records in Major Tom's private custom zone; it does not replay the zone's complete change history, while local tombstones continue to prevent deleted intent from being resurrected by another device. Complete and incomplete responses remain distinct throughout persistence and caching.
 
