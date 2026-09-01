@@ -66,7 +66,7 @@ cp "$executable" "$contents/MacOS/MajorTom"
 cp "$project_root/Resources/Info.plist" "$contents/Info.plist"
 cp "$project_root/Resources/AppIcon.icns" "$contents/Resources/AppIcon.icns"
 cp "$project_root/Resources/funpack.dat" "$contents/Resources/funpack.dat"
-cp "$project_root/Resources/lagrange-export.mp4" "$contents/Resources/lagrange-export.mp4"
+cp "$project_root/Resources/lagrange-data-export.mp4" "$contents/Resources/lagrange-data-export.mp4"
 
 # --- Version stamping -------------------------------------------------------
 # Mirrors Kennedy's scheme (Server/Kennedy.Server.csproj): identify a build by the
