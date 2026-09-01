@@ -137,7 +137,7 @@ private final class LagrangeExportVideoController: ObservableObject {
     private var looper: AVPlayerLooper?
 
     init() {
-        guard let url = Bundle.main.url(forResource: "lagrange-export", withExtension: "mp4") else { return }
+        guard let url = Bundle.main.url(forResource: "lagrange-data-export", withExtension: "mp4") else { return }
         player.isMuted = true
         looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(url: url))
         player.play()
