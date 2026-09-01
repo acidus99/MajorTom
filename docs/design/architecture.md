@@ -68,6 +68,12 @@ WebKit renders Major Tom-controlled HTML derived from semantic document changes.
 
 The presentation environment uses a restrictive content-security policy and intercepts Gemini links for normal tab navigation. Browser-owned interactions cross a small typed boundary; native WebKit hooks take precedence over custom script.
 
+The WebKit document remains edge-to-edge beneath Major Tom's navigation and Favorites
+chrome. Because those controls are a SwiftUI overlay rather than an AppKit toolbar or
+titlebar accessory, WebKit cannot infer their geometry. The presentation bridge applies
+the measured chrome height only to `NSScrollView.scrollerInsets`, keeping the scroll thumb
+below the browser chrome without removing the document background from the glass context.
+
 This boundary permits another renderer in the future without changing protocol, trust, parsing, or persistence. That is a containment boundary, not a plug-in system.
 
 ## Security boundaries

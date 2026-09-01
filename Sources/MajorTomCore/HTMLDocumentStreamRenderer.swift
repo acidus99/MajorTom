@@ -323,7 +323,6 @@ public struct HTMLDocumentStreamRenderer: Sendable {
     public static let printThemeCSS = """
     @page { margin: 0.65in; }
     @media print {
-      /* body's top padding only exists to clear the floating browser chrome. */
       :root { color-scheme: light; zoom: 1 !important; font-size: 11pt; }
       body { padding-top: 0 !important; color: #000 !important; background: #fff !important; }
       main { max-width: none; margin: 0; padding: 0; }

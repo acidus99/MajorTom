@@ -1504,11 +1504,54 @@ private enum NativeTabRestorationState {
 }
 
 @available(macOS 26.0, *)
+private struct BrowserToolbarButtonLabel: View {
+    let systemImage: String
+    /// A capsule favicon replaces the system glyph while retaining the button's native
+    /// hit target, interaction treatment, help text, and accessibility name.
+    var favicon: String?
+
+    var body: some View {
+        // Keep the conditional inside one concrete label container. Control containers
+        // are allowed to flatten a Group's children; doing that here made the fallback
+        // info.circle and the favicon appear as two separate controls.
+        ZStack {
+            if let favicon {
+                // Emoji favicons are rendered by Apple Color Emoji, so do not apply
+                // a tint that would turn them into a monochrome toolbar glyph.
+                Text(favicon)
+                    .font(.system(size: 15))
+            } else {
+                Image(systemName: systemImage)
+            }
+        }
+        .frame(minWidth: 16, minHeight: 16)
+    }
+}
+
+@available(macOS 26.0, *)
 private struct BrowserToolbarButton: View {
     let title: String
     let systemImage: String
-    /// A capsule favicon replaces the system glyph while retaining the button's native
-    /// hit target, hover treatment, help text, and accessibility name.
+    var favicon: String?
+    var isEnabled = true
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            BrowserToolbarButtonLabel(systemImage: systemImage, favicon: favicon)
+        }
+        .buttonStyle(.glass)
+        .controlSize(.large)
+        .disabled(!isEnabled)
+        .help(title)
+        .accessibilityLabel(title)
+    }
+}
+
+@available(macOS 26.0, *)
+private struct BrowserToolbarSegmentButton: View {
+    let title: String
+    let systemImage: String
     var favicon: String?
     var isEnabled = true
     let action: () -> Void
@@ -1516,30 +1559,17 @@ private struct BrowserToolbarButton: View {
 
     var body: some View {
         Button(action: action) {
-            Group {
-                if let favicon {
-                    // Emoji favicons are rendered by Apple Color Emoji, so do not apply
-                    // a tint that would turn them into a monochrome toolbar glyph.
-                    Text(favicon)
-                        .font(.system(size: 15))
-                } else {
-                    Image(systemName: systemImage)
-                }
-            }
-                .frame(width: 38, height: 30)
-                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            BrowserToolbarButtonLabel(systemImage: systemImage, favicon: favicon)
+                .frame(width: 30, height: 30)
+                .contentShape(Circle())
         }
-        .buttonStyle(
-            SafariToolbarButtonStyle(
-                isHovered: isHovered,
-                isEnabled: isEnabled,
-                preservesFaviconColors: favicon != nil
-            )
-        )
+        .buttonStyle(SafariToolbarSegmentButtonStyle(
+            isHovered: isHovered,
+            isEnabled: isEnabled,
+            preservesFaviconColors: favicon != nil
+        ))
         .disabled(!isEnabled)
-        .onHover { hovering in
-            isHovered = isEnabled && hovering
-        }
+        .onHover { hovering in isHovered = isEnabled && hovering }
         .onChange(of: isEnabled) { _, enabled in
             if !enabled { isHovered = false }
         }
@@ -1549,7 +1579,7 @@ private struct BrowserToolbarButton: View {
 }
 
 @available(macOS 26.0, *)
-private struct SafariToolbarButtonStyle: ButtonStyle {
+private struct SafariToolbarSegmentButtonStyle: ButtonStyle {
     let isHovered: Bool
     let isEnabled: Bool
     let preservesFaviconColors: Bool
@@ -1562,32 +1592,21 @@ private struct SafariToolbarButtonStyle: ButtonStyle {
                 configuration.label.foregroundStyle(Color(nsColor: .labelColor))
             }
         }
-            // Emoji favicons retain their intrinsic colors and are not dimmed into a
-            // toolbar-glyph appearance.
-            .opacity(isEnabled ? (preservesFaviconColors ? 1 : 0.72) : 0.25)
-            .background {
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .fill(
-                        Color(nsColor: .controlBackgroundColor)
-                            .opacity(isEnabled ? 0.72 : 0.4)
-                    )
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(Color.primary.opacity(interactionOpacity(isPressed: configuration.isPressed)))
-                    }
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .strokeBorder(Color(nsColor: .separatorColor).opacity(0.32), lineWidth: 0.5)
-                    }
-            }
-            .animation(.easeOut(duration: 0.1), value: isHovered)
-            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+        .opacity(isEnabled ? 1 : 0.3)
+        .background {
+            Circle()
+                .fill(Color.primary.opacity(interactionOpacity(
+                    isPressed: configuration.isPressed
+                )))
+        }
+        .animation(.easeOut(duration: 0.1), value: isHovered)
+        .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
     }
 
     private func interactionOpacity(isPressed: Bool) -> Double {
         guard isEnabled else { return 0 }
-        if isPressed { return 0.12 }
-        return isHovered ? 0.05 : 0
+        if isPressed { return 0.14 }
+        return isHovered ? 0.08 : 0
     }
 }
 
@@ -1653,16 +1672,16 @@ private struct BrowserTabView: View {
 
                     StreamingWebViewPrototype(
                         browser: browser,
-                        findNavigatorIsPresented: $showsFind
+                        findNavigatorIsPresented: $showsFind,
+                        scrollerTopInset: chromeHeight
                     )
                         .opacity(
                             browser.hasPresentedInitialDocument
                                 && !browser.isRestoringHistoryScroll ? 1 : 0
                         )
-                        // Keep the document behind the floating chrome so its colors and
-                        // imagery continue through the title, tab, toolbar, and Favorites
-                        // bars. The generated document CSS reserves reading space beneath
-                        // the chrome; only WebKit's native Find bar needs the view inset.
+                        // Keep document content edge-to-edge beneath the floating chrome,
+                        // like Safari. StreamingWebViewPrototype separately insets only
+                        // WebKit's scroller so its thumb begins below these controls.
                         .padding(.top, showsFind ? chromeHeight : 0)
                         .animation(.easeOut(duration: 0.15), value: showsFind)
                 }
@@ -1719,41 +1738,54 @@ private struct BrowserTabView: View {
 
             VStack(spacing: 0) {
             HStack(spacing: 8) {
-                // Safari's navigation glyphs gain a quiet rounded background only on
-                // hover. Disabled history directions stay visibly muted and never
-                // acquire that hover treatment.
-                HStack(spacing: 2) {
-                    BrowserToolbarButton(
-                        title: "Back",
-                        systemImage: "chevron.left",
-                        isEnabled: browser.canGoBack,
-                        action: browser.goBack
-                    )
-                    BrowserToolbarButton(
-                        title: "Forward",
-                        systemImage: "chevron.right",
-                        isEnabled: browser.canGoForward,
-                        action: browser.goForward
-                    )
+                // Safari uses one glass surface with compact independent actions inside
+                // it. This avoids the wide spacing and broad sampling region produced by
+                // unioning two complete glass buttons.
+                HStack(spacing: 0) {
+                        BrowserToolbarSegmentButton(
+                            title: "Back",
+                            systemImage: "chevron.left",
+                            isEnabled: browser.canGoBack,
+                            action: browser.goBack
+                        )
+                        .overlay(alignment: .trailing) {
+                            Divider()
+                                .padding(.vertical, 7)
+                                .allowsHitTesting(false)
+                        }
+                        BrowserToolbarSegmentButton(
+                            title: "Forward",
+                            systemImage: "chevron.right",
+                            isEnabled: browser.canGoForward,
+                            action: browser.goForward
+                        )
                 }
+                .padding(.horizontal, 3)
+                .padding(.vertical, 2)
+                .glassEffect(.regular, in: Capsule())
                 .fixedSize()
 
-                BrowserToolbarButton(
-                    title: "Home",
-                    systemImage: "house",
-                    action: browser.goHome
-                )
-
-                // Safari puts page-level information behind a control at the leading edge
-                // of the address field. A capsule favicon personalizes that control; the
-                // standard info.circle remains its fallback.
-                BrowserToolbarButton(
-                    title: "Page Information",
-                    systemImage: "info.circle",
-                    favicon: browser.favicon,
-                    isEnabled: browser.committedURL != nil,
-                    action: browser.showPageInformation
-                )
+                // Home and Page Information both describe or change the current page,
+                // so they form a second connected functional group. A capsule favicon
+                // personalizes Page Information; info.circle remains its fallback.
+                HStack(spacing: 0) {
+                        BrowserToolbarSegmentButton(
+                            title: "Home",
+                            systemImage: "house",
+                            action: browser.goHome
+                        )
+                        BrowserToolbarSegmentButton(
+                            title: "Page Information",
+                            systemImage: "info.circle",
+                            favicon: browser.favicon,
+                            isEnabled: browser.committedURL != nil,
+                            action: browser.showPageInformation
+                        )
+                }
+                .padding(.horizontal, 3)
+                .padding(.vertical, 2)
+                .glassEffect(.regular, in: Capsule())
+                .fixedSize()
 
                 TextField("Search or enter capsule address", text: $browser.locationText)
                     .textFieldStyle(.roundedBorder)

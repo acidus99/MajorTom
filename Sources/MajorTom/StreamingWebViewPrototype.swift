@@ -3050,12 +3050,68 @@ struct StreamingWebViewPrototype: View {
     /// Drives WebKit's native find bar, including its system matching, highlighting,
     /// match count, wrap behavior, and keyboard navigation.
     @Binding var findNavigatorIsPresented: Bool
+    /// Content remains edge-to-edge, while the overlay scroller starts below Major
+    /// Tom's custom navigation and Favorites chrome as it does for a system toolbar.
+    let scrollerTopInset: CGFloat
 
     var body: some View {
         WebView(browser.page)
             .webViewTextSelection(.enabled)
             .webViewMagnificationGestures(.enabled)
             .findNavigator(isPresented: $findNavigatorIsPresented)
+            .background(WebViewScrollerInsetAccessor(topInset: scrollerTopInset))
+    }
+}
+
+@available(macOS 26.0, *)
+private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
+    let topInset: CGFloat
+
+    final class Coordinator {
+        weak var scrollView: NSScrollView?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        updateScroller(from: view, coordinator: context.coordinator)
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        updateScroller(from: view, coordinator: context.coordinator)
+    }
+
+    private func updateScroller(from view: NSView, coordinator: Coordinator) {
+        let inset = max(0, topInset)
+        DispatchQueue.main.async {
+            if coordinator.scrollView == nil {
+                coordinator.scrollView = enclosingScrollView(for: view)
+            }
+            guard let scrollView = coordinator.scrollView else { return }
+            var insets = scrollView.scrollerInsets
+            guard insets.top != inset else { return }
+            insets.top = inset
+            scrollView.scrollerInsets = insets
+        }
+    }
+
+    private func enclosingScrollView(for view: NSView) -> NSScrollView? {
+        var ancestor = view.superview
+        while let candidate = ancestor {
+            if let scrollView = firstScrollView(in: candidate) { return scrollView }
+            ancestor = candidate.superview
+        }
+        return nil
+    }
+
+    private func firstScrollView(in view: NSView) -> NSScrollView? {
+        if let scrollView = view as? NSScrollView { return scrollView }
+        for child in view.subviews {
+            if let scrollView = firstScrollView(in: child) { return scrollView }
+        }
+        return nil
     }
 }
 
