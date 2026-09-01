@@ -6,8 +6,10 @@ VERSION ?= v$(shell git log -1 --format=%cd --date=format:%Y.%m.%d)
 BRANCH := $(shell git branch --show-current)
 RELEASE_ARCHIVE := Build/Release/MajorTom-$(VERSION)-macos.zip
 RELEASE_CHECKSUM := $(RELEASE_ARCHIVE).sha256
+APP_VIDEOS := $(wildcard Assets/App/*.mov)
+APP_VIDEO_RESOURCES := $(patsubst Assets/App/%.mov,Resources/%.mp4,$(APP_VIDEOS))
 
-.PHONY: dev test prod check-release release
+.PHONY: dev test videos prod check-release release
 
 dev:
 	@$(MAKE) test
@@ -15,6 +17,22 @@ dev:
 
 test:
 	swift test
+
+videos: $(APP_VIDEO_RESOURCES)
+
+Resources/%.mp4: Assets/App/%.mov
+	@mkdir -p Resources
+	ffmpeg -y -i "$<" \
+		-an \
+		-vf "fps=20" \
+		-c:v libx265 \
+		-preset slow \
+		-crf 33 \
+		-pix_fmt yuv420p \
+		-tag:v hvc1 \
+		-x265-params "keyint=40:min-keyint=20" \
+		-movflags +faststart \
+		"$@"
 
 prod:
 	@$(MAKE) test
