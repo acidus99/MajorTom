@@ -61,12 +61,16 @@ The native app includes Gemini navigation, streaming, redirects, input prompts, 
 
 ## Importing client data
 
-File > Import Data from Other Client opens a native import wizard. It currently accepts
+File > Import Data from Other Clients opens a native import wizard. It currently accepts
 Lagrange User Data ZIP exports (format major version 1) and verifies the selected archive
 before any user data changes. The import adds bookmarks to a Lagrange folder, uses the first
 bookmark tagged as Lagrange's homepage as Major Tom's homepage, imports usable RSA client
 identities into the Keychain, restores their explicitly exported path assignments, and imports
-Lagrange's trusted capsule public-key identities. It never extracts an archive to disk, and
-does not manufacture settings that Lagrange did not include in its export.
+Lagrange's trusted capsule public-key identities. Existing Major Tom records always win, so an
+import never duplicates or replaces bookmarks, certificate rules, or trust decisions. The
+wizard is a stable, closable setup panel: its Lagrange instructions include a silent looping
+demonstration, and its final action is labelled Import with progress while work is in flight.
+It never extracts an archive to disk, and does not manufacture settings that Lagrange did not
+include in its export.
 
 Potential future work belongs in the working backlog until it has a user-facing purpose and acceptance criteria. Product requirements remain implementation-neutral unless a platform technology is itself part of the user experience.

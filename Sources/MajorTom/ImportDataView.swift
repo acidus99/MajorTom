@@ -1,4 +1,5 @@
 import AppKit
+import AVKit
 import MajorTomCore
 import SwiftUI
 import UniformTypeIdentifiers
@@ -18,6 +19,7 @@ private final class ImportDataModel: ObservableObject {
     @Published var errorMessage: String?
     @Published var isImporting = false
     @Published var resultMessage: String?
+    @Published var importProgress: (completed: Int, total: Int, message: String)?
 
     func chooseExport() {
         let panel = NSOpenPanel()
@@ -35,7 +37,7 @@ private final class ImportDataModel: ObservableObject {
         }
         isImporting = true
         errorMessage = nil
-        Task {
+        Task { @MainActor in
             do {
                 // A User Data export can contain a large trust database. Reading it on
                 // the main actor used to leave the app unable to redraw while unzip was
@@ -57,11 +59,21 @@ private final class ImportDataModel: ObservableObject {
         guard let export else { return }
         isImporting = true
         errorMessage = nil
-        Task {
+        resultMessage = nil
+        Task { @MainActor in
             var importedCertificates = 0
             var associations = 0
             var certificatesByDigest: [String: UUID] = [:]
-            for identity in export.identities {
+            let totalSteps = max(1, export.identities.count + export.identityAssignments.count + 2)
+            var completedSteps = 0
+            @MainActor func reportProgress(_ message: String) {
+                importProgress = (completedSteps, totalSteps, message)
+            }
+
+            reportProgress("Importing client certificates…")
+            for (index, identity) in export.identities.enumerated() {
+                reportProgress("Importing client certificate \(index + 1) of \(export.identities.count)…")
+                defer { completedSteps += 1 }
                 do {
                     let parsed = try ClientCertificateImport.parse(
                         pem: identity.certificatePEM + "\n" + identity.privateKeyPEM
@@ -80,7 +92,9 @@ private final class ImportDataModel: ObservableObject {
                     continue
                 }
             }
-            for assignment in export.identityAssignments {
+            for (index, assignment) in export.identityAssignments.enumerated() {
+                reportProgress("Importing identity assignment \(index + 1) of \(export.identityAssignments.count)…")
+                defer { completedSteps += 1 }
                 guard let certificateID = certificatesByDigest[assignment.identityDigest] else { continue }
                 guard let proposed = ClientCertificateAssociation.pathAndDescendants(
                     certificateID: certificateID,
@@ -97,21 +111,54 @@ private final class ImportDataModel: ObservableObject {
                 )
                 associations += 1
             }
-            for identity in export.trustedIdentities {
-                try? await SharedTrustedIdentityStore.shared?.trust(
-                    PresentedServerIdentity(endpoint: identity.endpoint, publicKeySHA256: identity.publicKeySHA256),
-                    source: .user
-                )
+            reportProgress("Saving trusted capsule identities…")
+            let trustedIdentities = export.trustedIdentities.map {
+                PresentedServerIdentity(endpoint: $0.endpoint, publicKeySHA256: $0.publicKeySHA256)
             }
+            _ = try? await SharedTrustedIdentityStore.shared?.importTrustedIdentities(trustedIdentities)
+            completedSteps += 1
+            reportProgress("Importing bookmarks and settings…")
             BookmarksModel.shared.importLagrangeBookmarks(export.bookmarks)
             if let homepage = export.bookmarks.first(where: \.isHomepage) {
                 var preferences = BrowserSettingsStore.shared.preferences
                 preferences.homepage = homepage.url.absoluteString
                 BrowserSettingsStore.shared.preferences = preferences
             }
+            completedSteps += 1
             isImporting = false
-            resultMessage = "Imported \(export.bookmarks.count) bookmarks, \(importedCertificates) client certificates, and \(associations) identity assignments."
+            importProgress = nil
+            resultMessage = "Imported \(export.bookmarks.count) bookmarks, \(importedCertificates) client certificates, and \(associations) identity assignments. Existing data was kept."
         }
+    }
+}
+
+private final class LagrangeExportVideoController: ObservableObject {
+    let player = AVQueuePlayer()
+    private var looper: AVPlayerLooper?
+
+    init() {
+        guard let url = Bundle.main.url(forResource: "lagrange-export", withExtension: "mp4") else { return }
+        player.isMuted = true
+        looper = AVPlayerLooper(player: player, templateItem: AVPlayerItem(url: url))
+        player.play()
+    }
+
+    deinit { player.pause() }
+}
+
+private struct LoopingVideoView: NSViewRepresentable {
+    let player: AVPlayer
+
+    func makeNSView(context: Context) -> AVPlayerView {
+        let view = AVPlayerView()
+        view.player = player
+        view.controlsStyle = .none
+        view.videoGravity = .resizeAspect
+        return view
+    }
+
+    func updateNSView(_ view: AVPlayerView, context: Context) {
+        view.player = player
     }
 }
 
@@ -155,16 +202,20 @@ private enum LagrangeArchiveReader {
 
 private struct ImportDataView: View {
     @StateObject private var model = ImportDataModel()
+    @StateObject private var exportVideo = LagrangeExportVideoController()
     let dismiss: () -> Void
+    let setWindowTitle: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            if model.step == 0 { sourceStep } else { lagrangeStep }
+        VStack(alignment: .leading, spacing: 0) {
+            Group {
+                if model.step == 0 { sourceStep } else { lagrangeStep }
+            }
+            .frame(maxHeight: .infinity, alignment: .topLeading)
             Divider()
             HStack {
                 if model.step == 1 { Button("Back") { model.step = 0 } }
                 Spacer()
-                Button("Cancel", action: dismiss)
                 if model.step == 0 {
                     Button("Next") { model.step = 1 }
                         .keyboardShortcut(.defaultAction)
@@ -177,14 +228,24 @@ private struct ImportDataView: View {
                     Button("Done", action: dismiss).keyboardShortcut(.defaultAction)
                 }
             }
+            .frame(height: 52)
         }
         .padding(24)
-        .frame(width: 610)
+        // This is hosted directly in an NSPanel rather than presented as a SwiftUI
+        // sheet. Keep its fitted size stable as the source changes: on macOS 26,
+        // animating an NSHostingView-owned panel during a radio-group update can throw
+        // an AppKit constraint exception.
+        .frame(width: 650, height: 600, alignment: .topLeading)
+        .onAppear { updateWindowTitle() }
+        .onChange(of: model.step) { _, _ in updateWindowTitle() }
+    }
+
+    private func updateWindowTitle() {
+        setWindowTitle(model.step == 0 ? "Import Data from Other Clients" : "Import from Lagrange")
     }
 
     private var sourceStep: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Import Data from Other Client").font(.title2)
             Text("Import exported bookmarks, settings, client-side certificates, and identities from other Gemini Clients.")
             Picker("Gemini client", selection: $model.source) {
                 ForEach(ImportDataModel.Source.allCases) { source in
@@ -192,24 +253,34 @@ private struct ImportDataView: View {
                 }
             }
             .pickerStyle(.radioGroup)
-            if model.source == .alhena {
-                Text("Importing from Alhena is not available yet.").foregroundStyle(.secondary)
-            }
+            Text(model.source == .lagrange
+                 ? "Lagrange exports are supported."
+                : "Importing from Alhena is not available yet.")
+                .foregroundStyle(.secondary)
         }
+        .padding(.top, 4)
     }
 
     private var lagrangeStep: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Import from Lagrange").font(.title2)
-            Text("In Lagrange:")
-            VStack(alignment: .leading, spacing: 4) {
-                Text("1. Choose File > User Data > Export.")
-                Text("2. Save the export to your Downloads folder.")
-                Text("3. Choose that ZIP file below.")
-            }
-            Text("Major Tom imports bookmarks, the first homepage bookmark, client certificates, per-path identity assignments, and trusted capsule identities.")
+        VStack(alignment: .leading, spacing: 12) {
+            LoopingVideoView(player: exportVideo.player)
+                .frame(maxWidth: .infinity)
+                .frame(height: 330)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .accessibilityLabel("Silent looping demonstration of exporting Lagrange user data")
+            Text("In Lagrange, choose File > User Data > Export. Save the ZIP file, then choose it below.")
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Imports bookmarks, homepage, client certificates, identity assignments, and trusted capsule identities. Existing data is kept.")
+                .fixedSize(horizontal: false, vertical: true)
             Button("Choose UserData Export…") { model.chooseExport() }
                 .disabled(model.isImporting)
+            importStatus
+        }
+    }
+
+    @ViewBuilder
+    private var importStatus: some View {
+        VStack(alignment: .leading, spacing: 6) {
             if model.isImporting && model.export == nil {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)
@@ -220,8 +291,16 @@ private struct ImportDataView: View {
                 Text("Selected: \(selectedFileName) (Lagrange \(model.export?.version ?? ""))").foregroundStyle(.secondary)
             }
             if let error = model.errorMessage { Text(error).foregroundStyle(.red) }
+            if let progress = model.importProgress {
+                VStack(alignment: .leading, spacing: 6) {
+                    ProgressView(value: Double(progress.completed), total: Double(progress.total))
+                    Text(progress.message).foregroundStyle(.secondary)
+                }
+            }
             if let result = model.resultMessage { Text(result).foregroundStyle(.secondary) }
         }
+        .font(.body)
+        .frame(maxWidth: .infinity, minHeight: 48, maxHeight: 48, alignment: .topLeading)
     }
 }
 
@@ -232,13 +311,19 @@ enum ImportDataWindowPresenter {
     static func show() {
         if let window, window.isVisible { window.makeKeyAndOrderFront(nil); return }
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 610, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 650, height: 600),
             styleMask: [.titled, .closable], backing: .buffered, defer: false
         )
-        panel.title = "Import Data from Other Client"
+        panel.title = "Import Data from Other Clients"
+        let contentSize = NSSize(width: 650, height: 600)
+        panel.contentMinSize = contentSize
+        panel.contentMaxSize = contentSize
         panel.isReleasedWhenClosed = false
         panel.center()
-        panel.contentView = NSHostingView(rootView: ImportDataView { panel.close() })
+        panel.contentView = NSHostingView(rootView: ImportDataView(
+            dismiss: { panel.close() },
+            setWindowTitle: { panel.title = $0 }
+        ))
         window = panel
         panel.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)

@@ -52,12 +52,6 @@ struct MajorTomApp: App {
                 }
                 .keyboardShortcut("t", modifiers: .command)
 
-                Divider()
-
-                Button("Import Data from Other Client…") {
-                    NotificationCenter.default.post(name: .majorTomImportData, object: nil)
-                }
-
                 Button("New Tab at the End") {
                     NotificationCenter.default.post(name: .majorTomNewTabAtEnd, object: nil)
                 }
@@ -105,6 +99,12 @@ struct MajorTomApp: App {
                     NotificationCenter.default.post(name: .majorTomPrint, object: nil)
                 }
                 .keyboardShortcut("p", modifiers: .command)
+
+                Divider()
+
+                Button("Import Data from Other Clients…") {
+                    NotificationCenter.default.post(name: .majorTomImportData, object: nil)
+                }
             }
 
             CommandGroup(after: .toolbar) {

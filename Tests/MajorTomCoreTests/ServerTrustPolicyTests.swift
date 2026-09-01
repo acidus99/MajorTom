@@ -228,6 +228,27 @@ final class ServerTrustPolicyTests: XCTestCase {
         XCTAssertNil(removedIdentity)
     }
 
+    func testImportedTrustAddsOnlyMissingDecisions() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MajorTomTrustTests-\(UUID().uuidString)", isDirectory: true)
+        let file = directory.appendingPathComponent("trusted-identities.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try TrustedIdentityStore(fileURL: file)
+        try await store.trust(validIdentity(fingerprint: fingerprint), source: .user, at: now)
+
+        let existing = validIdentity(fingerprint: otherFingerprint)
+        let newEndpoint = CapsuleEndpoint(host: "imported.example")
+        let new = PresentedServerIdentity(endpoint: newEndpoint, publicKeySHA256: otherFingerprint)
+        let imported = try await store.importTrustedIdentities([existing, new], at: now)
+        let existingFingerprint = await store.identity(for: endpoint)?.publicKeySHA256
+        let importedFingerprint = await store.identity(for: newEndpoint)?.publicKeySHA256
+
+        XCTAssertEqual(imported, 1)
+        XCTAssertEqual(existingFingerprint, fingerprint)
+        XCTAssertEqual(importedFingerprint, otherFingerprint)
+    }
+
     // MARK: - Write coalescing
 
     func testRepeatSightingIsCoalescedUntilFlushed() async throws {

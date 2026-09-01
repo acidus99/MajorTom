@@ -86,6 +86,40 @@ public actor TrustedIdentityStore {
         }
     }
 
+    /// Adds trust decisions from a local client export in one atomic write.
+    ///
+    /// Existing decisions are deliberately left alone: importing must never replace a
+    /// decision the person has already made in Major Tom. In particular, this avoids
+    /// silently accepting a different identity for an endpoint that has changed since
+    /// the export was created.
+    @discardableResult
+    public func importTrustedIdentities(
+        _ presentedIdentities: [PresentedServerIdentity],
+        source: TrustedServerIdentity.Source = .user,
+        at date: Date = Date()
+    ) throws -> Int {
+        var additions = 0
+        for presented in presentedIdentities where records[presented.endpoint] == nil {
+            records[presented.endpoint] = TrustedServerIdentity(
+                endpoint: presented.endpoint,
+                publicKeySHA256: presented.publicKeySHA256,
+                source: source,
+                firstTrustedAt: date,
+                lastSeenAt: date,
+                certificateSHA256: presented.certificateSHA256,
+                certificateNotAfter: presented.certificateNotAfter,
+                certificatePEM: presented.certificatePEM
+            )
+            additions += 1
+        }
+        guard additions > 0 else { return 0 }
+        pendingSightingFlush?.cancel()
+        pendingSightingFlush = nil
+        try persist()
+        changeHandler?(sortedIdentities())
+        return additions
+    }
+
     /// Coalesces sighting counters into one write.
     ///
     /// The counters are advisory, so losing a few seconds of them to an abrupt quit is
