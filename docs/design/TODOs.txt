@@ -10,6 +10,8 @@ Functionality:
 
 * More Tabs
 	Safari has a ton of option on close tab, close tab to the right, close all other tabs, etc
+	
+
 
 * Titan Support
 * Unified history
@@ -44,6 +46,8 @@ Functionality:
 
 
 Reworking/Bugs:
+	
+	* When restoring location, there is a flash of a new window, then it disappears and the old session is restored. Check if restoring an old sesssion before showing anything
 	
 * option "up" doesn't work. Only optin +_ shift + up. One time, in a window even the menu items didn't work to "go up"
 	
