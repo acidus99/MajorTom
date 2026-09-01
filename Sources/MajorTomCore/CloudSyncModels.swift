@@ -229,7 +229,10 @@ public struct SyncedBookmarks: Codable, Equatable, Sendable {
             tombstone.deletedAt = date
             return tombstone
         }
-        return Self(folders: nextFolders, bookmarks: nextBookmarks)
+        return Self(
+            folders: nextFolders.sorted { $0.id.uuidString < $1.id.uuidString },
+            bookmarks: nextBookmarks.sorted { $0.id.uuidString < $1.id.uuidString }
+        )
     }
 
     public func merging(_ other: Self) -> Self {
@@ -274,7 +277,7 @@ public struct SyncedBookmarks: Codable, Equatable, Sendable {
         for record in records where result[record.id]?.cloudModifiedAt ?? .distantPast < record.cloudModifiedAt {
             result[record.id] = record
         }
-        return Array(result.values)
+        return result.values.sorted { $0.id.uuidString < $1.id.uuidString }
     }
 }
 
@@ -348,7 +351,7 @@ public struct SyncedServerTrust: Codable, Equatable, Sendable {
             tombstone.deletedAt = date
             return tombstone
         }
-        return Self(decisions: next)
+        return Self(decisions: next.sorted { $0.id < $1.id })
     }
 
     public func merging(_ other: Self) -> Self {
@@ -357,7 +360,7 @@ public struct SyncedServerTrust: Codable, Equatable, Sendable {
         where latest[decision.id]?.modifiedAt ?? .distantPast < decision.modifiedAt {
             latest[decision.id] = decision
         }
-        return Self(decisions: Array(latest.values))
+        return Self(decisions: latest.values.sorted { $0.id < $1.id })
     }
 
     public var activeByEndpoint: [CapsuleEndpoint: [SyncedServerTrustDecision]] {

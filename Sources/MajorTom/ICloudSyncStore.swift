@@ -45,6 +45,15 @@ final class ICloudSyncStore: ObservableObject {
     private let database: CKDatabase?
     private let defaults: UserDefaults
     private let zoneID = CKRecordZone.ID(zoneName: "MajorTomUserData")
+    private let synchronizedRecordTypes: [CKRecord.RecordType] = [
+        "MTPreferences",
+        "MTDeviceTabs",
+        "MTClientCertificateDescriptor",
+        "MTClientCertificateAssociation",
+        "MTBookmarkFolder",
+        "MTBookmark",
+        "MTServerTrust",
+    ]
     private let preferencesRecordID: CKRecord.ID
     private let tabsRecordID: CKRecord.ID
     private let encoder = JSONEncoder()
@@ -61,6 +70,8 @@ final class ICloudSyncStore: ObservableObject {
     private var lastSuccessfulSync: Date?
     /// How long a refresh with nothing local to push will trust the last result.
     private static let refreshCoalescingInterval: TimeInterval = 5 * 60
+    /// CloudKit rejects a CKModifyRecordsOperation containing more than 400 items.
+    private static let maximumRecordsPerModify = 400
 
     private static let deviceIDKey = "icloud-device-id-v1"
     private static let cachedTabsKey = "icloud-tabs-cache-v1"
@@ -371,7 +382,8 @@ final class ICloudSyncStore: ObservableObject {
                     ))
                 }
             }
-            if let localTabs {
+            if let localTabs,
+               devices.first(where: { $0.deviceID == localDeviceID }) != localTabs {
                 recordsToSave.append(try makeRecord(
                     type: "MTDeviceTabs",
                     id: tabsRecordID,
@@ -380,14 +392,24 @@ final class ICloudSyncStore: ObservableObject {
                 ))
             }
             if !recordsToSave.isEmpty {
-                let result = try await database.modifyRecords(
-                    saving: recordsToSave,
-                    deleting: [],
-                    savePolicy: .ifServerRecordUnchanged,
-                    atomically: false
-                )
-                for saveResult in result.saveResults.values {
-                    if case .failure(let error) = saveResult { throw error }
+                for batchStart in stride(
+                    from: 0,
+                    to: recordsToSave.count,
+                    by: Self.maximumRecordsPerModify
+                ) {
+                    let batchEnd = min(
+                        batchStart + Self.maximumRecordsPerModify,
+                        recordsToSave.count
+                    )
+                    let result = try await database.modifyRecords(
+                        saving: Array(recordsToSave[batchStart..<batchEnd]),
+                        deleting: [],
+                        savePolicy: .ifServerRecordUnchanged,
+                        atomically: false
+                    )
+                    for saveResult in result.saveResults.values {
+                        if case .failure(let error) = saveResult { throw error }
+                    }
                 }
             }
             status = .upToDate(Date())
@@ -403,23 +425,35 @@ final class ICloudSyncStore: ObservableObject {
     }
 
     private func fetchAllRecords(from database: CKDatabase) async throws -> [CKRecord] {
-        var token: CKServerChangeToken?
         var records: [CKRecord] = []
-        repeat {
-            let result = try await database.recordZoneChanges(
+
+        // A nil zone-change token means "from the beginning of the zone's history",
+        // not "the records that exist now". Replaying that history on every sync became
+        // effectively unbounded after repeated imports and deletions generated many
+        // generations of the same records. A sync needs the current server snapshot for
+        // merge and save-policy decisions, so query each of Major Tom's record types and
+        // follow only its finite current-result cursor.
+        for recordType in synchronizedRecordTypes {
+            let query = CKQuery(recordType: recordType, predicate: NSPredicate(value: true))
+            var page = try await database.records(
+                matching: query,
                 inZoneWith: zoneID,
-                since: token,
                 desiredKeys: ["payload"]
             )
-            for modification in result.modificationResultsByID.values {
-                switch modification {
-                case .success(let value): records.append(value.record)
-                case .failure(let error): throw error
+            while true {
+                for (_, match) in page.matchResults {
+                    switch match {
+                    case .success(let record): records.append(record)
+                    case .failure(let error): throw error
+                    }
                 }
+                guard let cursor = page.queryCursor else { break }
+                page = try await database.records(
+                    continuingMatchFrom: cursor,
+                    desiredKeys: ["payload"]
+                )
             }
-            token = result.moreComing ? result.changeToken : nil
-            if !result.moreComing { break }
-        } while true
+        }
         return records
     }
 

@@ -563,7 +563,10 @@ public struct ClientCertificateSyncState: Codable, Equatable, Sendable {
             tombstone.deletedAt = date
             return tombstone
         }
-        return Self(certificates: nextCertificates, associations: nextAssociations)
+        return Self(
+            certificates: nextCertificates.sorted { $0.id.uuidString < $1.id.uuidString },
+            associations: nextAssociations.sorted { $0.id.uuidString < $1.id.uuidString }
+        )
     }
 
     public func merging(_ other: Self) -> Self {
@@ -605,7 +608,7 @@ public struct ClientCertificateSyncState: Codable, Equatable, Sendable {
             < record[keyPath: modifiedAt] {
             result[record.id] = record
         }
-        return Array(result.values)
+        return result.values.sorted { $0.id.uuidString < $1.id.uuidString }
     }
 }
 

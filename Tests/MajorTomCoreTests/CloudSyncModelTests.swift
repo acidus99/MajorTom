@@ -214,6 +214,45 @@ final class CloudSyncModelTests: XCTestCase {
         XCTAssertEqual(Set(merged.collection.allBookmarks.map(\.title)), ["One", "Two"])
     }
 
+    func testBookmarkMergeIsStableWhenCloudRecordOrderChanges() {
+        var collection = BookmarkCollection()
+        collection.add(title: "One", url: URL(string: "gemini://one.example/")!)
+        collection.add(title: "Two", url: URL(string: "gemini://two.example/")!)
+        let state = SyncedBookmarks(collection: collection, modifiedAt: Date())
+        let reordered = SyncedBookmarks(
+            folders: state.folders.reversed(),
+            bookmarks: state.bookmarks.reversed()
+        )
+
+        XCTAssertEqual(state.merging(state), state.merging(reordered))
+    }
+
+    func testBookmarkReconciliationUsesTheSameCanonicalOrderAsCloudMerge() {
+        let activeID = UUID(uuidString: "ffffffff-ffff-ffff-ffff-ffffffffffff")!
+        let deletedID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        let date = Date(timeIntervalSince1970: 10)
+        let state = SyncedBookmarks(folders: [
+            SyncedBookmarkFolder(
+                id: activeID,
+                name: BookmarkCollection.favoritesName,
+                order: 0,
+                modifiedAt: date
+            ),
+            SyncedBookmarkFolder(
+                id: deletedID,
+                name: "Deleted",
+                order: 1,
+                modifiedAt: date,
+                deletedAt: date
+            ),
+        ])
+
+        let reconciled = state.reconciled(with: state.collection, at: date)
+
+        XCTAssertEqual(reconciled, reconciled.merging(reconciled))
+        XCTAssertEqual(reconciled.folders.map(\.id), [deletedID, activeID])
+    }
+
     func testFirstCloudMergeDoesNotCreateTwoFavoritesFolders() {
         let local = SyncedBookmarks(
             collection: BookmarkCollection(),
@@ -289,5 +328,20 @@ final class CloudSyncModelTests: XCTestCase {
         )])
 
         XCTAssertEqual(first.merging(second).conflictingEndpoints, [endpoint])
+    }
+
+    func testServerTrustMergeIsStableWhenCloudRecordOrderChanges() {
+        let decisions = ["one.example", "two.example"].map { host in
+            SyncedServerTrustDecision(
+                endpoint: CapsuleEndpoint(host: host, port: 1_965),
+                publicKeySHA256: String(repeating: host.first!, count: 64),
+                firstTrustedAt: Date(timeIntervalSince1970: 10),
+                modifiedAt: Date(timeIntervalSince1970: 10)
+            )
+        }
+        let state = SyncedServerTrust(decisions: decisions)
+        let reordered = SyncedServerTrust(decisions: decisions.reversed())
+
+        XCTAssertEqual(state.merging(state), state.merging(reordered))
     }
 }

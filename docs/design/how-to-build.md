@@ -33,7 +33,17 @@ Scripts/build-app.sh
 
 For a reusable local development-signing setup, create `private/env/build-local.env` with those same two variables. The `private/env/` directory is ignored by Git; the release setup below shows how to create it from scratch.
 
-The first development use creates Major Tom's private CloudKit zone and record types. Deploy that development schema to production in CloudKit Console before distributing a production build.
+The first development use creates Major Tom's private CloudKit zone and record types. In CloudKit Console, add a `QUERYABLE` index for the `recordName` field of every synchronized record type before testing sync:
+
+- `MTPreferences`
+- `MTDeviceTabs`
+- `MTClientCertificateDescriptor`
+- `MTClientCertificateAssociation`
+- `MTBookmarkFolder`
+- `MTBookmark`
+- `MTServerTrust`
+
+Major Tom queries these types to retrieve the current contents of its custom zone without replaying the zone's complete change history. Deploy the indexed development schema to production before distributing a production build.
 
 The live transport test is opt-in:
 
