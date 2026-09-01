@@ -1,3 +1,4 @@
+import AppKit
 import MajorTomCore
 import SwiftUI
 
@@ -44,8 +45,13 @@ struct BrowserSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             Section {
-                Button("Restore Default Settings", role: .destructive) {
-                    store.restoreDefaultSettings()
+                HStack {
+                    Button("Restore Default Settings", role: .destructive) {
+                        store.restoreDefaultSettings()
+                    }
+                    Button("Delete User Data", role: .destructive) {
+                        confirmDeleteUserData()
+                    }
                 }
                 Text("Restores browser settings only. Trusted capsule identities and client certificates are kept.")
                     .font(.callout)
@@ -173,6 +179,46 @@ struct BrowserSettingsView: View {
             // Transient confirmation: this is an action, not a state to stay latched on.
             try? await Task.sleep(for: .seconds(2))
             faviconCacheCleared = false
+        }
+    }
+
+    private func confirmDeleteUserData() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete User Data?"
+        alert.informativeText = "This permanently deletes bookmarks, the homepage, client certificates and their capsule assignments, and trusted capsule identities. This action can’t be undone."
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.keyEquivalent = "\r"
+        let delete = alert.addButton(withTitle: "Delete User Data")
+        delete.hasDestructiveAction = true
+
+        let respond: (NSApplication.ModalResponse) -> Void = { response in
+            // NSAlert assigns 1_000 to its first button and increments for each
+            // following button. Cancel is deliberately first/default; deletion needs
+            // an explicit activation of the second button.
+            guard response.rawValue == 1_001 else { return }
+            Task { @MainActor in
+                await deleteUserData()
+            }
+        }
+        if let window = NSApp.keyWindow {
+            alert.beginSheetModal(for: window, completionHandler: respond)
+        } else {
+            respond(alert.runModal())
+        }
+    }
+
+    private func deleteUserData() async {
+        do {
+            try await ClientCertificateStore.shared.deleteAll()
+            try await BookmarksModel.shared.deleteAll()
+            try await SharedTrustedIdentityStore.shared?.removeAllUserTrust()
+            var preferences = store.preferences
+            preferences.homepage = BrowserPreferences().homepage
+            store.preferences = preferences
+        } catch {
+            let alert = NSAlert(error: error)
+            alert.runModal()
         }
     }
 

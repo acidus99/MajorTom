@@ -155,6 +155,18 @@ public actor TrustedIdentityStore {
         changeHandler?(sortedIdentities())
     }
 
+    /// Removes every user-created trust decision in one durable update while retaining
+    /// bundled seed policy. This is used when a person explicitly deletes local user data.
+    public func removeAllUserTrust() throws {
+        let retained = records.filter { $0.value.source == .seed }
+        guard retained.count != records.count else { return }
+        pendingSightingFlush?.cancel()
+        pendingSightingFlush = nil
+        records = retained
+        try persist()
+        changeHandler?(sortedIdentities())
+    }
+
     /// Applies unambiguous user trust decisions received from CloudKit. Seed policy and
     /// locally observed certificate details remain local. Callers must exclude endpoints
     /// with more than one active fingerprint so a conflict can never become silent trust.

@@ -117,6 +117,22 @@ final class BookmarksModel: ObservableObject {
         }
     }
 
+    /// Deletes every bookmark and custom folder, retaining only the required empty
+    /// Favourites folder. The corresponding cloud snapshot carries deletion tombstones.
+    func deleteAll() async throws {
+        let empty = BookmarkCollection()
+        if let store {
+            collection = try await store.replace(with: empty)
+        } else {
+            collection = empty
+        }
+        let previous = syncState ?? SyncedBookmarks(collection: collection, modifiedAt: .distantPast)
+        let next = previous.reconciled(with: collection, at: Date())
+        syncState = next
+        persistSyncState()
+        ICloudSyncStore.shared.updateBookmarks(next)
+    }
+
     private func reload() async {
         guard let store else { return }
         let localCollection = await store.collection()

@@ -73,4 +73,9 @@ demonstration, and its final action is labelled Import with progress while work 
 It never extracts an archive to disk, and does not manufacture settings that Lagrange did not
 include in its export.
 
+General Settings provides Delete User Data beside Restore Default Settings. It presents a
+warning alert whose default action is Cancel; confirmation permanently deletes bookmarks, the
+homepage, client certificates and their capsule assignments, and user-trusted capsule
+identities. Bundled trust policy remains in place.
+
 Potential future work belongs in the working backlog until it has a user-facing purpose and acceptance criteria. Product requirements remain implementation-neutral unless a platform technology is itself part of the user experience.

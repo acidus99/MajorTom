@@ -163,6 +163,26 @@ final class ClientCertificateStore: ObservableObject {
         changed()
     }
 
+    /// Deletes every client identity and its approval rules. The Keychain work runs off
+    /// the main actor, then metadata is changed once so iCloud receives one coherent set
+    /// of deletion tombstones.
+    func deleteAll() async throws {
+        let identifiers = certificates.map(\.id)
+        let keychain = self.keychain
+        try await Task.detached(priority: .userInitiated) {
+            for identifier in identifiers {
+                try keychain.delete(id: identifier)
+            }
+        }.value
+        certificates = []
+        associations = []
+        availability = [:]
+        localSynchronizationFlags = [:]
+        identityCache = [:]
+        signingValidated = []
+        changed()
+    }
+
     func associate(
         certificateID: UUID,
         with url: URL,

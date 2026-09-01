@@ -249,6 +249,29 @@ final class ServerTrustPolicyTests: XCTestCase {
         XCTAssertEqual(importedFingerprint, otherFingerprint)
     }
 
+    func testRemovingAllUserTrustRetainsSeedPolicy() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MajorTomTrustTests-\(UUID().uuidString)", isDirectory: true)
+        let file = directory.appendingPathComponent("trusted-identities.json")
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try TrustedIdentityStore(fileURL: file)
+        let seededEndpoint = CapsuleEndpoint(host: "seed.example")
+        try await store.trust(validIdentity(fingerprint: fingerprint), source: .user, at: now)
+        try await store.trust(
+            PresentedServerIdentity(endpoint: seededEndpoint, publicKeySHA256: otherFingerprint),
+            source: .seed,
+            at: now
+        )
+
+        try await store.removeAllUserTrust()
+
+        let userTrust = await store.identity(for: endpoint)
+        let seed = await store.identity(for: seededEndpoint)
+        XCTAssertNil(userTrust)
+        XCTAssertEqual(seed?.source, .seed)
+    }
+
     // MARK: - Write coalescing
 
     func testRepeatSightingIsCoalescedUntilFlushed() async throws {
