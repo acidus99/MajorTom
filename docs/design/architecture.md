@@ -24,20 +24,26 @@ The application shell observes state and sends user intent. It does not parse Ge
 
 ### Native tab controls
 
-AppKit owns Major Tom's window tabs and Tab Overview. Each browser `NSWindow` creates
-one Safari-style Show Tab Overview control when the window is configured. Because AppKit
-creates its native tab bar only after a second window joins the group and exposes no
-public trailing tab-bar slot, Major Tom performs one attachment when that bar first
-exists and establishes a reserved trailing layout that follows ordinary window resizing.
-It then leaves the control and reserved space in place for the lifetime of that window
-chrome. AppKit swaps the selected
-window's complete chrome, so each peer owns an identical permanent control. Overview
-entry, exit, and tab selection never remove, recreate, rediscover, or reinstall it;
-layout observation is merely paused while AppKit constructs the overview. The
-private `NSTabBar` class name is used only as a one-time layout anchor; Major Tom invokes
-no private selectors. A permanent nonactivating panel owned by the same control supplies
-the overview's top-right icon-only Hide Tab Overview button and is ordered in or out as overview visibility
-changes.
+AppKit owns Major Tom's window tabs and Tab Overview. When AppKit lazily creates its
+native tab bar after a second window joins the group, Major Tom hides AppKit's Add Tab
+button and reconnects the native tab track directly to the tab bar's normal trailing
+inset. The tab bar remains full-width and contains only tabs; it is never resized. New
+tabs remain available through the File menu and Command-T. Show Tab Overview is a
+SwiftUI navigation-bar action immediately after Reload or Stop. The full-width tab-track
+layout remains installed while Tab Overview is visible so AppKit's exit animation never
+reveals the removed Add Tab slot. The private `NSTabBar` and `NSTabBarTrackView` class names and native
+Add Tab action are used only to locate the relevant views; Major Tom invokes no private
+selectors. A permanent nonactivating panel supplies the overview's top-right icon-only
+Hide Tab Overview button and is ordered in or out as overview visibility changes.
+
+### Native navigation controls
+
+SwiftUI composes the navigation bar and its connected functional groups. Standalone
+actions such as Reload and Stop use one compact circular interactive-glass surface. A
+pointer hover subtly tints that surface, while SwiftUI retains its pressed state, keyboard
+focus, and accessibility behavior. Connected groups use SwiftUI glass containers with
+compact independent actions because neither SwiftUI nor AppKit provides a public
+equivalent connected-pill control.
 
 ## Navigation and content flow
 

@@ -439,9 +439,8 @@ private final class NativeTabCoordinator {
     /// normal ownership relationship it expects for a manually-created window.
     private var windowControllers: [ObjectIdentifier: NSWindowController] = [:]
     private var closeObservers: [ObjectIdentifier: any NSObjectProtocol] = [:]
-    /// One permanent control per browser window. AppKit swaps the selected window's
-    /// title-bar chrome along with the tab, so every peer owns the same fixed control;
-    /// overview transitions never add, remove, or rediscover it.
+    /// One tab-bar controller per browser window. AppKit swaps the selected window's
+    /// title-bar chrome along with the tab, so every peer needs the same tab-bar policy.
     private var tabOverviewControls: [ObjectIdentifier: PermanentTabOverviewControl] = [:]
     private var registeredTabs: [ObjectIdentifier: RegisteredTab] = [:]
     private var hasAttemptedSessionRestore = false
@@ -499,6 +498,12 @@ private final class NativeTabCoordinator {
             prepareTabOverviewControl(on: window)
             tabOverviewControls[ObjectIdentifier(window)]?.attachToTabBarOnce()
         }
+    }
+
+    func toggleTabOverview(from window: NSWindow?) {
+        guard let window = window?.tabGroup?.selectedWindow ?? window else { return }
+        prepareTabOverviewControl(on: window)
+        tabOverviewControls[ObjectIdentifier(window)]?.toggleOverview()
     }
 
     /// AppKit lazily creates each tab window's title-bar hierarchy the first time that
@@ -1033,32 +1038,20 @@ private final class KeyValueObserverToken: @unchecked Sendable {
 @MainActor
 private final class PermanentTabOverviewControl: NSObject {
     private weak var window: NSWindow?
-    private weak var tabBarContainer: NSView?
     private weak var tabBar: NSView?
-    private weak var addTabButton: NSButton?
-    private let button: NSButton
+    private weak var tabTrack: NSView?
+    private var addTabButton: NSButton?
     private let exitOverviewButton: NSButton
     private let exitOverviewPanel: NSPanel
     private var windowObservers: [NotificationObserverToken] = []
-    private var frameObservers: [NotificationObserverToken] = []
     private var overviewObserver: KeyValueObserverToken?
     private weak var observedTabGroup: NSWindowTabGroup?
-    private var layoutIsScheduled = false
-    private var isLayingOut = false
-    private var spacing: CGFloat = 4
-    private var tabBarTrailingMargin: CGFloat = 0
-    private var nativeButtonTrailingMargin: CGFloat = 8
+    private var nativeTrackToAddConstraint: NSLayoutConstraint?
+    private var nativeAddToBarConstraint: NSLayoutConstraint?
+    private var expandedTrackConstraint: NSLayoutConstraint?
 
     init(window: NSWindow) {
         self.window = window
-        button = NSButton(
-            image: NSImage(
-                systemSymbolName: "square.on.square",
-                accessibilityDescription: "Show Tab Overview"
-            )!,
-            target: nil,
-            action: nil
-        )
         exitOverviewButton = NSButton(
             image: NSImage(
                 systemSymbolName: "square.on.square",
@@ -1075,13 +1068,6 @@ private final class PermanentTabOverviewControl: NSObject {
         )
         super.init()
 
-        button.target = self
-        button.action = #selector(toggleOverview(_:))
-        button.bezelStyle = .glass
-        button.imagePosition = .imageOnly
-        button.controlSize = .large
-        button.toolTip = "Show Tab Overview"
-        button.setAccessibilityLabel("Show Tab Overview")
         exitOverviewButton.target = self
         exitOverviewButton.action = #selector(toggleOverview(_:))
         exitOverviewButton.bezelStyle = .glass
@@ -1118,43 +1104,47 @@ private final class PermanentTabOverviewControl: NSObject {
         for observer in windowObservers {
             NotificationCenter.default.removeObserver(observer.value)
         }
-        for observer in frameObservers {
-            NotificationCenter.default.removeObserver(observer.value)
-        }
     }
 
-    /// AppKit creates the tab bar lazily when a second NSWindow joins the group. Attach
-    /// this already-created button once at that point and leave it there for the entire
-    /// lifetime of the window chrome. In particular, overview transitions do not touch
-    /// this hierarchy.
+    /// AppKit creates the tab bar lazily when a second NSWindow joins the group. Once it
+    /// exists, remove the Add Tab button's two links from the native constraint chain
+    /// and connect the tab track directly to the bar's normal trailing inset. The tab
+    /// bar itself remains full-width and contains only tabs.
     func attachToTabBarOnce() {
         observeCurrentTabGroup()
-        guard button.superview == nil,
-              let root = window?.contentView?.superview else { return }
+        guard let window else { return }
+        guard (window.tabbedWindows?.count ?? 1) > 1 else {
+            restoreNativeTabBarLayout()
+            return
+        }
+        // Keep the full-width track installed while Tab Overview is visible. AppKit
+        // reveals this same tab bar during its exit animation; restoring the native
+        // Add-button slot here makes the track visibly grow after the animation.
+        guard !(window.tabGroup?.isOverviewVisible ?? false) else { return }
+        guard let root = window.contentView?.superview else { return }
         root.layoutSubtreeIfNeeded()
 
         guard let tabBar = firstDescendant(named: "NSTabBar", in: root),
-              let container = tabBar.superview,
+              let tabTrack = firstDescendant(named: "NSTabBarTrackView", in: tabBar),
               let addButton = tabBar.subviews.compactMap({ $0 as? NSButton }).first(where: {
                   $0.action.map(NSStringFromSelector) == "_newTabWithinWindow:"
               }) else { return }
 
-        tabBarContainer = container
-        self.tabBar = tabBar
-        addTabButton = addButton
-        nativeButtonTrailingMargin = max(0, tabBar.bounds.maxX - addButton.frame.maxX)
-        tabBarTrailingMargin = max(0, container.bounds.maxX - tabBar.frame.maxX)
-
-        button.bezelStyle = addButton.bezelStyle
-        button.controlSize = addButton.controlSize
-        button.font = addButton.font
-        button.imageScaling = addButton.imageScaling
-        button.contentTintColor = addButton.contentTintColor
-        button.frame.size = addButton.frame.size
-        button.autoresizingMask = [.minXMargin]
-        container.addSubview(button, positioned: .above, relativeTo: tabBar)
-
-        resumeLayoutObservation()
+        if self.tabBar !== tabBar || self.tabTrack !== tabTrack
+            || self.addTabButton !== addButton || expandedTrackConstraint == nil {
+            restoreNativeTabBarLayout()
+            self.tabBar = tabBar
+            self.tabTrack = tabTrack
+            self.addTabButton = addButton
+            guard installTabTrackLayout(in: tabBar, track: tabTrack, addButton: addButton) else {
+                self.tabBar = nil
+                self.tabTrack = nil
+                self.addTabButton = nil
+                return
+            }
+        }
+        addButton.isHidden = true
+        tabBar.layoutSubtreeIfNeeded()
     }
 
     private func firstDescendant(named className: String, in view: NSView) -> NSView? {
@@ -1165,68 +1155,62 @@ private final class PermanentTabOverviewControl: NSObject {
         return nil
     }
 
-    private func observeFrameChanges(of view: NSView) {
-        view.postsFrameChangedNotifications = true
-        frameObservers.append(NotificationObserverToken(NotificationCenter.default.addObserver(
-            forName: NSView.frameDidChangeNotification,
-            object: view,
-            queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.scheduleLayout() }
-        }))
-    }
+    private func installTabTrackLayout(
+        in tabBar: NSView,
+        track: NSView,
+        addButton: NSButton
+    ) -> Bool {
+        guard let trackToAdd = tabBar.constraints.first(where: {
+            connects($0, track, .trailing, addButton, .leading)
+        }), let addToBar = tabBar.constraints.first(where: {
+            connects($0, addButton, .trailing, tabBar, .trailing)
+        }) else { return false }
 
-    private func resumeLayoutObservation() {
-        if frameObservers.isEmpty,
-           let tabBarContainer,
-           let tabBar,
-           let addTabButton {
-            observeFrameChanges(of: tabBarContainer)
-            observeFrameChanges(of: tabBar)
-            observeFrameChanges(of: addTabButton)
-        }
-        layoutControls()
-    }
-
-    private func removeFrameObservers() {
-        for observer in frameObservers {
-            NotificationCenter.default.removeObserver(observer.value)
-        }
-        frameObservers.removeAll()
-    }
-
-    private func scheduleLayout() {
-        guard !layoutIsScheduled else { return }
-        layoutIsScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            layoutIsScheduled = false
-            layoutControls()
-        }
-    }
-
-    private func layoutControls() {
-        guard !isLayingOut,
-              !(window?.tabGroup?.isOverviewVisible ?? false),
-              let tabBarContainer,
-              let tabBar,
-              let addTabButton else { return }
-        isLayingOut = true
-        defer { isLayingOut = false }
-
-        let reservedWidth = spacing + addTabButton.frame.width
-        let tabBarMaxX = tabBarContainer.bounds.maxX - tabBarTrailingMargin - reservedWidth
-        var resizedTabBar = tabBar.frame
-        resizedTabBar.size.width = max(0, tabBarMaxX - resizedTabBar.minX)
-        if tabBar.frame != resizedTabBar { tabBar.frame = resizedTabBar }
-
-        let overviewFrame = NSRect(
-            x: tabBarMaxX - nativeButtonTrailingMargin + spacing,
-            y: tabBar.frame.minY + addTabButton.frame.minY,
-            width: addTabButton.frame.width,
-            height: addTabButton.frame.height
+        nativeTrackToAddConstraint = trackToAdd
+        nativeAddToBarConstraint = addToBar
+        let trailingInset = max(0, tabBar.bounds.maxX - addButton.frame.maxX)
+        NSLayoutConstraint.deactivate([trackToAdd, addToBar])
+        let expanded = track.trailingAnchor.constraint(
+            equalTo: tabBar.trailingAnchor,
+            constant: -trailingInset
         )
-        if button.frame != overviewFrame { button.frame = overviewFrame }
+        expandedTrackConstraint = expanded
+        expanded.isActive = true
+        addButton.removeFromSuperview()
+        return true
+    }
+
+    private func connects(
+        _ constraint: NSLayoutConstraint,
+        _ firstView: NSView,
+        _ firstAttribute: NSLayoutConstraint.Attribute,
+        _ secondView: NSView,
+        _ secondAttribute: NSLayoutConstraint.Attribute
+    ) -> Bool {
+        let item1 = constraint.firstItem as? NSView
+        let item2 = constraint.secondItem as? NSView
+        return (item1 === firstView && constraint.firstAttribute == firstAttribute
+                && item2 === secondView && constraint.secondAttribute == secondAttribute)
+            || (item1 === secondView && constraint.firstAttribute == secondAttribute
+                && item2 === firstView && constraint.secondAttribute == firstAttribute)
+    }
+
+    private func restoreNativeTabBarLayout() {
+        expandedTrackConstraint?.isActive = false
+        expandedTrackConstraint = nil
+        if let tabBar, let tabTrack, let addTabButton,
+           addTabButton.superview == nil {
+            tabBar.addSubview(addTabButton, positioned: .above, relativeTo: tabTrack)
+        }
+        if let nativeTrackToAddConstraint, let nativeAddToBarConstraint {
+            NSLayoutConstraint.activate([nativeTrackToAddConstraint, nativeAddToBarConstraint])
+        }
+        nativeTrackToAddConstraint = nil
+        nativeAddToBarConstraint = nil
+        tabBar?.layoutSubtreeIfNeeded()
+        tabBar = nil
+        tabTrack = nil
+        addTabButton = nil
     }
 
     private func observeCurrentTabGroup() {
@@ -1241,19 +1225,21 @@ private final class PermanentTabOverviewControl: NSObject {
         })
     }
 
+    func toggleOverview() {
+        toggleOverview(nil)
+    }
+
     @objc private func toggleOverview(_ sender: Any?) {
         guard let window else { return }
         let wasOverviewVisible = window.tabGroup?.isOverviewVisible ?? false
         if wasOverviewVisible {
             hideExitOverviewPanel()
-        } else {
-            // AppKit mutates its tab buttons while constructing overview. Stop reacting
-            // to those transient frames, but keep the permanent button and reservation.
-            removeFrameObservers()
         }
         window.toggleTabOverview(sender)
+        observeCurrentTabGroup()
+        handleOverviewVisibilityChange()
         if wasOverviewVisible {
-            resumeLayoutObservation()
+            attachToTabBarOnce()
         }
     }
 
@@ -1261,20 +1247,15 @@ private final class PermanentTabOverviewControl: NSObject {
         let isOverviewVisible = window?.tabGroup?.isOverviewVisible ?? false
         NativeTabMenuCustomization.apply()
         if isOverviewVisible {
-            removeFrameObservers()
             if window?.tabGroup?.selectedWindow === window {
                 showExitOverviewPanel()
             }
         } else {
             hideExitOverviewPanel()
-            if button.superview == nil {
-                // A tab created from overview does not receive normal title-bar chrome
-                // until AppKit completes the overview exit. Finish that tab's single
-                // lifetime attachment synchronously as the native state changes.
-                attachToTabBarOnce()
-            } else {
-                resumeLayoutObservation()
-            }
+            // A tab created from overview does not receive normal title-bar chrome
+            // until AppKit completes the overview exit. Refresh the native metrics as
+            // that state changes, while keeping the public accessory installed.
+            attachToTabBarOnce()
         }
     }
 
@@ -1532,17 +1513,29 @@ private struct BrowserToolbarButtonLabel: View {
 private struct BrowserToolbarButton: View {
     let title: String
     let systemImage: String
-    var favicon: String?
     var isEnabled = true
     let action: () -> Void
+    @State private var isHovered = false
 
     var body: some View {
         Button(action: action) {
-            BrowserToolbarButtonLabel(systemImage: systemImage, favicon: favicon)
+            BrowserToolbarButtonLabel(systemImage: systemImage)
+                .frame(width: 30, height: 30)
+                .contentShape(Circle())
         }
-        .buttonStyle(.glass)
-        .controlSize(.large)
+        .buttonStyle(.plain)
+        .glassEffect(
+            .regular
+                .tint(isHovered && isEnabled ? Color.primary.opacity(0.08) : nil)
+                .interactive(isEnabled),
+            in: Circle()
+        )
         .disabled(!isEnabled)
+        .onHover { hovering in isHovered = isEnabled && hovering }
+        .onChange(of: isEnabled) { _, enabled in
+            if !enabled { isHovered = false }
+        }
+        .animation(.easeOut(duration: 0.1), value: isHovered)
         .help(title)
         .accessibilityLabel(title)
     }
@@ -1815,6 +1808,14 @@ private struct BrowserTabView: View {
                         action: browser.reload
                     )
                 }
+                BrowserToolbarButton(
+                    title: "Show Tab Overview",
+                    systemImage: "square.on.square",
+                    isEnabled: hostWindow != nil,
+                    action: {
+                        NativeTabCoordinator.shared.toggleTabOverview(from: hostWindow)
+                    }
+                )
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
