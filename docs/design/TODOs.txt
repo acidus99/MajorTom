@@ -53,11 +53,6 @@ Reworking/Bugs:
 * clicking on "Manged client certs" if a browser window is not in focus (e.g. looking at settings, or probably about) doesn't work.
 	
 * option "up" doesn't work. Only optin +_ shift + up. One time, in a window even the menu items didn't work to "go up". I think we should override and remove the "option" + up
-	
-* navgiation buttons don't look like Safari. 
-	Squarcul instead of round? Do grouping like Forward/back button in Safari
-	
-* make sure all buttons have tooltips
 
 * Accessibility audit: verify every primary browser action works with the keyboard and VoiceOver, including focus order and meaningful control labels/state.
 
