@@ -148,6 +148,10 @@ struct FavoritesBar: View {
             Button("Edit Address", systemImage: "link") {
                 editor = FavoriteEditorRequest(bookmark: bookmark, kind: .address)
             }
+            Divider()
+            Button("Delete", systemImage: "trash", role: .destructive) {
+                bookmarks.remove(bookmarkWith: bookmark.id)
+            }
         }
     }
 
