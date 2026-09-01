@@ -1,4 +1,5 @@
 import AppKit
+import MajorTomAppKitSupport
 import MajorTomCore
 import SwiftUI
 
@@ -6,6 +7,8 @@ struct BrowserSettingsView: View {
     @ObservedObject private var store = BrowserSettingsStore.shared
     @ObservedObject private var cloud = ICloudSyncStore.shared
     @State private var faviconCacheCleared = false
+    @State private var isDefaultGeminiBrowser = false
+    @State private var defaultBrowserError: String?
 
     var body: some View {
         TabView {
@@ -35,6 +38,17 @@ struct BrowserSettingsView: View {
             if store.preferences.searchProvider == .custom {
                 TextField("Custom search endpoint", text: store.binding(\.customSearchEndpoint))
             }
+            Section("Default Gemini browser") {
+                Button("Make Major Tom the Default Gemini Browser") {
+                    makeMajorTomDefault()
+                }
+                .disabled(isDefaultGeminiBrowser)
+
+                if isDefaultGeminiBrowser {
+                    Label("Major Tom is the default Gemini browser", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+            }
             Section("iCloud") {
                 LabeledContent("Synced data") {
                     Label(cloud.status.label, systemImage: "icloud")
@@ -59,6 +73,35 @@ struct BrowserSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .onAppear { refreshDefaultBrowserStatus() }
+        .alert("Couldn’t Set Default Gemini Browser", isPresented: defaultBrowserErrorPresented) {
+            Button("OK", role: .cancel) { defaultBrowserError = nil }
+        } message: {
+            Text(defaultBrowserError ?? "Launch Services could not update the default application.")
+        }
+    }
+
+    private var defaultBrowserErrorPresented: Binding<Bool> {
+        Binding(
+            get: { defaultBrowserError != nil },
+            set: { if !$0 { defaultBrowserError = nil } }
+        )
+    }
+
+    private func refreshDefaultBrowserStatus() {
+        isDefaultGeminiBrowser = GeminiDefaultApplication.isMajorTomDefault
+    }
+
+    private func makeMajorTomDefault() {
+        GeminiDefaultApplication.makeMajorTomDefault { error in
+            Task { @MainActor in
+                if let error {
+                    defaultBrowserError = error.localizedDescription
+                } else {
+                    refreshDefaultBrowserStatus()
+                }
+            }
+        }
     }
 
     private var appearance: some View {
