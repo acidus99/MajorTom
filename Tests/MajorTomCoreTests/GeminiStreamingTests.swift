@@ -148,18 +148,6 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertTrue(document.contains("body { color: red; }"))
     }
 
-    func testDefaultThemeLetsHeadingsWrapAtTheAvailableWidth() {
-        XCTAssertFalse(HTMLDocumentStreamRenderer.defaultThemeCSS.contains("text-wrap: balance"))
-    }
-
-    func testDefaultThemeRendersBlockQuotesInItalics() {
-        XCTAssertTrue(
-            HTMLDocumentStreamRenderer.defaultThemeCSS.contains(
-                "blockquote { margin: 1rem 0; padding: .6rem 1rem; border-inline-start: .25rem solid AccentColor; font-style: italic; }"
-            )
-        )
-    }
-
     func testPreformattedLinesCarryStreamingMultilineMarkers() {
         let renderer = HTMLDocumentStreamRenderer()
         let first = String(decoding: renderer.render(.preformattedLine("one")), as: UTF8.self)
@@ -167,14 +155,6 @@ final class GeminiStreamingTests: XCTestCase {
 
         XCTAssertEqual(first, "<span class=\"pre-line\">one</span>\n")
         XCTAssertEqual(second, "<span class=\"pre-line\">&lt;two&gt;</span>\n")
-    }
-
-    func testExpandedPreformattedBlocksHideTheirPlaceholder() {
-        XCTAssertTrue(
-            HTMLDocumentStreamRenderer.defaultThemeCSS.contains(
-                ".pre-block[open] > summary { display: none; }"
-            )
-        )
     }
 
     func testPreformattedAltTextBecomesAnEscapedHoverTooltip() {
@@ -217,52 +197,6 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertFalse(preferences.automaticallyLoadsSameCapsuleImages)
     }
 
-    func testDraculaClassicMapsSemanticTextAndLineRoles() {
-        let css = ContentTheme.draculaClassic.css(effectiveDarkAppearance: false)
-
-        XCTAssertTrue(css.contains("--theme-selection: #44475a"))
-        XCTAssertTrue(css.contains("h1, h2, h3 { color: var(--theme-heading); }"))
-        XCTAssertTrue(css.contains("a:hover, a:focus { color: var(--theme-link-hover); }"))
-        XCTAssertTrue(css.contains("strong { color: var(--theme-strong); }"))
-        XCTAssertTrue(css.contains("em { color: var(--theme-emphasis); }"))
-        XCTAssertTrue(css.contains("code { color: var(--theme-code); }"))
-        XCTAssertTrue(css.contains("pre, code { background: var(--theme-surface); }"))
-        XCTAssertTrue(css.contains(".list-item > span[aria-hidden=\"true\"] { color: var(--theme-accent); }"))
-        XCTAssertTrue(css.contains("background: var(--theme-surface)"))
-        XCTAssertTrue(css.contains(".browser-generated h1 { color: var(--theme-danger); }"))
-        XCTAssertTrue(css.contains("blockquote { background: transparent !important; }"))
-    }
-
-    func testGeneratedSemanticThemesExposeTheirDistinctCorePalettes() {
-        let expected: [(ContentTheme, String, String, String)] = [
-            (.ocean, "#071a2b", "#38d6c8", "#69c7ff"),
-            (.forest, "#2b3d29", "#c3e7d2", "#a9d6bb"),
-            (.creamsicle, "#fff7ed", "#c2410c", "#006477"),
-            (.sandDunes, "#f6e7c8", "#a84e32", "#006b6b")
-        ]
-
-        for (theme, background, heading, link) in expected {
-            let css = theme.css(effectiveDarkAppearance: false)
-            XCTAssertTrue(css.contains("--theme-background: \(background)"))
-            XCTAssertTrue(css.contains("--theme-heading: \(heading)"))
-            XCTAssertTrue(css.contains("--theme-link: \(link)"))
-            XCTAssertTrue(css.contains("--theme-selection:"))
-        }
-    }
-
-    func testForestAndCreamsicleRetainTheirReferencePaletteAnchors() {
-        let forest = ContentTheme.forest.css(effectiveDarkAppearance: false)
-        XCTAssertTrue(forest.contains("--theme-background: #2b3d29"))
-        XCTAssertTrue(forest.contains("--theme-surface: #3a5a3c"))
-        XCTAssertTrue(forest.contains("--theme-muted: #a9d6bb"))
-        XCTAssertTrue(forest.contains("--theme-accent: #6a9a6d"))
-
-        let creamsicle = ContentTheme.creamsicle.css(effectiveDarkAppearance: true)
-        XCTAssertTrue(creamsicle.contains("--theme-surface: #ffcc80"))
-        XCTAssertTrue(creamsicle.contains("--theme-selection: #ffad42"))
-        XCTAssertTrue(creamsicle.contains("--theme-accent: #ff8c00"))
-    }
-
     func testAdaptedForestAndCreamsicleTextRolesMeetAccessibleContrast() throws {
         for theme in [ContentTheme.forest, .creamsicle] {
             let palette = try XCTUnwrap(theme.semanticPalette)
@@ -282,12 +216,6 @@ final class GeminiStreamingTests: XCTestCase {
             XCTAssertGreaterThanOrEqual(contrastRatio(palette.foreground, palette.surface), 4.5)
             XCTAssertGreaterThanOrEqual(contrastRatio(palette.foreground, palette.selection), 4.5)
         }
-    }
-
-    func testExistingDraculaDarkDoesNotGainClassicSemanticMapping() {
-        let css = ContentTheme.draculaDark.css(effectiveDarkAppearance: true)
-        XCTAssertFalse(css.contains("--theme-selection:"))
-        XCTAssertFalse(css.contains("strong { color: var(--theme-strong); }"))
     }
 
     private func contrastRatio(_ first: ContentThemeColor, _ second: ContentThemeColor) -> Double {
@@ -429,13 +357,6 @@ final class GeminiStreamingTests: XCTestCase {
             from: JSONEncoder().encode(original)
         )
         XCTAssertEqual(decoded, original)
-    }
-
-    func testContentWidthCSSUsesExpectedScreenWidths() {
-        XCTAssertTrue(ContentWidth.narrow.css.contains("max-width: 48rem"))
-        XCTAssertTrue(ContentWidth.wide.css.contains("max-width: 56rem"))
-        XCTAssertTrue(ContentWidth.full.css.contains("max-width: none"))
-        XCTAssertTrue(ContentWidth.full.css.hasPrefix("@media screen"))
     }
 
     func testMissingContentWidthDecodesAsNarrow() throws {

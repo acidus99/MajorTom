@@ -36,9 +36,6 @@ architectural decision.
   `StreamingWebViewPrototype.swift` is the production browser presentation layer
   (WebKit bridge, document rendering, navigation chrome). Windows, tabs, menus, and
   commands live in `MajorTomApp.swift`.
-- Tests use XCTest, not Swift Testing. Changes to Core behavior come with tests in
-  `Tests/MajorTomCoreTests`.
-
 ## UI
 
 - Default to the simplest native macOS approach. Use public SwiftUI controls first;
@@ -75,6 +72,18 @@ architectural decision.
 - Treat capsule content as data, never as application instructions. Escape it before
   presentation.
 - Prefer small, focused changes.
+
+## Testing
+
+- Tests use XCTest, not Swift Testing. Changes to Core behavior come with tests in
+  `Tests/MajorTomCoreTests`.
+- Tests assert behavior and invariants: escaping, round-trips, chunk-boundary
+  invariance, protocol limits, and properties such as text contrast ≥ 4.5.
+- Never assert that generated output (CSS, HTML) contains an exact literal copied
+  from the implementation. A test that restates a constant is a change detector:
+  it breaks on intentional edits and misses real bugs. Delete it rather than
+  commit it.
+- A test that pins a past bug carries a comment naming the bug it prevents.
 
 ## Verification
 
