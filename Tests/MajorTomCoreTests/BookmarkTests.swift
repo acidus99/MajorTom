@@ -67,6 +67,53 @@ final class BookmarkCollectionTests: XCTestCase {
         XCTAssertEqual(updated.addedAt, original.addedAt)
     }
 
+    func testBookmarkCarriesKnownAbsentFavicon() {
+        var collection = BookmarkCollection()
+        let snapshot = BookmarkFaviconSnapshot(
+            emoji: nil,
+            fetchedAt: Date(timeIntervalSince1970: 100)
+        )
+        let bookmark = collection.add(title: "One", url: first, favicon: snapshot)
+        XCTAssertEqual(bookmark.favicon, snapshot)
+    }
+
+    func testFaviconRefreshUpdatesEveryBookmarkOnTheEndpointOnlyWhenValueChanges() {
+        var collection = BookmarkCollection()
+        let otherPort = URL(string: "gemini://example.com:1966/other")!
+        collection.add(title: "One", url: first)
+        collection.add(title: "Two", url: second)
+        collection.add(title: "Other", url: otherPort)
+        let endpoint = CapsuleEndpoint(url: first)!
+        let snapshot = BookmarkFaviconSnapshot(
+            emoji: "🚀",
+            fetchedAt: Date(timeIntervalSince1970: 100)
+        )
+
+        XCTAssertTrue(collection.updateFavicon(for: endpoint, to: snapshot))
+        XCTAssertEqual(collection.allBookmarks.filter {
+            CapsuleEndpoint(url: $0.url) == endpoint
+        }.map(\.favicon), [snapshot, snapshot])
+        XCTAssertNil(collection.allBookmarks.first { $0.url == otherPort }?.favicon)
+        XCTAssertFalse(collection.updateFavicon(
+            for: endpoint,
+            to: BookmarkFaviconSnapshot(
+                emoji: "🚀",
+                fetchedAt: Date(timeIntervalSince1970: 200)
+            )
+        ))
+    }
+
+    func testEditingAddressClearsEndpointFavicon() {
+        var collection = BookmarkCollection()
+        let bookmark = collection.add(
+            title: "One",
+            url: first,
+            favicon: BookmarkFaviconSnapshot(emoji: "🚀", fetchedAt: Date())
+        )
+        collection.updateAddress(bookmarkWith: bookmark.id, to: second)
+        XCTAssertNil(collection.bookmark(with: bookmark.id)?.favicon)
+    }
+
     func testRemovingByIdentifier() {
         var collection = BookmarkCollection()
         let bookmark = collection.add(title: "One", url: first)

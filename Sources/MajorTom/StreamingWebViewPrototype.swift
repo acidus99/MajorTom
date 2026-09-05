@@ -548,6 +548,7 @@ final class BrowserModel: ObservableObject {
     /// position in each of them. Owned by Core so those rules can be tested without
     /// WebKit; see `NavigationState`.
     private var navigation = NavigationState()
+    private let pageCache = SharedPageCache.shared
     /// While a traversal's replacement document is loading, its initial scroll events
     /// must not overwrite the offset we are about to restore.
     private var pendingScrollRestoration: (historyIndex: Int, offset: Double)?
@@ -555,9 +556,6 @@ final class BrowserModel: ObservableObject {
     /// a page being replaced can arrive just after the next entry commits; checking this
     /// identity prevents that late message from being filed under the new history entry.
     private var activeWebDocumentURL: URL?
-    /// Answers typed but not submitted, so cancelling a prompt and returning to it does
-    /// not lose the work. Sensitive prompts are deliberately never recorded here.
-    private var inputDrafts: [URL: String] = [:]
     private var pendingClientCertificateChallenge: (
         target: GeminiRequestTarget,
         disposition: HistoryDisposition,
@@ -715,7 +713,7 @@ final class BrowserModel: ObservableObject {
         guard !hasStarted else { return }
         hasStarted = true
 
-        if let committedURL, let cached = navigation.cachedPage(for: committedURL) {
+        if let committedURL, let cached = cachedPage(for: committedURL) {
             displayCachedPage(cached)
             return
         }
@@ -780,7 +778,8 @@ final class BrowserModel: ObservableObject {
             return
         }
         if let committedURL, ViewSourceURL.isViewSource(committedURL) {
-            if let cached = navigation.cachedPage(for: committedURL) {
+            if let cached = cachedPage(for: committedURL) {
+                BrowsingHistoryStore.shared.record(committedURL)
                 displayCachedPage(cached)
                 return
             }
@@ -904,7 +903,7 @@ final class BrowserModel: ObservableObject {
         commit(url, disposition: disposition)
         renderCurrentContent()
 
-        navigation.cache(CachedPage(
+        cache(CachedPage(
             url: url,
             mimeType: mimeType,
             body: data,
@@ -956,7 +955,7 @@ final class BrowserModel: ObservableObject {
 
         finishCurrentDocument(message: "Loading was stopped.")
         if wasStreamingIntoDocument, let committedURL, !currentSourceBytes.isEmpty {
-            navigation.cache(CachedPage(
+            cache(CachedPage(
                 url: committedURL,
                 mimeType: currentMIMEType,
                 body: currentSourceBytes,
@@ -1220,7 +1219,7 @@ final class BrowserModel: ObservableObject {
         let heading = "Source: \(displayTitle(for: resourceURL))"
         // commit() resets the title, so the heading is applied after it.
         commit(sourceURL, disposition: disposition)
-        navigation.cache(CachedPage(
+        cache(CachedPage(
             url: sourceURL,
             mimeType: mimeType,
             body: bytes,
@@ -1525,11 +1524,7 @@ final class BrowserModel: ObservableObject {
     ///   offers it again. A sensitive prompt's text is discarded rather than stored.
     func cancelInput(draft: String = "") {
         if let prompt = inputPrompt, !prompt.isSensitive {
-            if draft.isEmpty {
-                inputDrafts.removeValue(forKey: prompt.target.url)
-            } else {
-                inputDrafts[prompt.target.url] = draft
-            }
+            GeminiInputDraftStore.shared.save(draft, for: prompt.target.url)
         }
         inputPrompt = nil
         inputValidationMessage = nil
@@ -1549,21 +1544,17 @@ final class BrowserModel: ObservableObject {
     ///
     /// A sensitive prompt's text never reaches here; the sheet does not report one.
     func preserveInputDraft(_ draft: String, for target: GeminiRequestTarget) {
-        if draft.isEmpty {
-            inputDrafts.removeValue(forKey: target.url)
-        } else {
-            inputDrafts[target.url] = draft
-        }
+        GeminiInputDraftStore.shared.save(draft, for: target.url)
     }
 
     func submitInput(_ value: String) {
         guard let prompt = inputPrompt else { return }
-        inputDrafts.removeValue(forKey: prompt.target.url)
         guard let url = GeminiQueryEncoding.url(base: prompt.target.url, query: value),
               let target = try? GeminiRequestTarget(url.absoluteString) else {
             inputValidationMessage = "This response is too large for a Gemini request. Shorten it and try again."
             return
         }
+        GeminiInputDraftStore.shared.remove(for: prompt.target.url)
         inputValidationMessage = nil
         inputPrompt = nil
         navigate(to: target, disposition: .new)
@@ -1574,7 +1565,8 @@ final class BrowserModel: ObservableObject {
             showInternalPage(page, disposition: .traversal)
             return
         }
-        if let cached = navigation.cachedPage(for: url) {
+        if let cached = cachedPage(for: url) {
+            BrowsingHistoryStore.shared.record(url)
             displayCachedPage(cached)
             return
         }
@@ -1717,7 +1709,9 @@ final class BrowserModel: ObservableObject {
                             target: target,
                             message: header.meta,
                             isSensitive: isSensitive,
-                            initialText: isSensitive ? "" : (inputDrafts[target.url] ?? "")
+                            initialText: isSensitive
+                                ? ""
+                                : GeminiInputDraftStore.shared.text(for: target.url)
                         )
                         isLoading = false
                         statusText = "Input required"
@@ -1901,7 +1895,7 @@ final class BrowserModel: ObservableObject {
                     currentMIMEType = mimeType
                     canSavePage = true
                     canShowSource = mimeType.hasPrefix("text/")
-                    navigation.cache(CachedPage(
+                    cache(CachedPage(
                         url: target.url,
                         mimeType: mimeType,
                         body: sourceBytes,
@@ -1943,7 +1937,7 @@ final class BrowserModel: ObservableObject {
                 canSavePage = !sourceBytes.isEmpty
                 canShowSource = mimeType.hasPrefix("text/") && !sourceBytes.isEmpty
                 if let committedURL {
-                    navigation.cache(CachedPage(
+                    cache(CachedPage(
                         url: committedURL,
                         mimeType: mimeType,
                         body: sourceBytes,
@@ -2288,9 +2282,7 @@ final class BrowserModel: ObservableObject {
             isRestoringHistoryScroll = false
         }
         navigation.commit(url, disposition: NavigationState.Disposition(disposition))
-        if case .new = disposition {
-            BrowsingHistoryStore.shared.record(url)
-        }
+        BrowsingHistoryStore.shared.record(url)
         updateNavigationAvailability()
     }
 
@@ -2334,6 +2326,23 @@ final class BrowserModel: ObservableObject {
             ? "Cached • \(cached.body.count) bytes"
             : "Cached \(cached.completion.rawValue) response"
         Task { await refreshFavicon(forCapsuleAt: cached.url) }
+    }
+
+    /// Keeps a small hot set in the tab while the durable cache owns the global limits.
+    private func cache(_ page: CachedPage) {
+        navigation.cache(page)
+        _ = try? pageCache?.store(page)
+    }
+
+    /// Back/Forward first checks the tab's hot set, then the cross-tab SQLite cache.
+    private func cachedPage(for url: URL) -> CachedPage? {
+        if let page = navigation.cachedPage(for: url) {
+            _ = try? pageCache?.touch(url)
+            return page
+        }
+        guard let pageCache, let page = try? pageCache.page(for: url) else { return nil }
+        navigation.cache(page)
+        return page
     }
 
     /// Whether a failed connection is one where an archived copy might help.
@@ -2798,32 +2807,35 @@ final class BrowserModel: ObservableObject {
             return
         }
 
-        switch await store.favicon(for: endpoint) {
-        case .known(let emoji):
-            favicon = emoji
+        if let record = await store.freshRecord(for: endpoint) {
+            favicon = record.emoji
+            BookmarksModel.shared.updateFavicon(
+                record.emoji,
+                for: endpoint,
+                fetchedAt: record.fetchedAt
+            )
             return
-        case .absent:
-            favicon = nil
-            return
-        case .unknown:
-            favicon = nil
         }
+        favicon = nil
 
         guard let probeTarget = try? GeminiRequestTarget(
             "gemini://\(endpoint.host):\(endpoint.port)\(GeminiFavicon.path)"
         ) else { return }
 
         let probe = await self.probeFavicon(probeTarget)
+        let fetchedAt = Date()
         switch probe {
         case .failed:
             // A connection that never answered says nothing about whether a favicon
             // exists, and caching that as "absent" would hide it for a week.
             return
         case .found(let emoji):
-            try? await store.record(emoji, for: endpoint)
+            try? await store.record(emoji, for: endpoint, at: fetchedAt)
+            BookmarksModel.shared.updateFavicon(emoji, for: endpoint, fetchedAt: fetchedAt)
             applyFaviconIfStillCurrent(emoji, endpoint: endpoint)
         case .absent:
-            try? await store.record(nil, for: endpoint)
+            try? await store.record(nil, for: endpoint, at: fetchedAt)
+            BookmarksModel.shared.updateFavicon(nil, for: endpoint, fetchedAt: fetchedAt)
             applyFaviconIfStillCurrent(nil, endpoint: endpoint)
         }
     }

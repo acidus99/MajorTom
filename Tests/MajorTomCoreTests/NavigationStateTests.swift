@@ -188,6 +188,23 @@ final class NavigationStateTests: XCTestCase {
         XCTAssertEqual(restored.cachedPage(for: two)?.body.count, 20)
     }
 
+    func testRestorationRoundTripsScrollOffsetsByHistoryEntry() {
+        var state = NavigationState()
+        state.commit(one, disposition: .new)
+        state.recordScrollOffset(125)
+        state.commit(two, disposition: .new)
+        state.recordScrollOffset(900)
+
+        let restored = NavigationState(restoring: state.restorationState(
+            zoom: 1,
+            title: nil,
+            documentTitle: nil
+        ))
+
+        XCTAssertEqual(restored.scrollOffset(forHistoryIndex: 0), 125)
+        XCTAssertEqual(restored.scrollOffset(forHistoryIndex: 1), 900)
+    }
+
     func testRestoringToleratesDuplicateCachedPages() {
         // Dictionary(uniqueKeysWithValues:) traps on a repeated key, and a session blob
         // is user data that may have been written by any earlier build.

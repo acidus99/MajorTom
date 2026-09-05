@@ -106,6 +106,14 @@ final class FaviconStoreTests: XCTestCase {
         XCTAssertEqual(lookup, .known("\u{1F346}"))
     }
 
+    func testFreshRecordPreservesObservationTimeAndKnownAbsence() async throws {
+        let store = makeStore()
+        let date = Date(timeIntervalSince1970: 1_000)
+        try await store.record(nil, for: endpoint, at: date)
+        let record = await store.freshRecord(for: endpoint, now: date.addingTimeInterval(1))
+        XCTAssertEqual(record, FaviconRecord(endpoint: endpoint, emoji: nil, fetchedAt: date))
+    }
+
     /// The RFC asks that "no favicon" be remembered, so the capsule is not re-probed on
     /// every page view.
     func testAbsenceIsRemembered() async throws {

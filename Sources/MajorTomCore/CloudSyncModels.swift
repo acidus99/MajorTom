@@ -1,5 +1,42 @@
 import Foundation
 
+public struct CloudDataModelManifest: Codable, Equatable, Sendable {
+    public var formatMajor: Int
+    public var minimumReaderMajor: Int
+    public var minimumWriterMajor: Int
+    public var createdAt: Date
+
+    public init(
+        formatMajor: Int,
+        minimumReaderMajor: Int,
+        minimumWriterMajor: Int,
+        createdAt: Date
+    ) {
+        self.formatMajor = formatMajor
+        self.minimumReaderMajor = minimumReaderMajor
+        self.minimumWriterMajor = minimumWriterMajor
+        self.createdAt = createdAt
+    }
+
+    public func compatibility(
+        readerMajor: Int,
+        writerMajor: Int
+    ) -> CloudDataModelCompatibility {
+        guard formatMajor == readerMajor else {
+            return formatMajor > readerMajor ? .requiresNewerApp : .unexpectedOlderFormat
+        }
+        guard readerMajor >= minimumReaderMajor,
+              writerMajor >= minimumWriterMajor else { return .requiresNewerApp }
+        return .compatible
+    }
+}
+
+public enum CloudDataModelCompatibility: Equatable, Sendable {
+    case compatible
+    case requiresNewerApp
+    case unexpectedOlderFormat
+}
+
 /// Coalesces paged cloud results without assuming that a changing server returns each
 /// identifier only once. Package-visible so the CloudKit adapter and its model tests
 /// share the exact duplicate-resolution rule.
@@ -138,6 +175,7 @@ public struct SyncedBookmark: Codable, Equatable, Identifiable, Sendable {
     public var addedAt: Date
     public var folderID: UUID
     public var order: Int
+    public var favicon: BookmarkFaviconSnapshot?
     public var modifiedAt: Date
     public var deletedAt: Date?
 
@@ -148,6 +186,7 @@ public struct SyncedBookmark: Codable, Equatable, Identifiable, Sendable {
         addedAt: Date,
         folderID: UUID,
         order: Int,
+        favicon: BookmarkFaviconSnapshot? = nil,
         modifiedAt: Date,
         deletedAt: Date? = nil
     ) {
@@ -157,6 +196,7 @@ public struct SyncedBookmark: Codable, Equatable, Identifiable, Sendable {
         self.addedAt = addedAt
         self.folderID = folderID
         self.order = order
+        self.favicon = favicon
         self.modifiedAt = modifiedAt
         self.deletedAt = deletedAt
     }
@@ -189,6 +229,7 @@ public struct SyncedBookmarks: Codable, Equatable, Sendable {
                     addedAt: bookmark.addedAt,
                     folderID: folder.id,
                     order: index,
+                    favicon: bookmark.favicon,
                     modifiedAt: modifiedAt
                 )
             }
@@ -218,7 +259,9 @@ public struct SyncedBookmarks: Codable, Equatable, Sendable {
             guard let old = oldBookmarks[incoming.id], old.deletedAt == nil,
                   old.title == incoming.title, old.url == incoming.url,
                   old.addedAt == incoming.addedAt, old.folderID == incoming.folderID,
-                  old.order == incoming.order else { return incoming }
+                  old.order == incoming.order, old.favicon == incoming.favicon else {
+                return incoming
+            }
             return old
         }
         let currentBookmarkIDs = Set(current.bookmarks.map(\.id))
@@ -265,7 +308,13 @@ public struct SyncedBookmarks: Codable, Equatable, Sendable {
                     if $0.order != $1.order { return $0.order < $1.order }
                     return $0.id.uuidString < $1.id.uuidString
                 }.map {
-                    Bookmark(id: $0.id, title: $0.title, url: $0.url, addedAt: $0.addedAt)
+                    Bookmark(
+                        id: $0.id,
+                        title: $0.title,
+                        url: $0.url,
+                        addedAt: $0.addedAt,
+                        favicon: $0.favicon
+                    )
                 }
             )
         })

@@ -4,13 +4,15 @@ public actor TrustedIdentityStore {
     /// How long a sighting-only update may sit in memory before it reaches disk.
     public static let sightingFlushInterval: Duration = .seconds(5)
 
-    private let fileURL: URL
+    private let fileURL: URL?
+    private let repository: TrustedIdentityRepository?
     private var records: [CapsuleEndpoint: TrustedServerIdentity]
     private var changeHandler: (@Sendable ([TrustedServerIdentity]) -> Void)?
     private var pendingSightingFlush: Task<Void, Never>?
 
     public init(fileURL: URL) throws {
         self.fileURL = fileURL
+        repository = nil
         if FileManager.default.fileExists(atPath: fileURL.path) {
             let data = try Data(contentsOf: fileURL)
             let decoded = try JSONDecoder.majorTom.decode([TrustedServerIdentity].self, from: data)
@@ -18,6 +20,21 @@ public actor TrustedIdentityStore {
         } else {
             self.records = [:]
         }
+    }
+
+    public init(database: MajorTomDatabase, legacyFileURL: URL? = nil) throws {
+        fileURL = nil
+        let repository = TrustedIdentityRepository(database: database)
+        self.repository = repository
+        if let legacyFileURL,
+           FileManager.default.fileExists(atPath: legacyFileURL.path) {
+            let data = try Data(contentsOf: legacyFileURL)
+            let legacy = try JSONDecoder.majorTom.decode([TrustedServerIdentity].self, from: data)
+            try repository.importLegacy(legacy)
+            try? FileManager.default.removeItem(at: legacyFileURL)
+        }
+        let loaded = try repository.identities()
+        records = Dictionary(uniqueKeysWithValues: loaded.map { ($0.endpoint, $0) })
     }
 
     public func identity(for endpoint: CapsuleEndpoint) -> TrustedServerIdentity? {
@@ -199,6 +216,11 @@ public actor TrustedIdentityStore {
     }
 
     private func persist() throws {
+        if let repository {
+            try repository.save(sortedIdentities())
+            return
+        }
+        guard let fileURL else { return }
         try FileManager.default.createDirectory(
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true

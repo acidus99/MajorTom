@@ -11,8 +11,16 @@ let package = Package(
         .library(name: "MajorTomCore", targets: ["MajorTomCore"]),
         .executable(name: "MajorTom", targets: ["MajorTom"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/groue/GRDB.swift.git", from: "7.0.0")
+    ],
     targets: [
-        .target(name: "MajorTomCore"),
+        .target(
+            name: "MajorTomCore",
+            dependencies: [
+                .product(name: "GRDB", package: "GRDB.swift")
+            ]
+        ),
         .target(name: "MajorTomAppKitSupport"),
         .executableTarget(
             name: "MajorTom",

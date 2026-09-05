@@ -51,10 +51,19 @@ public actor FaviconStore {
     }
 
     public func favicon(for endpoint: CapsuleEndpoint, now: Date = Date()) -> FaviconLookup {
-        guard let record = records[endpoint],
-              now.timeIntervalSince(record.fetchedAt) < lifetime else { return .unknown }
+        guard let record = freshRecord(for: endpoint, now: now) else { return .unknown }
         guard let emoji = record.emoji else { return .absent }
         return .known(emoji)
+    }
+
+    /// The fresh record including its observation time and explicit absent value.
+    public func freshRecord(
+        for endpoint: CapsuleEndpoint,
+        now: Date = Date()
+    ) -> FaviconRecord? {
+        guard let record = records[endpoint],
+              now.timeIntervalSince(record.fetchedAt) < lifetime else { return nil }
+        return record
     }
 
     /// Records what a probe found. `nil` means the capsule offers no favicon.

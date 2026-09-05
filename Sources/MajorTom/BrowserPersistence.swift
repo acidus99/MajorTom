@@ -4,27 +4,30 @@ import MajorTomCore
 
 /// The one `TrustedIdentityStore` for the whole application.
 ///
-/// `TrustedIdentityStore` snapshots the JSON file into memory once in `init` and
-/// every write persists that whole snapshot. Constructing one per tab, per window
-/// and again for the Settings pane therefore meant each instance overwrote the file
-/// with its own stale view: trusting a capsule in one tab erased every identity
-/// trusted in another tab since that tab was opened. Losing a record silently
-/// downgrades a later key substitution to a first-use auto-trust, so this has to be
-/// a single shared instance.
+/// One actor owns trust decisions for every tab and persists endpoint rows through the
+/// shared database. Losing a record silently downgrades a later key substitution to a
+/// first-use auto-trust, so there must never be competing in-memory catalogues.
 enum SharedTrustedIdentityStore {
     static let shared: TrustedIdentityStore? = {
         guard let root = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first else { return nil }
-        return try? TrustedIdentityStore(fileURL: root
+        let legacyFileURL = root
             .appendingPathComponent("Major Tom", isDirectory: true)
-            .appendingPathComponent("trusted-identities.json"))
+            .appendingPathComponent("trusted-identities.json")
+        if let database = SharedMajorTomDatabase.shared {
+            return try? TrustedIdentityStore(
+                database: database,
+                legacyFileURL: legacyFileURL
+            )
+        }
+        return try? TrustedIdentityStore(fileURL: legacyFileURL)
     }()
 }
 
 /// Bridges durable user TOFU decisions to private CloudKit while leaving observations,
-/// certificate copies, counters, and seed policy in the local JSON store.
+/// certificate copies, counters, and seed policy in local SQLite rows.
 @MainActor
 final class TrustedIdentityCloudCoordinator: ObservableObject {
     static let shared = TrustedIdentityCloudCoordinator()
@@ -34,12 +37,20 @@ final class TrustedIdentityCloudCoordinator: ObservableObject {
     private let defaults = UserDefaults.standard
     private let storageKey = "server-trust-cloud-metadata-v1"
     private let store = SharedTrustedIdentityStore.shared
+    private let repository = SharedMajorTomDatabase.shared.map { ServerTrustSyncRepository(database: $0) }
     private var state = SyncedServerTrust()
     private var cloudObserver: AnyCancellable?
 
     private init() {
-        if let data = defaults.data(forKey: storageKey),
-           let stored = try? JSONDecoder().decode(SyncedServerTrust.self, from: data) {
+        if let repository {
+            if let data = defaults.data(forKey: storageKey),
+               let legacy = try? JSONDecoder().decode(SyncedServerTrust.self, from: data),
+               (try? repository.importLegacy(legacy)) != nil {
+                defaults.removeObject(forKey: storageKey)
+            }
+            state = (try? repository.load()) ?? SyncedServerTrust()
+        } else if let data = defaults.data(forKey: storageKey),
+                  let stored = try? JSONDecoder().decode(SyncedServerTrust.self, from: data) {
             state = stored
         }
         cloudObserver = ICloudSyncStore.shared.receivedServerTrust.sink { [weak self] incoming in
@@ -97,6 +108,7 @@ final class TrustedIdentityCloudCoordinator: ObservableObject {
     }
 
     private func persist() {
+        if let repository, (try? repository.save(state)) != nil { return }
         guard let data = try? JSONEncoder().encode(state) else { return }
         defaults.set(data, forKey: storageKey)
     }
@@ -117,6 +129,20 @@ enum SharedFaviconStore {
             .appendingPathComponent("Major Tom", isDirectory: true)
             .appendingPathComponent("favicons.json"))
     }()
+}
+
+/// The one local SQLite database for browser-owned durable state.
+enum SharedMajorTomDatabase {
+    static let shared: MajorTomDatabase? = {
+        guard let fileURL = try? MajorTomDatabase.defaultFileURL() else { return nil }
+        return try? MajorTomDatabase(fileURL: fileURL)
+    }()
+}
+
+enum SharedPageCache {
+    static let shared = SharedMajorTomDatabase.shared.map { database in
+        PageCacheRepository(database: database)
+    }
 }
 
 // PageCompletionState, CachedPage and RestoredTabState now live in MajorTomCore beside
@@ -149,6 +175,13 @@ final class SessionRestorationStore {
     private let defaults = UserDefaults.standard
     private let key = "last-window-session-v1"
     private let applicationKey = "last-application-session-v2"
+    private let sessionRepository: SessionRepository?
+    private let pageCache: PageCacheRepository?
+
+    private init() {
+        sessionRepository = SharedMajorTomDatabase.shared.map(SessionRepository.init(database:))
+        pageCache = SharedPageCache.shared
+    }
 
     /// Migration only: reads a session written by a release that predates native
     /// window tabs. `saveApplication(_:)` is the only writer of session state now.
@@ -158,13 +191,18 @@ final class SessionRestorationStore {
     }
 
     func loadApplication() -> RestoredApplicationState? {
+        if let repository = sessionRepository,
+           let persisted = try? repository.load() {
+            return Self.applicationState(persisted)
+        }
         if let data = defaults.data(forKey: applicationKey),
            let state = try? JSONDecoder().decode(RestoredApplicationState.self, from: data) {
+            saveApplication(state, importingEmbeddedCache: true)
             return state
         }
         // Migrate the old single-window format instead of discarding its tab caches.
         guard let legacy = load() else { return nil }
-        return RestoredApplicationState(
+        let state = RestoredApplicationState(
             windows: [RestoredBrowserWindowState(
                 frame: nil,
                 tabs: legacy.tabs,
@@ -172,20 +210,88 @@ final class SessionRestorationStore {
             )],
             keyWindowIndex: 0
         )
+        saveApplication(state, importingEmbeddedCache: true)
+        return state
     }
 
     func saveApplication(_ state: RestoredApplicationState) {
+        saveApplication(state, importingEmbeddedCache: false)
+    }
+
+    private func saveApplication(
+        _ state: RestoredApplicationState,
+        importingEmbeddedCache: Bool
+    ) {
+        if let sessionRepository, let pageCache {
+            do {
+                if importingEmbeddedCache {
+                    for page in state.windows.flatMap(\.tabs).flatMap(\.cachedPages) {
+                        try pageCache.store(page)
+                    }
+                }
+                try sessionRepository.save(Self.persistedSession(state))
+                // The normalized rows are now authoritative. Removing both legacy
+                // formats prevents future saves from rewriting cached bodies as JSON.
+                defaults.removeObject(forKey: key)
+                defaults.removeObject(forKey: applicationKey)
+                return
+            } catch {
+                // A session is best-effort state. Keep the prior format as a fallback if
+                // opening or writing the local database fails.
+            }
+        }
         guard let data = try? JSONEncoder().encode(state) else { return }
         defaults.set(data, forKey: applicationKey)
     }
 
     func clear() {
+        try? sessionRepository?.clear()
+        try? pageCache?.clear()
         defaults.removeObject(forKey: key)
         defaults.removeObject(forKey: applicationKey)
     }
+
+    private static func persistedSession(
+        _ state: RestoredApplicationState
+    ) -> PersistedApplicationSession {
+        PersistedApplicationSession(
+            windows: state.windows.map { window in
+                PersistedBrowserWindow(
+                    frame: window.frame.map {
+                        PersistedWindowFrame(
+                            x: $0.origin.x,
+                            y: $0.origin.y,
+                            width: $0.width,
+                            height: $0.height
+                        )
+                    },
+                    tabs: window.tabs,
+                    selectedIndex: window.selectedIndex
+                )
+            },
+            keyWindowIndex: state.keyWindowIndex
+        )
+    }
+
+    private static func applicationState(
+        _ state: PersistedApplicationSession
+    ) -> RestoredApplicationState {
+        RestoredApplicationState(
+            windows: state.windows.map { window in
+                RestoredBrowserWindowState(
+                    frame: window.frame.map {
+                        CGRect(x: $0.x, y: $0.y, width: $0.width, height: $0.height)
+                    },
+                    tabs: window.tabs,
+                    selectedIndex: window.selectedIndex
+                )
+            },
+            keyWindowIndex: state.keyWindowIndex
+        )
+    }
 }
 
-struct BrowsingHistoryRecord: Codable, Identifiable {
+private struct LegacyBrowsingHistoryRecord: Codable {
     var id: UUID
     var url: URL
     var visitedAt: Date
@@ -194,56 +300,97 @@ struct BrowsingHistoryRecord: Codable, Identifiable {
 @MainActor
 final class BrowsingHistoryStore: ObservableObject {
     static let shared = BrowsingHistoryStore()
-    @Published private(set) var records: [BrowsingHistoryRecord] = []
+    @Published private(set) var records: [BrowsingHistoryEntry] = []
 
     private let defaults = UserDefaults.standard
     private let key = "browsing-history-v1"
-    private var persistTask: Task<Void, Never>?
+    private let repository: BrowsingHistoryRepository?
 
     init() {
-        if let data = defaults.data(forKey: key),
-           let stored = try? JSONDecoder().decode([BrowsingHistoryRecord].self, from: data) {
-            records = stored
+        repository = SharedMajorTomDatabase.shared.map(BrowsingHistoryRepository.init(database:))
+
+        if let repository {
+            // Import is additive and transactional. The legacy blob remains available to
+            // older builds until every row is safely in SQLite, then is removed locally.
+            if let data = defaults.data(forKey: key),
+               let stored = try? JSONDecoder().decode([LegacyBrowsingHistoryRecord].self, from: data),
+               (try? repository.importLegacyVisits(stored.map { ($0.url, $0.visitedAt) })) != nil {
+                defaults.removeObject(forKey: key)
+            }
+            records = (try? repository.entries()) ?? []
+        } else if let data = defaults.data(forKey: key),
+                  let stored = try? JSONDecoder().decode([LegacyBrowsingHistoryRecord].self, from: data) {
+            records = stored.map {
+                BrowsingHistoryEntry(url: $0.url, visitedAt: $0.visitedAt, visitCount: 1)
+            }
         }
     }
 
     func record(_ url: URL) {
-        records.insert(BrowsingHistoryRecord(id: UUID(), url: url, visitedAt: Date()), at: 0)
-        if records.count > 5_000 { records.removeLast(records.count - 5_000) }
-        schedulePersist()
+        let now = Date()
+        if let repository {
+            guard (try? repository.record(url, at: now)) != nil else { return }
+            let count = records.first(where: { $0.url == url })?.visitCount ?? 0
+            records.removeAll {
+                $0.url == url
+                    || $0.visitedAt < now.addingTimeInterval(-BrowsingHistoryRepository.retention)
+            }
+            records.insert(
+                BrowsingHistoryEntry(url: url, visitedAt: now, visitCount: count + 1),
+                at: 0
+            )
+            return
+        }
+
+        let count = records.first(where: { $0.url == url })?.visitCount ?? 0
+        records.removeAll { $0.url == url }
+        records.insert(BrowsingHistoryEntry(url: url, visitedAt: now, visitCount: count + 1), at: 0)
+        persistLegacyFallback()
     }
 
     func clear() {
-        persistTask?.cancel()
-        persistTask = nil
+        try? repository?.clear()
         records = []
         defaults.removeObject(forKey: key)
     }
 
-    /// Writes any coalesced visits immediately. Call before quitting.
-    func flushPendingWrites() {
-        guard persistTask != nil else { return }
-        persist()
+    private func persistLegacyFallback() {
+        let legacy = records.map {
+            LegacyBrowsingHistoryRecord(id: UUID(), url: $0.url, visitedAt: $0.visitedAt)
+        }
+        guard let data = try? JSONEncoder().encode(legacy) else { return }
+        defaults.set(data, forKey: key)
+    }
+}
+
+@MainActor
+final class GeminiInputDraftStore {
+    static let shared = GeminiInputDraftStore()
+
+    private let repository = SharedMajorTomDatabase.shared.map(
+        GeminiInputDraftRepository.init(database:)
+    )
+    private var memoryFallback: [URL: String] = [:]
+
+    func text(for promptURL: URL) -> String {
+        if let repository {
+            return (try? repository.draft(for: promptURL)?.text) ?? ""
+        }
+        return memoryFallback[promptURL] ?? ""
     }
 
-    /// Coalesces visits into one write.
-    ///
-    /// The whole list — up to five thousand records — is re-encoded on every write, so
-    /// doing it per navigation meant a growing JSON encode and a UserDefaults write on
-    /// every page load.
-    private func schedulePersist() {
-        persistTask?.cancel()
-        persistTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(2))
-            guard !Task.isCancelled else { return }
-            self?.persist()
+    func save(_ text: String, for promptURL: URL) {
+        if let repository {
+            try? repository.save(text, for: promptURL)
+        } else if text.isEmpty {
+            memoryFallback.removeValue(forKey: promptURL)
+        } else {
+            memoryFallback[promptURL] = text
         }
     }
 
-    private func persist() {
-        persistTask?.cancel()
-        persistTask = nil
-        guard let data = try? JSONEncoder().encode(records) else { return }
-        defaults.set(data, forKey: key)
+    func remove(for promptURL: URL) {
+        try? repository?.remove(for: promptURL)
+        memoryFallback.removeValue(forKey: promptURL)
     }
 }

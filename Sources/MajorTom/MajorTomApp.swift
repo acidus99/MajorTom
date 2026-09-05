@@ -404,10 +404,9 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         if #available(macOS 26.0, *) {
             NativeTabCoordinator.shared.persistSession()
         }
-        // Preferences and history coalesce their writes, so a change made moments before
-        // quitting may still be waiting. Flush both rather than lose it.
+        // Preferences coalesce their writes, so a change made moments before quitting
+        // may still be waiting. History and drafts commit directly to SQLite.
         BrowserSettingsStore.shared.flushPendingWrites()
-        BrowsingHistoryStore.shared.flushPendingWrites()
     }
 
     /// AppKit sends this responder-chain action when the native tab bar's plus button

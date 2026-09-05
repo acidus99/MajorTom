@@ -29,6 +29,11 @@ Document themes are independent of application appearance. Dracula Dark is the d
 
 When a visited capsule provides a favicon, its full-color emoji appears on the Page Information control and the tab. Without a favicon, the Page Information control uses the standard information-in-a-circle symbol.
 
+A bookmark carries the most recently observed favicon state for its capsule, including a
+confirmed absence. This snapshot synchronizes with the bookmark so a newly installed Mac can
+render Favorites before building a local favicon cache. When a visited capsule's favicon value
+changes, every bookmark for the same host and port is updated and that change synchronizes.
+
 Navigation distinguishes the page currently being read from the destination being loaded. Stop cancels the request. Back and Forward behave predictably, redirects commit only their final location, and failures are clearly browser-generated pages. The navigation bar uses native Liquid Glass controls: Back and Forward form one connected group, Home and Page Information form another connected group, and standalone actions use the same system material and interaction treatment. Connected and standalone controls reveal each individual circular action on hover. Document content continues beneath the navigation and Favorites bars, while the scroll thumb begins below them rather than crossing the browser chrome. The native tab bar spans the window and contains only tabs; new tabs are created with File > New Tab or Command-T. Show Tab Overview appears immediately after Reload or Stop in the navigation bar and enters AppKit's Tab Overview, whose top-right icon-only Hide Tab Overview button and Escape key return to the selected tab. In the File menu, holding Option changes New Tab (⌘T) to New Tab at the End (⌥⌘T), which appends and selects a tab, and changes Close Tab (⌘W) to Close Other Tabs (⌥⌘W), which keeps only the selected tab in its window. The Favorites Bar bookmark menu includes a destructive Delete command. Browser commands, shortcuts, menus, gestures, context menus, saving, find, zoom, and source viewing use normal Mac conventions.
 
 ## Progressive, faithful content
@@ -39,7 +44,35 @@ Gemtext receives a polished semantic reading presentation. Other text remains se
 
 Reading preferences control application appearance separately from the document theme and width. Changes to appearance-only preferences update open content without another request. Optional enhancements—such as conservative inline formatting and automatic same-capsule images—must be individually controllable, bounded, and fail without disrupting the original document or link. Automatic same-capsule images are off by default; this default is applied once to existing installations too. General settings provides Restore Default Settings, which restores browser preferences but preserves trusted capsule identities and client certificates. General settings also shows whether Major Tom is the default handler for `gemini://` URLs and provides a button to make it the default; the button is disabled and a confirmation label is shown when it already is the default.
 
+Gemtext rendering choices synchronize between Macs, including embedded `data:` images,
+automatic same-capsule images, and inline rendering enhancements. Application appearance,
+proxy configuration, and Favorites-bar visibility remain local to each Mac.
+
 View Source and Save Page As always use the original response body. Caching must preserve response metadata, completion state, and enough source to reproduce a page under changed reading preferences.
+
+## History and unfinished input
+
+Browsing history is one local list with one entry per URL, independent of the Back and
+Forward list in any tab. A successful navigation, reload, or Back/Forward traversal updates
+that URL's last-visited time and visit count, moving it to the top of the global list. A
+submitted Gemini input response is an ordinary URL with a query and follows the same history
+and caching rules as every other navigation. Global history remains on one Mac and retains
+at most one year of visits.
+
+Text typed into a Gemini input prompt but cancelled or dismissed is an unfinished local draft,
+not history. It survives quitting and is offered again when the same prompt URL returns. The
+draft is deleted when the response is successfully formed for submission, when the user
+empties it, or after fourteen days. Drafts never synchronize to another Mac.
+
+Window restoration is separate from global history. Major Tom restores each window's frame,
+tab order and selection, and each tab's Back/Forward list, cursor, zoom, titles, and per-entry
+scroll position. Back and Forward prefer an available cached representation; when it has been
+evicted, Major Tom reloads that entry without changing the tab's Back/Forward structure.
+
+Cached response bodies and their full-text index are local browser data and never synchronize.
+The cross-tab cache retains an individual response of at most 32 MiB, expires responses after
+120 days, and evicts least-recently-used responses until total source bodies occupy no more
+than 1 GiB. Clear Browsing Data removes global history, restored-session state, and this cache.
 
 ## Trust, security, and privacy
 
@@ -48,6 +81,17 @@ Gemini connections use TLS and trust on first use, keyed by host, port, and the 
 Client certificates are offered only after a user has explicitly approved a matching capsule or path scope. Private keys remain in the Keychain; they are never placed in preferences or CloudKit. A capsule's identity must never be sent to another capsule through a redirect or overly broad rule.
 
 Major Tom works offline. Local state is immediately authoritative. When iCloud synchronization is enabled, it syncs only the user choices that should follow them between Macs; it never makes CloudKit a launch dependency or transfers cached page bodies, browsing history, network configuration, or private keys.
+
+Cloud data is explicitly versioned. Major Tom validates a data-model manifest before reading
+the versioned records and stops with an upgrade message if that model requires a newer app.
+During the v2 compatibility period, it also maintains the original private-zone records so an
+older installed Major Tom can continue receiving and contributing supported synchronized data.
+
+Deleting synchronized user intent propagates as a tombstone so an offline Mac cannot restore it
+later. Clearing local browsing data removes history, session restoration, and cached pages only
+from this Mac. Removing a client identity deletes its Keychain material on this Mac and publishes
+descriptor and association tombstones; private key bytes are never copied into the app database
+or CloudKit.
 
 ## Native quality and accessibility
 

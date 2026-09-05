@@ -62,6 +62,9 @@ public struct RestoredTabState: Codable, Equatable, Sendable {
     public var zoom: Double
     public var title: String?
     public var documentTitle: String?
+    /// Reading positions keyed by Back/Forward entry. Optional for sessions written by
+    /// releases that deliberately reset every page to the top when the app quit.
+    public var scrollOffsets: [Int: Double]?
 
     public init(
         history: [URL],
@@ -69,7 +72,8 @@ public struct RestoredTabState: Codable, Equatable, Sendable {
         cachedPages: [CachedPage],
         zoom: Double,
         title: String? = nil,
-        documentTitle: String? = nil
+        documentTitle: String? = nil,
+        scrollOffsets: [Int: Double]? = nil
     ) {
         self.history = history
         self.historyIndex = historyIndex
@@ -77,6 +81,7 @@ public struct RestoredTabState: Codable, Equatable, Sendable {
         self.zoom = zoom
         self.title = title
         self.documentTitle = documentTitle
+        self.scrollOffsets = scrollOffsets
     }
 }
 
@@ -116,8 +121,7 @@ public struct NavigationState: Equatable, Sendable {
     public private(set) var cachedPages: [URL: CachedPage] = [:]
 
     /// Reading positions keyed by history entry rather than by URL, so two visits to one
-    /// address can hold different positions. Deliberately not persisted: quitting starts
-    /// every entry back at the top.
+    /// address can hold different positions.
     private var scrollOffsets: [Int: Double] = [:]
     private let cacheByteBudget: Int
 
@@ -143,6 +147,9 @@ public struct NavigationState: Equatable, Sendable {
             state.cachedPages.map { ($0.url, $0) },
             uniquingKeysWith: { first, _ in first }
         )
+        scrollOffsets = (state.scrollOffsets ?? [:]).filter {
+            history.indices.contains($0.key) && $0.value.isFinite && $0.value >= 0
+        }
     }
 
     // MARK: - Position
@@ -265,7 +272,8 @@ public struct NavigationState: Equatable, Sendable {
             cachedPages: Array(cachedPages.values),
             zoom: zoom,
             title: title,
-            documentTitle: documentTitle
+            documentTitle: documentTitle,
+            scrollOffsets: scrollOffsets
         )
     }
 }

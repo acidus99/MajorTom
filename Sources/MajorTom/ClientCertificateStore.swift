@@ -15,7 +15,7 @@ struct ResolvedClientCertificate {
 /// connection is about to be made.
 @MainActor
 final class ClientCertificateStore: ObservableObject {
-    static let shared = ClientCertificateStore()
+    static let shared = ClientCertificateStore(database: SharedMajorTomDatabase.shared)
 
     @Published private(set) var certificates: [ClientCertificateDescriptor] = []
     @Published private(set) var associations: [ClientCertificateAssociation] = []
@@ -24,6 +24,7 @@ final class ClientCertificateStore: ObservableObject {
 
     private let defaults: UserDefaults
     private let keychain: ClientCertificateKeychain
+    private let repository: ClientCertificateSyncRepository?
     private let storageKey = "client-certificates-v1"
     private let syncStorageKey = "client-certificate-sync-state-v2"
     private let localStorageFlagsKey = "client-certificate-local-storage-v1"
@@ -38,23 +39,51 @@ final class ClientCertificateStore: ObservableObject {
 
     init(
         defaults: UserDefaults = .standard,
-        keychain: ClientCertificateKeychain = ClientCertificateKeychain()
+        keychain: ClientCertificateKeychain = ClientCertificateKeychain(),
+        database: MajorTomDatabase? = nil
     ) {
         self.defaults = defaults
         self.keychain = keychain
+        repository = database.map { ClientCertificateSyncRepository(database: $0) }
         localSynchronizationFlags = (defaults.dictionary(forKey: localStorageFlagsKey) ?? [:])
             .reduce(into: [:]) { result, entry in
                 if let id = UUID(uuidString: entry.key), let value = entry.value as? Bool {
                     result[id] = value
                 }
             }
-        if let data = defaults.data(forKey: syncStorageKey),
-           let state = try? JSONDecoder().decode(ClientCertificateSyncState.self, from: data) {
+        if let repository {
+            var legacyState: ClientCertificateSyncState?
+            if let data = defaults.data(forKey: syncStorageKey) {
+                legacyState = try? JSONDecoder().decode(ClientCertificateSyncState.self, from: data)
+            } else if let data = defaults.data(forKey: storageKey),
+                      let snapshot = try? JSONDecoder().decode(SyncedClientCertificates.self, from: data) {
+                legacyState = ClientCertificateSyncState(legacy: snapshot)
+                for descriptor in snapshot.certificates {
+                    localSynchronizationFlags[descriptor.id] = descriptor.synchronizesWithICloud
+                }
+            }
+            if let legacyState,
+               (try? repository.importLegacy(
+                    legacyState,
+                    localFlags: localSynchronizationFlags
+               )) != nil {
+                defaults.removeObject(forKey: storageKey)
+                defaults.removeObject(forKey: syncStorageKey)
+                defaults.removeObject(forKey: localStorageFlagsKey)
+            }
+            if let loaded = try? repository.load() {
+                syncState = loaded.state
+                localSynchronizationFlags = loaded.localFlags
+                certificates = loaded.state.activeCertificates(preservingLocalStorageFrom: [])
+                associations = loaded.state.activeAssociations
+            }
+        } else if let data = defaults.data(forKey: syncStorageKey),
+                  let state = try? JSONDecoder().decode(ClientCertificateSyncState.self, from: data) {
             syncState = state
             certificates = state.activeCertificates(preservingLocalStorageFrom: [])
             associations = state.activeAssociations
         } else if let data = defaults.data(forKey: storageKey),
-           let snapshot = try? JSONDecoder().decode(SyncedClientCertificates.self, from: data) {
+                  let snapshot = try? JSONDecoder().decode(SyncedClientCertificates.self, from: data) {
             syncState = ClientCertificateSyncState(legacy: snapshot)
             certificates = snapshot.certificates
             associations = snapshot.associations
@@ -384,6 +413,10 @@ final class ClientCertificateStore: ObservableObject {
     }
 
     private func persist(_ state: ClientCertificateSyncState) {
+        if let repository,
+           (try? repository.save(state, localFlags: localSynchronizationFlags)) != nil {
+            return
+        }
         guard let data = try? JSONEncoder().encode(state) else { return }
         defaults.set(data, forKey: syncStorageKey)
         defaults.set(

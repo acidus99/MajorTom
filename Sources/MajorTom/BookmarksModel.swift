@@ -16,21 +16,32 @@ final class BookmarksModel: ObservableObject {
     @Published private(set) var favicons: [CapsuleEndpoint: String] = [:]
 
     private let store: BookmarkStore?
+    private let legacyFileURL: URL?
     private let defaults = UserDefaults.standard
     private let syncStorageKey = "bookmarks-cloud-metadata-v1"
+    private let syncRepository: BookmarkSyncRepository?
     private var syncState: SyncedBookmarks?
     private var cloudObserver: AnyCancellable?
 
     init() {
+        let database = SharedMajorTomDatabase.shared
+        syncRepository = database.map(BookmarkSyncRepository.init(database:))
         if let root = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first {
-            store = BookmarkStore(fileURL: root
+            let fileURL = root
                 .appendingPathComponent("Major Tom", isDirectory: true)
-                .appendingPathComponent("bookmarks.json"))
+                .appendingPathComponent("bookmarks.json")
+            legacyFileURL = fileURL
+            if let database {
+                store = try? BookmarkStore(database: database)
+            } else {
+                store = BookmarkStore(fileURL: fileURL)
+            }
         } else {
             store = nil
+            legacyFileURL = nil
         }
         cloudObserver = ICloudSyncStore.shared.receivedBookmarks.sink { [weak self] state in
             Task { await self?.applyCloudState(state) }
@@ -48,7 +59,10 @@ final class BookmarksModel: ObservableObject {
     /// server, so a bookmark list may decorate what is already known but must never fetch:
     /// a list of fifty bookmarks would otherwise touch fifty capsules on open.
     func favicon(for url: URL) -> String? {
-        CapsuleEndpoint(url: url).flatMap { favicons[$0] }
+        if let snapshot = collection.allBookmarks.first(where: { $0.url == url })?.favicon {
+            return snapshot.emoji
+        }
+        return CapsuleEndpoint(url: url).flatMap { favicons[$0] }
     }
 
     func refreshFavicons() {
@@ -61,7 +75,41 @@ final class BookmarksModel: ObservableObject {
     // MARK: - Writing
 
     func add(title: String, url: URL, toFolderWith folderID: UUID? = nil) {
-        mutate { $0.add(title: title, url: url, toFolderWith: folderID) }
+        Task { [weak self] in
+            let snapshot: BookmarkFaviconSnapshot?
+            if let endpoint = CapsuleEndpoint(url: url),
+               let record = await SharedFaviconStore.shared?.freshRecord(for: endpoint) {
+                snapshot = BookmarkFaviconSnapshot(
+                    emoji: record.emoji,
+                    fetchedAt: record.fetchedAt
+                )
+            } else {
+                snapshot = nil
+            }
+            self?.mutate {
+                $0.add(
+                    title: title,
+                    url: url,
+                    toFolderWith: folderID,
+                    favicon: snapshot
+                )
+            }
+        }
+    }
+
+    /// Attaches a changed favicon observation to every bookmark on this capsule. A
+    /// confirmed absence is as meaningful as an emoji and synchronizes the same way.
+    func updateFavicon(
+        _ emoji: String?,
+        for endpoint: CapsuleEndpoint,
+        fetchedAt: Date
+    ) {
+        let snapshot = BookmarkFaviconSnapshot(emoji: emoji, fetchedAt: fetchedAt)
+        guard collection.allBookmarks.contains(where: {
+            CapsuleEndpoint(url: $0.url) == endpoint
+                && ($0.favicon == nil || $0.favicon?.emoji != emoji)
+        }) else { return }
+        mutate { $0.updateFavicon(for: endpoint, to: snapshot) }
     }
 
     func remove(bookmarkWith id: UUID) {
@@ -159,10 +207,30 @@ final class BookmarksModel: ObservableObject {
 
     private func reload() async {
         guard let store else { return }
+        if let legacyFileURL,
+           (try? await store.importLegacyJSON(at: legacyFileURL)) == true {
+            try? FileManager.default.removeItem(at: legacyFileURL)
+        }
         let localCollection = await store.collection()
         collection = localCollection
+
         if let data = defaults.data(forKey: syncStorageKey),
-           let stored = try? JSONDecoder().decode(SyncedBookmarks.self, from: data) {
+           let legacy = try? JSONDecoder().decode(SyncedBookmarks.self, from: data),
+           let syncRepository,
+           (try? syncRepository.importLegacyState(legacy)) != nil {
+            defaults.removeObject(forKey: syncStorageKey)
+        }
+
+        let storedSyncState: SyncedBookmarks?
+        if let syncRepository {
+            storedSyncState = (try? syncRepository.state()) ?? nil
+        } else {
+            storedSyncState = nil
+        }
+        if let stored = storedSyncState {
+            syncState = stored.reconciled(with: localCollection, at: Date())
+        } else if let data = defaults.data(forKey: syncStorageKey),
+                  let stored = try? JSONDecoder().decode(SyncedBookmarks.self, from: data) {
             syncState = stored.reconciled(with: localCollection, at: Date())
         } else {
             syncState = SyncedBookmarks(collection: localCollection, modifiedAt: Date())
@@ -223,7 +291,12 @@ final class BookmarksModel: ObservableObject {
     }
 
     private func persistSyncState() {
-        guard let syncState, let data = try? JSONEncoder().encode(syncState) else { return }
+        guard let syncState else { return }
+        if let syncRepository {
+            try? syncRepository.replace(with: syncState)
+            return
+        }
+        guard let data = try? JSONEncoder().encode(syncState) else { return }
         defaults.set(data, forKey: syncStorageKey)
     }
 }

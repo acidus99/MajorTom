@@ -23,7 +23,7 @@ enum ICloudSyncStatus: Equatable {
     }
 }
 
-/// The app's private CloudKit cache. Local UserDefaults remain the immediate source of
+/// The app's private CloudKit adapter. Local repositories remain the immediate source of
 /// truth so a signed-out or offline Mac behaves exactly like a non-iCloud build.
 /// CloudKit records contain encrypted JSON payloads and no searchable browsing data.
 @MainActor
@@ -44,7 +44,12 @@ final class ICloudSyncStore: ObservableObject {
     private let container: CKContainer?
     private let database: CKDatabase?
     private let defaults: UserDefaults
-    private let zoneID = CKRecordZone.ID(zoneName: "MajorTomUserData")
+    /// Kept indefinitely as the compatibility feed for pre-v2 clients.
+    private let legacyZoneID = CKRecordZone.ID(zoneName: "MajorTomUserData")
+    /// New clients isolate their records so a future data model never changes the
+    /// meaning of records an older app already understands.
+    private let zoneID = CKRecordZone.ID(zoneName: "MajorTomUserDataV2")
+    private static let dataModelMajor = 2
     private let synchronizedRecordTypes: [CKRecord.RecordType] = [
         "MTPreferences",
         "MTDeviceTabs",
@@ -56,7 +61,12 @@ final class ICloudSyncStore: ObservableObject {
     ]
     private let preferencesRecordID: CKRecord.ID
     private let tabsRecordID: CKRecord.ID
-    private let encoder = JSONEncoder()
+    private let manifestRecordID: CKRecord.ID
+    private let encoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
+    }()
     private let decoder = JSONDecoder()
     private var localPreferences: SyncedBrowserPreferences?
     private var localClientCertificates: ClientCertificateSyncState?
@@ -100,6 +110,7 @@ final class ICloudSyncStore: ObservableObject {
             recordName: "tabs-\(localDeviceID.uuidString.lowercased())",
             zoneID: zoneID
         )
+        manifestRecordID = CKRecord.ID(recordName: "data-model-manifest", zoneID: zoneID)
 
         if let data = defaults.data(forKey: Self.cachedTabsKey),
            let cached = try? decoder.decode([CloudTabDeviceSnapshot].self, from: data) {
@@ -217,8 +228,63 @@ final class ICloudSyncStore: ObservableObject {
                 return
             }
 
+            _ = try await database.save(CKRecordZone(zoneID: legacyZoneID))
             _ = try await database.save(CKRecordZone(zoneID: zoneID))
-            let fetchedRemote = try await fetchAllRecords(from: database)
+
+            let manifestRecord = try await fetchManifest(from: database)
+            let v2Records: [CKRecord]
+            if let manifestRecord {
+                guard let data = manifestRecord.encryptedValues["payload"] as? Data,
+                      let manifest = try? decoder.decode(CloudDataModelManifest.self, from: data)
+                else {
+                    status = .failed("The iCloud data-model manifest is unreadable")
+                    return
+                }
+                switch manifest.compatibility(
+                    readerMajor: Self.dataModelMajor,
+                    writerMajor: Self.dataModelMajor
+                ) {
+                case .compatible:
+                    break
+                case .requiresNewerApp:
+                    status = .unavailable("iCloud data requires a newer version of Major Tom")
+                    return
+                case .unexpectedOlderFormat:
+                    status = .failed("The iCloud v2 zone has an unexpected data-model version")
+                    return
+                }
+                // No model payload is queried until the manifest says this client can
+                // interpret it.
+                v2Records = try await fetchAllRecords(from: database, zoneID: zoneID)
+            } else {
+                // An empty v2 zone is safe to claim. Records without a manifest are not:
+                // their encoding cannot be identified without guessing.
+                v2Records = try await fetchAllRecords(from: database, zoneID: zoneID)
+                guard v2Records.isEmpty else {
+                    status = .failed("The iCloud v2 zone has data but no version manifest")
+                    return
+                }
+                let manifest = CloudDataModelManifest(
+                    formatMajor: Self.dataModelMajor,
+                    minimumReaderMajor: Self.dataModelMajor,
+                    minimumWriterMajor: Self.dataModelMajor,
+                    createdAt: Date()
+                )
+                _ = try await database.save(try makeRecord(
+                    type: "MTDataModelManifest",
+                    id: manifestRecordID,
+                    value: manifest
+                ))
+            }
+
+            let legacyRecords = try await fetchAllRecords(
+                from: database,
+                zoneID: legacyZoneID
+            )
+            // Read both feeds during the compatibility window. That keeps changes made
+            // by an older app bidirectional instead of letting the v2 mirror overwrite
+            // them on its next pass.
+            let fetchedRemote = v2Records + legacyRecords
             // A zone can change while CloudKit is paging through its change history,
             // so the same record ID may legitimately appear in more than one batch.
             // Dictionary(uniqueKeysWithValues:) traps on that input. Collapse repeats
@@ -243,7 +309,10 @@ final class ICloudSyncStore: ObservableObject {
                 guard let data = record.encryptedValues["payload"] as? Data else { continue }
                 switch record.recordType {
                 case "MTPreferences":
-                    remotePreferences = try? decoder.decode(SyncedBrowserPreferences.self, from: data)
+                    if let value = try? decoder.decode(SyncedBrowserPreferences.self, from: data),
+                       value.shouldReplace(remotePreferences) {
+                        remotePreferences = value
+                    }
                 case "MTDeviceTabs":
                     if let device = try? decoder.decode(CloudTabDeviceSnapshot.self, from: data) {
                         devices.append(device)
@@ -279,6 +348,12 @@ final class ICloudSyncStore: ObservableObject {
                     break
                 }
             }
+
+            devices = Array(newestValuesByID(
+                devices,
+                id: \.deviceID,
+                modifiedAt: { $0.updatedAt }
+            ).values)
 
             if let remotePreferences, remotePreferences.shouldReplace(localPreferences) {
                 localPreferences = remotePreferences
@@ -328,7 +403,11 @@ final class ICloudSyncStore: ObservableObject {
 
             var recordsToSave: [CKRecord] = []
             if let localPreferences,
-               remotePreferences == nil || localPreferences.shouldReplace(remotePreferences) {
+               try recordNeedsUpload(
+                    localPreferences,
+                    id: preferencesRecordID,
+                    cloudRecords: remoteRecordsByID
+               ) {
                 recordsToSave.append(try makeRecord(
                     type: "MTPreferences",
                     id: preferencesRecordID,
@@ -339,14 +418,12 @@ final class ICloudSyncStore: ObservableObject {
             if let localClientCertificates {
                 recordsToSave += try recordsNeedingUpload(
                     local: localClientCertificates.certificates,
-                    remote: remoteCertificateRecords,
                     type: "MTClientCertificateDescriptor",
                     prefix: "client-certificate",
                     cloudRecords: remoteRecordsByID
                 )
                 recordsToSave += try recordsNeedingUpload(
                     local: localClientCertificates.associations,
-                    remote: remoteAssociationRecords,
                     type: "MTClientCertificateAssociation",
                     prefix: "client-certificate-association",
                     cloudRecords: remoteRecordsByID
@@ -355,35 +432,37 @@ final class ICloudSyncStore: ObservableObject {
             if let localBookmarks {
                 recordsToSave += try recordsNeedingUpload(
                     local: localBookmarks.folders,
-                    remote: remoteBookmarkFolders,
                     type: "MTBookmarkFolder",
                     prefix: "bookmark-folder",
                     cloudRecords: remoteRecordsByID
                 )
                 recordsToSave += try recordsNeedingUpload(
                     local: localBookmarks.bookmarks,
-                    remote: remoteBookmarks,
                     type: "MTBookmark",
                     prefix: "bookmark",
                     cloudRecords: remoteRecordsByID
                 )
             }
             if let localServerTrust {
-                let remoteByID = Dictionary(uniqueKeysWithValues: remoteTrustDecisions.map { ($0.id, $0) })
                 for decision in localServerTrust.decisions
-                where remoteByID[decision.id]?.modifiedAt ?? .distantPast < decision.modifiedAt {
-                    recordsToSave.append(try makeRecord(
-                        type: "MTServerTrust",
-                        id: recordID(prefix: "server-trust", stableID: decision.id),
-                        value: decision,
-                        existing: remoteRecordsByID[
-                            recordID(prefix: "server-trust", stableID: decision.id)
-                        ]
-                    ))
+                {
+                    let id = recordID(prefix: "server-trust", stableID: decision.id)
+                    if try recordNeedsUpload(decision, id: id, cloudRecords: remoteRecordsByID) {
+                        recordsToSave.append(try makeRecord(
+                            type: "MTServerTrust",
+                            id: id,
+                            value: decision,
+                            existing: remoteRecordsByID[id]
+                        ))
+                    }
                 }
             }
             if let localTabs,
-               devices.first(where: { $0.deviceID == localDeviceID }) != localTabs {
+               try recordNeedsUpload(
+                    localTabs,
+                    id: tabsRecordID,
+                    cloudRecords: remoteRecordsByID
+               ) {
                 recordsToSave.append(try makeRecord(
                     type: "MTDeviceTabs",
                     id: tabsRecordID,
@@ -391,27 +470,18 @@ final class ICloudSyncStore: ObservableObject {
                     existing: remoteRecordsByID[tabsRecordID]
                 ))
             }
-            if !recordsToSave.isEmpty {
-                for batchStart in stride(
-                    from: 0,
-                    to: recordsToSave.count,
-                    by: Self.maximumRecordsPerModify
-                ) {
-                    let batchEnd = min(
-                        batchStart + Self.maximumRecordsPerModify,
-                        recordsToSave.count
-                    )
-                    let result = try await database.modifyRecords(
-                        saving: Array(recordsToSave[batchStart..<batchEnd]),
-                        deleting: [],
-                        savePolicy: .ifServerRecordUnchanged,
-                        atomically: false
-                    )
-                    for saveResult in result.saveResults.values {
-                        if case .failure(let error) = saveResult { throw error }
-                    }
-                }
-            }
+            try await save(recordsToSave, to: database)
+
+            // Continue publishing the old record shapes in the original zone. Older
+            // Major Tom builds never see the v2 zone or manifest, but still receive
+            // current bookmarks, preferences, identities, trust, and device tabs.
+            let legacyByID = newestValuesByID(
+                legacyRecords,
+                id: \.recordID,
+                modifiedAt: \.modificationDate
+            )
+            let compatibilityRecords = try makeLegacyCompatibilityRecords(existing: legacyByID)
+            try await save(compatibilityRecords, to: database)
             status = .upToDate(Date())
         } catch {
             if Self.isConflict(error) {
@@ -424,7 +494,10 @@ final class ICloudSyncStore: ObservableObject {
         }
     }
 
-    private func fetchAllRecords(from database: CKDatabase) async throws -> [CKRecord] {
+    private func fetchAllRecords(
+        from database: CKDatabase,
+        zoneID: CKRecordZone.ID
+    ) async throws -> [CKRecord] {
         var records: [CKRecord] = []
 
         // A nil zone-change token means "from the beginning of the zone's history",
@@ -457,6 +530,14 @@ final class ICloudSyncStore: ObservableObject {
         return records
     }
 
+    private func fetchManifest(from database: CKDatabase) async throws -> CKRecord? {
+        do {
+            return try await database.record(for: manifestRecordID)
+        } catch let error as CKError where error.code == .unknownItem {
+            return nil
+        }
+    }
+
     private func makeRecord<Value: Encodable>(
         type: CKRecord.RecordType,
         id: CKRecord.ID,
@@ -468,21 +549,141 @@ final class ICloudSyncStore: ObservableObject {
         return record
     }
 
+    private func save(_ records: [CKRecord], to database: CKDatabase) async throws {
+        guard !records.isEmpty else { return }
+        for batchStart in stride(
+            from: 0,
+            to: records.count,
+            by: Self.maximumRecordsPerModify
+        ) {
+            let batchEnd = min(batchStart + Self.maximumRecordsPerModify, records.count)
+            let result = try await database.modifyRecords(
+                saving: Array(records[batchStart..<batchEnd]),
+                deleting: [],
+                savePolicy: .ifServerRecordUnchanged,
+                atomically: false
+            )
+            for saveResult in result.saveResults.values {
+                if case .failure(let error) = saveResult { throw error }
+            }
+        }
+    }
+
+    private func makeLegacyCompatibilityRecords(
+        existing: [CKRecord.ID: CKRecord]
+    ) throws -> [CKRecord] {
+        var records: [CKRecord] = []
+        if let localPreferences,
+           let record = try compatibilityRecord(
+                type: "MTPreferences",
+                id: CKRecord.ID(recordName: "preferences", zoneID: legacyZoneID),
+                value: localPreferences,
+                existing: existing
+           ) {
+            records.append(record)
+        }
+        if let localClientCertificates {
+            records += try compatibilityRecords(
+                localClientCertificates.certificates,
+                type: "MTClientCertificateDescriptor",
+                prefix: "client-certificate",
+                stableID: { $0.id.uuidString },
+                existing: existing
+            )
+            records += try compatibilityRecords(
+                localClientCertificates.associations,
+                type: "MTClientCertificateAssociation",
+                prefix: "client-certificate-association",
+                stableID: { $0.id.uuidString },
+                existing: existing
+            )
+        }
+        if let localBookmarks {
+            records += try compatibilityRecords(
+                localBookmarks.folders,
+                type: "MTBookmarkFolder",
+                prefix: "bookmark-folder",
+                stableID: { $0.id.uuidString },
+                existing: existing
+            )
+            records += try compatibilityRecords(
+                localBookmarks.bookmarks,
+                type: "MTBookmark",
+                prefix: "bookmark",
+                stableID: { $0.id.uuidString },
+                existing: existing
+            )
+        }
+        if let localServerTrust {
+            records += try compatibilityRecords(
+                localServerTrust.decisions,
+                type: "MTServerTrust",
+                prefix: "server-trust",
+                stableID: { $0.id },
+                existing: existing
+            )
+        }
+        if let localTabs,
+           let record = try compatibilityRecord(
+                type: "MTDeviceTabs",
+                id: CKRecord.ID(
+                    recordName: "tabs-\(localDeviceID.uuidString.lowercased())",
+                    zoneID: legacyZoneID
+                ),
+                value: localTabs,
+                existing: existing
+           ) {
+            records.append(record)
+        }
+        return records
+    }
+
+    private func compatibilityRecords<Value: Encodable>(
+        _ values: [Value],
+        type: CKRecord.RecordType,
+        prefix: String,
+        stableID: (Value) -> String,
+        existing: [CKRecord.ID: CKRecord]
+    ) throws -> [CKRecord] {
+        try values.compactMap { value in
+            try compatibilityRecord(
+                type: type,
+                id: recordID(
+                    prefix: prefix,
+                    stableID: stableID(value),
+                    zoneID: legacyZoneID
+                ),
+                value: value,
+                existing: existing
+            )
+        }
+    }
+
+    private func compatibilityRecord<Value: Encodable>(
+        type: CKRecord.RecordType,
+        id: CKRecord.ID,
+        value: Value,
+        existing: [CKRecord.ID: CKRecord]
+    ) throws -> CKRecord? {
+        let payload = try encoder.encode(value)
+        if existing[id]?.encryptedValues["payload"] as? Data == payload { return nil }
+        let record = existing[id] ?? CKRecord(recordType: type, recordID: id)
+        record.encryptedValues["payload"] = payload as CKRecordValue
+        return record
+    }
+
     private func recordsNeedingUpload<Record>(
         local: [Record],
-        remote: [Record],
         type: CKRecord.RecordType,
         prefix: String,
         cloudRecords: [CKRecord.ID: CKRecord]
     ) throws -> [CKRecord]
     where Record: Encodable & Identifiable & CloudModifiedRecord, Record.ID == UUID {
-        let remoteByID = Dictionary(uniqueKeysWithValues: remote.map { ($0.id, $0) })
         return try local.compactMap { record in
-            guard remoteByID[record.id]?.cloudModifiedAt ?? .distantPast
-                < record.cloudModifiedAt else {
+            let id = recordID(prefix: prefix, stableID: record.id.uuidString)
+            guard try recordNeedsUpload(record, id: id, cloudRecords: cloudRecords) else {
                 return nil
             }
-            let id = recordID(prefix: prefix, stableID: record.id.uuidString)
             return try makeRecord(
                 type: type,
                 id: id,
@@ -492,9 +693,21 @@ final class ICloudSyncStore: ObservableObject {
         }
     }
 
-    private func recordID(prefix: String, stableID: String) -> CKRecord.ID {
+    private func recordNeedsUpload<Value: Encodable>(
+        _ value: Value,
+        id: CKRecord.ID,
+        cloudRecords: [CKRecord.ID: CKRecord]
+    ) throws -> Bool {
+        try encoder.encode(value) != (cloudRecords[id]?.encryptedValues["payload"] as? Data)
+    }
+
+    private func recordID(
+        prefix: String,
+        stableID: String,
+        zoneID: CKRecordZone.ID? = nil
+    ) -> CKRecord.ID {
         let digest = SHA256.hash(data: Data(stableID.utf8)).map { String(format: "%02x", $0) }.joined()
-        return CKRecord.ID(recordName: "\(prefix)-\(digest)", zoneID: zoneID)
+        return CKRecord.ID(recordName: "\(prefix)-\(digest)", zoneID: zoneID ?? self.zoneID)
     }
 
     private func persistCachedTabs(_ devices: [CloudTabDeviceSnapshot]) {

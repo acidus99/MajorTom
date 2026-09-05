@@ -3,6 +3,38 @@ import XCTest
 @testable import MajorTomCore
 
 final class CloudSyncModelTests: XCTestCase {
+    func testV2ManifestAcceptsV2ReaderAndWriter() {
+        let manifest = CloudDataModelManifest(
+            formatMajor: 2,
+            minimumReaderMajor: 2,
+            minimumWriterMajor: 2,
+            createdAt: Date(timeIntervalSince1970: 1)
+        )
+
+        XCTAssertEqual(manifest.compatibility(readerMajor: 2, writerMajor: 2), .compatible)
+    }
+
+    func testV2ClientRefusesFutureCloudDataBeforeReadingPayloads() {
+        let manifest = CloudDataModelManifest(
+            formatMajor: 3,
+            minimumReaderMajor: 3,
+            minimumWriterMajor: 3,
+            createdAt: Date(timeIntervalSince1970: 1)
+        )
+
+        XCTAssertEqual(manifest.compatibility(readerMajor: 2, writerMajor: 2), .requiresNewerApp)
+    }
+
+    func testV2ZoneDoesNotSilentlyAcceptAnOlderFormat() {
+        let manifest = CloudDataModelManifest(
+            formatMajor: 1,
+            minimumReaderMajor: 1,
+            minimumWriterMajor: 1,
+            createdAt: Date(timeIntervalSince1970: 1)
+        )
+
+        XCTAssertEqual(manifest.compatibility(readerMajor: 2, writerMajor: 2), .unexpectedOlderFormat)
+    }
     func testPagedCloudResultsKeepNewestDuplicateWithoutTrapping() {
         struct Value: Equatable {
             var id: String
@@ -193,6 +225,27 @@ final class CloudSyncModelTests: XCTestCase {
 
         XCTAssertFalse(merged.collection.contains(url: bookmark.url))
         XCTAssertNotNil(merged.bookmarks.first { $0.id == bookmark.id }?.deletedAt)
+    }
+
+    func testBookmarkFaviconSnapshotSurvivesCloudRoundTrip() throws {
+        var collection = BookmarkCollection()
+        let snapshot = BookmarkFaviconSnapshot(
+            emoji: nil,
+            fetchedAt: Date(timeIntervalSince1970: 100)
+        )
+        let bookmark = collection.add(
+            title: "Saved",
+            url: URL(string: "gemini://example.com/")!,
+            favicon: snapshot
+        )
+
+        let state = SyncedBookmarks(collection: collection, modifiedAt: Date())
+        let decoded = try JSONDecoder().decode(
+            SyncedBookmarks.self,
+            from: JSONEncoder().encode(state)
+        )
+
+        XCTAssertEqual(decoded.collection.bookmark(with: bookmark.id)?.favicon, snapshot)
     }
 
     func testBookmarkRecordsMergeIndependentChanges() {

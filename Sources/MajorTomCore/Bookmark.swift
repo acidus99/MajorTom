@@ -1,16 +1,38 @@
 import Foundation
 
+/// The most recently observed favicon state attached to a synchronized bookmark.
+///
+/// A nil snapshot means unknown. A snapshot whose `emoji` is nil is a deliberate,
+/// synchronized "this capsule has no favicon" value.
+public struct BookmarkFaviconSnapshot: Codable, Equatable, Sendable {
+    public var emoji: String?
+    public var fetchedAt: Date
+
+    public init(emoji: String?, fetchedAt: Date) {
+        self.emoji = emoji
+        self.fetchedAt = fetchedAt
+    }
+}
+
 public struct Bookmark: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     public var title: String
     public var url: URL
     public var addedAt: Date
+    public var favicon: BookmarkFaviconSnapshot?
 
-    public init(id: UUID = UUID(), title: String, url: URL, addedAt: Date = Date()) {
+    public init(
+        id: UUID = UUID(),
+        title: String,
+        url: URL,
+        addedAt: Date = Date(),
+        favicon: BookmarkFaviconSnapshot? = nil
+    ) {
         self.id = id
         self.title = title
         self.url = url
         self.addedAt = addedAt
+        self.favicon = favicon
     }
 }
 
@@ -82,16 +104,23 @@ public struct BookmarkCollection: Codable, Equatable, Sendable {
         title: String,
         url: URL,
         toFolderWith folderID: UUID? = nil,
-        at date: Date = Date()
+        at date: Date = Date(),
+        favicon: BookmarkFaviconSnapshot? = nil
     ) -> Bookmark {
         let destination = folderID ?? favoritesID
         if let existing = allBookmarks.first(where: { $0.url == url }) {
             remove(bookmarkWith: existing.id)
-            let updated = Bookmark(id: existing.id, title: title, url: url, addedAt: existing.addedAt)
+            let updated = Bookmark(
+                id: existing.id,
+                title: title,
+                url: url,
+                addedAt: existing.addedAt,
+                favicon: favicon ?? existing.favicon
+            )
             insert(updated, intoFolderWith: destination)
             return updated
         }
-        let bookmark = Bookmark(title: title, url: url, addedAt: date)
+        let bookmark = Bookmark(title: title, url: url, addedAt: date, favicon: favicon)
         insert(bookmark, intoFolderWith: destination)
         return bookmark
     }
@@ -127,8 +156,31 @@ public struct BookmarkCollection: Codable, Equatable, Sendable {
             for bookmarkIndex in folders[folderIndex].bookmarks.indices
             where folders[folderIndex].bookmarks[bookmarkIndex].id == id {
                 folders[folderIndex].bookmarks[bookmarkIndex].url = url
+                // A favicon describes a capsule endpoint, not an arbitrary edited URL.
+                folders[folderIndex].bookmarks[bookmarkIndex].favicon = nil
             }
         }
+    }
+
+    /// Updates every bookmark for one capsule when a newly fetched value differs.
+    @discardableResult
+    public mutating func updateFavicon(
+        for endpoint: CapsuleEndpoint,
+        to snapshot: BookmarkFaviconSnapshot
+    ) -> Bool {
+        var changed = false
+        for folderIndex in folders.indices {
+            for bookmarkIndex in folders[folderIndex].bookmarks.indices {
+                let bookmark = folders[folderIndex].bookmarks[bookmarkIndex]
+                guard CapsuleEndpoint(url: bookmark.url) == endpoint,
+                      bookmark.favicon == nil || bookmark.favicon?.emoji != snapshot.emoji else {
+                    continue
+                }
+                folders[folderIndex].bookmarks[bookmarkIndex].favicon = snapshot
+                changed = true
+            }
+        }
+        return changed
     }
 
     public mutating func move(bookmarkWith id: UUID, toFolderWith folderID: UUID) {

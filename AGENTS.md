@@ -20,6 +20,12 @@ architectural decision.
 - Always pass `--disable-index-store` when invoking `swift build` or `swift test`
   directly. Without it the build can fail with "failed writing record … File exists"
   whenever an editor's indexer is writing the same store.
+- Before building, check for a network checkout: if `df -P .` shows a `//server/share`
+  device (an SMB mount, typically under `/Volumes/`), never let SwiftPM write `.build`
+  into the share. Pass `--scratch-path "$HOME/Library/Caches/MajorTom/build"` to every
+  `swift build`, `swift test`, and `swift run`. A `.build` written over SMB embeds the
+  mount's absolute paths and corrupts builds for the machine that owns the files; if
+  the share already has a poisoned `.build`, delete it.
 - Live-network transport tests are opt-in:
   `MAJOR_TOM_LIVE_TEST=1 swift test --filter GeminiTransportIntegrationTests`.
 - There is no linter or formatter configuration; match the style of surrounding code.
