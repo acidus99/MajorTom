@@ -36,17 +36,21 @@ Scripts/build-app.sh
 
 For a reusable local development-signing setup, create `private/env/build-local.env` with those same two variables. The `private/env/` directory is ignored by Git; the release setup below shows how to create it from scratch.
 
-The first development use creates Major Tom's private CloudKit zone and record types. In CloudKit Console, add a `QUERYABLE` index for the `recordName` field of every synchronized record type before testing sync:
+The first development use creates Major Tom's private CloudKit zone and record types. Every
+record type has one encrypted `payload` field. `CKSyncEngine` uses durable change tokens and
+record IDs, so no `QUERYABLE` indexes are required. The synchronized record types are:
 
-- `MTPreferences`
 - `MTDeviceTabs`
 - `MTClientCertificateDescriptor`
 - `MTClientCertificateAssociation`
 - `MTBookmarkFolder`
 - `MTBookmark`
-- `MTServerTrust`
+- `MTDataModelManifest`
 
-Major Tom queries these types to retrieve the current contents of its custom zone without replaying the zone's complete change history. Deploy the indexed development schema to production before distributing a production build.
+The development and release provisioning profiles must include CloudKit, remote notifications,
+iCloud Key-Value Store, and iCloud Keychain. The checked-in entitlements use development and
+production APNs environments respectively. Deploy the development CloudKit schema to production
+before distributing a production build.
 
 The live transport test is opt-in:
 
@@ -61,7 +65,7 @@ Distribution happens locally; this repository does not use GitHub Actions. `make
 One-time setup:
 
 1. In CloudKit Console, deploy the `iCloud.dev.gemi.major-tom` development schema to production and enable the container for `dev.gemi.major-tom`.
-2. Create and export a password-protected **Developer ID Application** certificate. Create and download a Developer ID provisioning profile with the iCloud/CloudKit capability.
+2. Create and export a password-protected **Developer ID Application** certificate. Create and download a Developer ID provisioning profile with CloudKit, remote notifications, iCloud Key-Value Store, and iCloud Keychain capabilities.
 3. In App Store Connect, create a notarization API key and securely store its one-time-downloadable `.p8` private key, Key ID, and Issuer ID.
 4. Create the ignored local configuration directory and file. `private/` is ignored by Git, so it is safe for machine-local paths and credentials but must never be committed:
 

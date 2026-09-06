@@ -66,7 +66,7 @@ The tab owns its committed page, pending destination, history position, active r
 
 The trust service computes SHA-256 SPKI fingerprints and resolves first-use, changed-key, and certificate-date decisions before content is accepted. The UI presents a decision; the trust service records it.
 
-Persistent records use domain types, never views, WebKit objects, or network tasks. Local stores are authoritative while offline. CloudKit mirrors selected durable user intent; Keychain holds client identities and their private keys. Cloud synchronization queries the current records in Major Tom's private custom zone; it does not replay the zone's complete change history, while local tombstones continue to prevent deleted intent from being resurrected by another device. Complete and incomplete responses remain distinct throughout persistence and caching.
+Persistent records use domain types, never views, WebKit objects, or network tasks. Local stores are authoritative while offline. CloudKit mirrors selected durable user intent; Keychain holds client identities and their private keys. `CKSyncEngine` incrementally fetches changes from Major Tom's private custom zone and resumes from a durable serialized token. Local edits commit their domain row and a generation-numbered outbox entry in one SQLite transaction. Confirmed server deletion wins over edits, and an in-flight send can acknowledge only the generation it actually sent. Complete and incomplete responses remain distinct throughout persistence and caching.
 
 Major Tom's local persistence is moving behind a GRDB-backed SQLite boundary in staged,
 independently migratable changes. `MajorTomDatabase` owns connection policy, transactions,
@@ -91,47 +91,38 @@ file is imported once with an in-transaction marker and removed only after the i
 can be read. The same optional snapshot travels inside the record-level bookmark CloudKit
 payload; older payloads decode it as unknown.
 
-CloudKit merge metadata and bookmark tombstones are likewise persisted one record per row in
-`bookmark_sync_folders` and `bookmark_sync_bookmarks`. Each row contains one versioned Codable
-payload, never the whole collection. The former `bookmarks-cloud-metadata-v1` UserDefaults blob
-is transactionally imported and then removed, so both ordinary bookmark CRUD and offline sync
-bookkeeping avoid collection-sized writes.
+Cloud sync state lives in `cloud_sync_state`, `cloud_pending_changes`, and
+`cloud_record_state`, keyed by a SHA-256 hash of the iCloud account identity. Record metadata
+includes archived CloudKit system fields and the last server payload, allowing conflict retries
+to retain change tags and fields written by a newer app. Each CloudKit type has exactly one
+encrypted `payload` field containing a schema-tagged JSON envelope. Record names are stable UUIDs.
 
-CloudKit data model v2 lives in the separate `MajorTomUserDataV2` private custom zone. Its
-`MTDataModelManifest` encrypted payload declares the format major plus minimum reader and writer
-majors. The adapter fetches and validates that one record before querying any model payload; an
-incompatible future manifest makes the app stop syncing and report that an upgrade is required,
-rather than decoding or overwriting unknown records. A missing manifest is created only when the
-v2 zone contains no model records, so partially initialized or unidentified data is never guessed.
+Cloud data lives only in the `MajorTomUserDataV2` private custom zone. Its
+`MTDataModelManifest` gates readers and writers before model records are applied. On an account's
+first new-v2 launch, Major Tom reads the original `MajorTomUserData` zone once, imports supported
+v1 bookmarks, preferences, and certificate metadata, resets the disposable experimental v2 zone,
+publishes the new manifest, and permanently marks that account ready. It never reads or writes v1
+again. Account changes select separate local datasets and outboxes; signing out retains the last
+account's local data and offline edits without exposing them to another account.
 
-The original `MajorTomUserData` zone is preserved as a bidirectional compatibility feed. Each v2
-sync merges both zones by payload modification time, writes the resolved per-record state into v2,
-and mirrors supported record shapes back to the original zone. Consequently an older installed
-build continues to receive changes and its own changes flow forward during the compatibility
-window. A future incompatible model gets its own zone and manifest; it may raise the prior
-manifest's minimum reader when that compatibility feed is intentionally retired, causing v2
-clients to stop before pulling unfamiliar data. Neither transition deletes a prior zone.
-
-Trusted capsule identity records now use `trusted_server_identities`, one row per host and port.
+Trusted capsule identity records use `trusted_server_identities`, one row per host and port.
 The row retains the local decision source, fingerprint, certificate observation, first/last seen
-times, and sighting count. Only the user's durable trust decision is projected into CloudKit;
-certificate copies and observation counters remain local. `server_trust_sync` stores one CloudKit
-decision or tombstone per stable trust ID. Client-certificate CloudKit metadata likewise uses one
-row per descriptor and association, with separate per-identity local Keychain synchronization
-flags. The actual private key and certificate identity remain Keychain items. Legacy JSON and
-UserDefaults values are imported once and removed only after their SQLite rows commit.
+times, and sighting count. Server trust is deliberately local-only. Client-certificate CloudKit
+metadata uses one row per descriptor and association, with separate per-identity local Keychain
+synchronization flags. The actual private key and certificate identity remain Keychain items;
+remote metadata deletion never deletes Keychain material.
 
 ### Data ownership and storage map
 
 | Data | Local authority | Cross-Mac behavior |
 | --- | --- | --- |
-| Bookmarks, folders, order, bookmark favicon snapshot | SQLite bookmark rows | CloudKit v2 per record; mirrored to v1 compatibility zone |
-| Homepage, search provider, content theme/width, Gemtext rendering options, image-loading choices, favicon visibility | Small coalesced UserDefaults preference snapshot | CloudKit preferences record |
+| Bookmarks, folders, order, bookmark favicon snapshot | Account-scoped SQLite bookmark rows | One CloudKit record per item through a transactional outbox |
+| Homepage, search provider, content theme/width, Gemtext rendering options, image-loading choices, favicon visibility | Small coalesced UserDefaults preference snapshot | iCloud Key-Value Store |
 | Application appearance, Gemini proxy, Favorites-bar visibility | Same local preference snapshot | Local to one Mac |
 | Client-certificate descriptors and capsule/path associations | SQLite per-record sync metadata | CloudKit records; usable identity material follows only through synchronizable Keychain |
 | Client-certificate private keys and certificate identity | Keychain | iCloud Keychain when the identity is marked synchronizable; never CloudKit |
-| User-approved server trust | SQLite endpoint row plus per-decision tombstone row | Decision/fingerprint only through CloudKit; observations remain local |
-| Open-tab summaries for other Macs | Live window model plus small UserDefaults display cache | One replaceable CloudKit record per device; no Back/Forward state |
+| User-approved server trust | SQLite endpoint row | Local only |
+| Open-tab summaries for other Macs | Live window model plus small UserDefaults display cache | One replaceable CloudKit record per device; URL, title, and favicon only |
 | Global browsing history | SQLite URL row | Local only, one-year retention |
 | Window/tab session, Back/Forward list, cursor, zoom, scroll | Normalized SQLite session rows | Local only |
 | Cancelled Gemini input draft | SQLite prompt-URL row | Local only, fourteen-day expiry |
@@ -145,12 +136,10 @@ last-fetched remote-tabs display cache. Nothing enters CloudKit merely because i
 UserDefaults; the CloudKit adapter explicitly constructs the synchronized projections listed
 above. Large collections, cache bodies, security records, and tombstone sets do not use it.
 
-Deletion of synchronized intent creates a dated tombstone rather than immediately deleting the
-CloudKit record. That prevents a Mac which was offline during deletion from resurrecting a
-bookmark, certificate approval, or trust decision. Local cache/history/session clearing performs
-physical local row deletion because those data never merge with another device. Compatibility
-zones and tombstones are retained until a separately versioned retirement policy is shipped and
-all supported readers can prove they no longer need them.
+Deletion of synchronized intent creates a durable delete operation in the same transaction as
+the local row deletion. CloudKit records are physically deleted. Delete wins over a concurrent
+edit, and a stale send completion cannot remove a newer outbox generation. Local
+cache/history/session clearing remains physical local deletion because those data never sync.
 
 Session restoration uses normalized `browser_windows`, `browser_tabs`, and
 `browser_tab_history` rows. The Back/Forward rows are deliberately distinct from global

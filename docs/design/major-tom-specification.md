@@ -82,16 +82,21 @@ Client certificates are offered only after a user has explicitly approved a matc
 
 Major Tom works offline. Local state is immediately authoritative. When iCloud synchronization is enabled, it syncs only the user choices that should follow them between Macs; it never makes CloudKit a launch dependency or transfers cached page bodies, browsing history, network configuration, or private keys.
 
-Cloud data is explicitly versioned. Major Tom validates a data-model manifest before reading
-the versioned records and stops with an upgrade message if that model requires a newer app.
-During the v2 compatibility period, it also maintains the original private-zone records so an
-older installed Major Tom can continue receiving and contributing supported synchronized data.
+Cloud data is explicitly versioned. Major Tom validates a data-model manifest before applying
+versioned records and stops with an upgrade message if that model requires a newer app. A v1
+account is imported once; current experimental v2 data is disposable, and no new build writes
+the original zone. iCloud accounts have separate local datasets. Signing out keeps local data;
+switching accounts never uploads one account's rows to another.
 
-Deleting synchronized user intent propagates as a tombstone so an offline Mac cannot restore it
-later. Clearing local browsing data removes history, session restoration, and cached pages only
-from this Mac. Removing a client identity deletes its Keychain material on this Mac and publishes
-descriptor and association tombstones; private key bytes are never copied into the app database
-or CloudKit.
+Deleting synchronized user intent physically deletes its CloudKit record and wins over a
+concurrent edit. Clearing local browsing data removes history, session restoration, and cached
+pages only from this Mac. Removing a client identity locally deletes its Keychain material and
+publishes descriptor and association deletions. A remote metadata deletion does not erase
+Keychain material; private key bytes are never copied into the app database or CloudKit.
+
+Cloud Tabs are an unordered, deduplicated set of URL, title, and optional favicon values per Mac.
+All committed URL schemes are eligible except `about:` and `data:`. Cloud Tabs never include
+Back/Forward state or browsing history.
 
 ## Native quality and accessibility
 
