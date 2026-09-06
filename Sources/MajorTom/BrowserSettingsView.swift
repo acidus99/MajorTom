@@ -54,7 +54,15 @@ struct BrowserSettingsView: View {
                     Label(cloud.status.label, systemImage: "icloud")
                         .foregroundStyle(.secondary)
                 }
-                Text("Bookmarks, reading preferences, certificate approvals, trusted capsule keys, and open-tab titles and URLs sync privately through iCloud. Proxy settings, appearance, window layout, history, and restored sessions stay on this Mac. Private keys use iCloud Keychain, not CloudKit.")
+                HStack {
+                    Button("Sync Now") { cloud.refresh() }
+                    if cloud.status == .removed {
+                        Button("Re-upload This Mac’s Data…") {
+                            cloud.reuploadAfterCloudDataRemoval()
+                        }
+                    }
+                }
+                Text("Bookmarks, reading preferences, certificate approvals, and open-tab titles, URLs, and favicons sync privately through iCloud. Trusted capsule keys, proxy settings, appearance, window layout, history, and restored sessions stay on this Mac. Private keys use iCloud Keychain, not CloudKit.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -291,18 +299,10 @@ struct BrowserSettingsView: View {
 private struct TrustedIdentitiesSettingsView: View {
     @State private var identities: [TrustedServerIdentity] = []
     @State private var showsClearConfirmation = false
-    @ObservedObject private var cloudTrust = TrustedIdentityCloudCoordinator.shared
     private let store = SharedTrustedIdentityStore.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            if !cloudTrust.conflictingEndpoints.isEmpty {
-                Label(
-                    "iCloud has conflicting trusted keys for \(cloudTrust.conflictingEndpoints.count) capsule\(cloudTrust.conflictingEndpoints.count == 1 ? "" : "s"). Major Tom will keep this Mac’s existing decision and will not import a different key unless you approve it.",
-                    systemImage: "exclamationmark.shield"
-                )
-                .foregroundStyle(.orange)
-            }
             if identities.isEmpty {
                 ContentUnavailableView(
                     "No Trusted Capsules",

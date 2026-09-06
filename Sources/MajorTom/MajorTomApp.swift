@@ -23,12 +23,6 @@ struct MajorTomApp: App {
     @ObservedObject private var bookmarks = BookmarksModel.shared
     @ObservedObject private var settings = BrowserSettingsStore.shared
 
-    init() {
-        // Starts conflict-safe synchronization of user-established TOFU pins. The actor
-        // holding the local trust database remains the transport's immediate authority.
-        _ = TrustedIdentityCloudCoordinator.shared
-    }
-
     var body: some Scene {
         WindowGroup(for: BrowserWindowDestination.self) { destination in
             NativeFoundationView(
@@ -242,6 +236,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
+        NSApplication.shared.registerForRemoteNotifications()
         installCommandKeyMonitor()
         // Observed here rather than in a window's view so About is handled consistently
         // while the application is running.
@@ -449,7 +444,6 @@ private final class NativeTabCoordinator {
     private var tabDragTrackingTimer: Timer?
     private var temporarilyShownTabBars: [NSWindow] = []
     private var tabDragCleanupTask: Task<Void, Never>?
-    private var cloudPublishTask: Task<Void, Never>?
     private var cloudHeartbeat: Timer?
 
     private init() {
@@ -541,7 +535,7 @@ private final class NativeTabCoordinator {
             cloudID: registeredTabs[identifier]?.cloudID ?? UUID()
         )
         installCloseObserver(for: window)
-        scheduleCloudTabPublish()
+        publishCloudTabsIfNeeded()
 
         guard !hasAttemptedSessionRestore else { return }
         hasAttemptedSessionRestore = true
@@ -844,7 +838,7 @@ private final class NativeTabCoordinator {
                     }
                     self.persistSession()
                 }
-                self.scheduleCloudTabPublish()
+                self.publishCloudTabsIfNeeded()
             }
         }
     }
@@ -952,25 +946,20 @@ private final class NativeTabCoordinator {
         }
     }
 
-    func scheduleCloudTabPublish() {
-        cloudPublishTask?.cancel()
-        cloudPublishTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(750))
-            guard !Task.isCancelled else { return }
-            self?.publishCloudTabs()
-        }
+    func publishCloudTabsIfNeeded() {
+        publishCloudTabs()
     }
 
     private func publishCloudTabs() {
         let tabs = registeredTabs.values.compactMap { registration -> CloudTabSnapshot? in
             guard let browser = registration.browser,
-                  let url = browser.committedURL,
-                  ["gemini", "http", "https"].contains(url.scheme?.lowercased() ?? "")
+                  let committedURL = browser.committedURL,
+                  let url = CloudTabURL.normalized(committedURL)
             else { return nil }
             return CloudTabSnapshot(
-                id: registration.cloudID,
                 title: browser.title,
-                url: url
+                url: url,
+                favicon: browser.favicon
             )
         }
         ICloudSyncStore.shared.updateTabs(tabs)
@@ -1443,7 +1432,7 @@ private struct BrowserWindowView: View {
             hostWindow.tab.title = browser.title
         }
         hostWindow.tab.toolTip = browser.committedURL?.absoluteString ?? browser.title
-        NativeTabCoordinator.shared.scheduleCloudTabPublish()
+        NativeTabCoordinator.shared.publishCloudTabsIfNeeded()
     }
 
     private func openNativeTab(url: URL?, inBackground: Bool, atEnd: Bool = false) {

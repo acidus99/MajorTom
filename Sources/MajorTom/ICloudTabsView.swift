@@ -70,7 +70,7 @@ struct ICloudTabsView: View {
 
     private var emptyDescription: String {
         switch cloud.status {
-        case .unavailable, .failed:
+        case .unavailable, .removed, .requiresNewerApp, .failed:
             cloud.status.label
         default:
             "Open tabs on another Mac signed in to the same iCloud account will appear here."
@@ -81,7 +81,7 @@ struct ICloudTabsView: View {
         switch cloud.status {
         case .preparing, .syncing: "arrow.trianglehead.2.clockwise.rotate.90.icloud"
         case .upToDate: "checkmark.icloud"
-        case .unavailable, .failed: "exclamationmark.icloud"
+        case .unavailable, .removed, .requiresNewerApp, .failed: "exclamationmark.icloud"
         }
     }
 }

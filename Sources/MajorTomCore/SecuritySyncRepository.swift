@@ -1,6 +1,53 @@
 import Foundation
 import GRDB
 
+public struct CloudClientCertificateDescriptorPayload: CloudSyncPayload, Equatable, Sendable {
+    public static let payloadSchemaVersion = 1
+    public static let knownPayloadKeys: Set<String> = [
+        "id", "commonName", "emailAddress", "userID", "domain", "organization", "country",
+        "notBefore", "notAfter", "certificateSHA256", "publicKeySHA256"
+    ]
+    public var id: UUID
+    public var commonName: String
+    public var emailAddress: String
+    public var userID: String
+    public var domain: String
+    public var organization: String
+    public var country: String
+    public var notBefore: Date
+    public var notAfter: Date
+    public var certificateSHA256: String
+    public var publicKeySHA256: String
+
+    public init(_ descriptor: ClientCertificateDescriptor) {
+        id = descriptor.id
+        commonName = descriptor.commonName
+        emailAddress = descriptor.emailAddress
+        userID = descriptor.userID
+        domain = descriptor.domain
+        organization = descriptor.organization
+        country = descriptor.country
+        notBefore = descriptor.notBefore
+        notAfter = descriptor.notAfter
+        certificateSHA256 = descriptor.certificateSHA256
+        publicKeySHA256 = descriptor.publicKeySHA256
+    }
+
+    public var descriptor: ClientCertificateDescriptor {
+        ClientCertificateDescriptor(id: id, commonName: commonName, emailAddress: emailAddress,
+            userID: userID, domain: domain, organization: organization, country: country,
+            notBefore: notBefore, notAfter: notAfter, certificateSHA256: certificateSHA256,
+            publicKeySHA256: publicKeySHA256)
+    }
+}
+
+public struct CloudClientCertificateAssociationPayload: CloudSyncPayload, Equatable, Sendable {
+    public static let payloadSchemaVersion = 1
+    public static let knownPayloadKeys: Set<String> = ["association"]
+    public var association: ClientCertificateAssociation
+    public init(_ association: ClientCertificateAssociation) { self.association = association }
+}
+
 public struct ServerTrustSyncRepository: Sendable {
     private let database: MajorTomDatabase
 
@@ -135,6 +182,16 @@ public struct ClientCertificateSyncRepository: Sendable {
                 )
             }
         }
+    }
+
+    public func certificatePayload(id: UUID) throws -> CloudClientCertificateDescriptorPayload? {
+        let loaded = try load().state.certificates.first { $0.id == id && $0.deletedAt == nil }
+        return loaded.map { CloudClientCertificateDescriptorPayload($0.descriptor) }
+    }
+
+    public func associationPayload(id: UUID) throws -> CloudClientCertificateAssociationPayload? {
+        let loaded = try load().state.associations.first { $0.id == id && $0.deletedAt == nil }
+        return loaded.map { CloudClientCertificateAssociationPayload($0.association) }
     }
 
     public func importLegacy(

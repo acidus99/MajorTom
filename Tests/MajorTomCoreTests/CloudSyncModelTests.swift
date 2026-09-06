@@ -89,7 +89,6 @@ final class CloudSyncModelTests: XCTestCase {
         let localID = UUID()
         let recentID = UUID()
         let page = CloudTabSnapshot(
-            id: UUID(),
             title: "Capsule",
             url: URL(string: "gemini://example.com/")!
         )
@@ -135,7 +134,6 @@ final class CloudSyncModelTests: XCTestCase {
             deviceName: "Studio",
             updatedAt: Date(timeIntervalSince1970: 42),
             tabs: [CloudTabSnapshot(
-                id: UUID(),
                 title: "Gemini",
                 url: URL(string: "gemini://geminiprotocol.net/")!
             )]
@@ -143,6 +141,40 @@ final class CloudSyncModelTests: XCTestCase {
 
         let data = try JSONEncoder().encode(original)
         XCTAssertEqual(try JSONDecoder().decode(CloudTabDeviceSnapshot.self, from: data), original)
+    }
+
+    func testCloudTabsAcceptEverySchemeExceptAboutAndData() {
+        XCTAssertNotNil(CloudTabURL.normalized(URL(string: "spartan://EXAMPLE.com/path?q=1")!))
+        XCTAssertNotNil(CloudTabURL.normalized(URL(string: "mailto:reader@example.com")!))
+        XCTAssertNil(CloudTabURL.normalized(URL(string: "about:blank")!))
+        XCTAssertNil(CloudTabURL.normalized(URL(string: "DATA:text/plain,hello")!))
+    }
+
+    func testCloudTabsDeduplicateNormalizedURLsAndKeepFirstMetadata() {
+        let tabs = CloudTabURL.deduplicated([
+            CloudTabSnapshot(
+                title: "First",
+                url: URL(string: "GEMINI://EXAMPLE.COM:1965/path?q=1")!,
+                favicon: "🚀"
+            ),
+            CloudTabSnapshot(
+                title: "Second",
+                url: URL(string: "gemini://example.com/path?q=1")!,
+                favicon: nil
+            )
+        ])
+
+        XCTAssertEqual(tabs.count, 1)
+        XCTAssertEqual(tabs[0].title, "First")
+        XCTAssertEqual(tabs[0].favicon, "🚀")
+        XCTAssertEqual(tabs[0].url.absoluteString, "gemini://example.com/path?q=1")
+    }
+
+    func testCloudTabsAreCappedAtTwoHundred() {
+        let values = (0..<250).map {
+            CloudTabSnapshot(title: "\($0)", url: URL(string: "custom:item-\($0)")!)
+        }
+        XCTAssertEqual(CloudTabURL.deduplicated(values).count, 200)
     }
 
     func testNewerClientCertificateMetadataReplacesOlderMetadata() {

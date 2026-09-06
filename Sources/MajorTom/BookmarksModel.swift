@@ -277,8 +277,10 @@ final class BookmarksModel: ObservableObject {
     }
 
     private func applyCloudState(_ incoming: SyncedBookmarks) async {
-        let merged = syncState.map { $0.merging(incoming) } ?? incoming
-        let mergedCollection = merged.collection
+        // The incremental transport publishes the complete active account dataset after
+        // applying each batch, so absence is an authoritative server deletion.
+        let merged = incoming
+        let mergedCollection = incoming.collection
         if let store {
             _ = try? await store.replace(with: mergedCollection)
         }

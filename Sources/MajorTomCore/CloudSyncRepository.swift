@@ -15,7 +15,7 @@ public enum CloudZoneState: String, Codable, Sendable {
 }
 
 public struct CloudSyncState: Equatable, Sendable {
-    public static let currentModelMajor = 2
+    public static let currentModelMajor = 3
 
     public var accountIdentityHash: String
     public var engineState: Data?
@@ -95,6 +95,26 @@ public struct CloudRecordState: Equatable, Sendable {
     public var payloadDigest: String?
     public var lastSeenEpoch: Int64?
     public var updatedAt: Date
+
+    public init(
+        accountIdentityHash: String,
+        recordType: String,
+        recordName: String,
+        systemFields: Data? = nil,
+        serverPayload: Data? = nil,
+        payloadDigest: String? = nil,
+        lastSeenEpoch: Int64? = nil,
+        updatedAt: Date = Date()
+    ) {
+        self.accountIdentityHash = accountIdentityHash
+        self.recordType = recordType
+        self.recordName = recordName
+        self.systemFields = systemFields
+        self.serverPayload = serverPayload
+        self.payloadDigest = payloadDigest
+        self.lastSeenEpoch = lastSeenEpoch
+        self.updatedAt = updatedAt
+    }
 }
 
 /// Durable account state, record metadata, and transactional sync outbox.

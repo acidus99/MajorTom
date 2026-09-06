@@ -384,20 +384,18 @@ final class ClientCertificateStore: ObservableObject {
     }
 
     private func apply(_ incoming: ClientCertificateSyncState) {
-        let merged = syncState.merging(incoming)
-        guard merged != syncState else { return }
+        guard incoming != syncState else { return }
         uploadTask?.cancel()
         isApplyingRemote = true
-        let activeIDs = Set(merged.certificates.filter { $0.deletedAt == nil }.map(\.id))
+        let activeIDs = Set(incoming.certificates.filter { $0.deletedAt == nil }.map(\.id))
         let removedIDs = Set(certificates.map(\.id)).subtracting(activeIDs)
         for id in removedIDs {
-            // A descriptor tombstone represents deletion of the identity, not merely
-            // hiding it from this catalogue. Remove any local/synchronizable Keychain
-            // material too; a missing item is harmless and needs no user-facing error.
-            try? keychain.delete(id: id)
-            localSynchronizationFlags.removeValue(forKey: id)
+            // A remote metadata deletion must not erase private key material. Keychain
+            // has its own account and delivery lifecycle; only an explicit local delete
+            // is authoritative for destructive cleanup.
+            identityCache[id] = nil
         }
-        certificates = merged.activeCertificates(preservingLocalStorageFrom: certificates)
+        certificates = incoming.activeCertificates(preservingLocalStorageFrom: certificates)
         applyLocalStorageFlags()
         identityCache = identityCache.filter { id, _ in
             certificates.contains { $0.id == id }
@@ -405,8 +403,8 @@ final class ClientCertificateStore: ObservableObject {
         signingValidated = signingValidated.filter { id in
             certificates.contains { $0.id == id }
         }
-        associations = merged.activeAssociations
-        syncState = merged
+        associations = incoming.activeAssociations
+        syncState = incoming
         isApplyingRemote = false
         persist(syncState)
         refreshAvailability()

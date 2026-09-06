@@ -159,6 +159,42 @@ public struct BookmarkRepository: Sendable {
         }
     }
 
+    public func pendingFolderIDs() throws -> [UUID: UUID] {
+        try database.read { db in
+            try Row.fetchAll(
+                db,
+                sql: """
+                    SELECT id, pending_folder_id FROM bookmarks
+                    WHERE account_identity_hash IS ? AND pending_folder_id IS NOT NULL
+                    """,
+                arguments: [accountIdentityHash]
+            ).reduce(into: [UUID: UUID]()) { result, row in
+                if let id = UUID(uuidString: row["id"]),
+                   let folderID = UUID(uuidString: row["pending_folder_id"]) {
+                    result[id] = folderID
+                }
+            }
+        }
+    }
+
+    public func savePendingFolderIDs(_ values: [UUID: UUID]) throws {
+        try database.write { db in
+            try db.execute(
+                sql: "UPDATE bookmarks SET pending_folder_id = NULL WHERE account_identity_hash IS ?",
+                arguments: [accountIdentityHash]
+            )
+            for (bookmarkID, folderID) in values {
+                try db.execute(
+                    sql: """
+                        UPDATE bookmarks SET pending_folder_id = ?
+                        WHERE id = ? AND account_identity_hash IS ?
+                        """,
+                    arguments: [folderID.uuidString, bookmarkID.uuidString, accountIdentityHash]
+                )
+            }
+        }
+    }
+
     private static func fetchCollection(_ db: Database, account: String?) throws -> BookmarkCollection {
         let folders = try folderRows(in: db, account: account).sorted { $0.orderKey < $1.orderKey }
         let bookmarks = try bookmarkRows(in: db, account: account)

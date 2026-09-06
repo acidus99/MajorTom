@@ -10,6 +10,8 @@ enum ICloudSyncStatus: Equatable {
     case syncing
     case upToDate(Date)
     case unavailable(String)
+    case removed
+    case requiresNewerApp
     case failed(String)
 
     var label: String {
@@ -18,16 +20,16 @@ enum ICloudSyncStatus: Equatable {
         case .syncing: "Syncing with iCloud…"
         case .upToDate: "Up to date"
         case .unavailable(let reason): reason
+        case .removed: "iCloud data for Major Tom was removed"
+        case .requiresNewerApp: "A newer version of Major Tom is required to sync"
         case .failed(let reason): "iCloud sync error: \(reason)"
         }
     }
 }
 
-/// The app's private CloudKit adapter. Local repositories remain the immediate source of
-/// truth so a signed-out or offline Mac behaves exactly like a non-iCloud build.
-/// CloudKit records contain encrypted JSON payloads and no searchable browsing data.
+/// Incremental, outbox-backed private CloudKit synchronization.
 @MainActor
-final class ICloudSyncStore: ObservableObject {
+final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncEngineDelegate {
     static let shared = ICloudSyncStore()
 
     @Published private(set) var status: ICloudSyncStatus = .preparing
@@ -36,55 +38,37 @@ final class ICloudSyncStore: ObservableObject {
     let receivedPreferences = PassthroughSubject<SyncedBrowserPreferences, Never>()
     let receivedClientCertificates = PassthroughSubject<ClientCertificateSyncState, Never>()
     let receivedBookmarks = PassthroughSubject<SyncedBookmarks, Never>()
-    let receivedServerTrust = PassthroughSubject<SyncedServerTrust, Never>()
 
     let localDeviceID: UUID
     let localDeviceName: String
 
-    private let container: CKContainer?
-    private let database: CKDatabase?
-    private let defaults: UserDefaults
-    /// Kept indefinitely as the compatibility feed for pre-v2 clients.
-    private let legacyZoneID = CKRecordZone.ID(zoneName: "MajorTomUserData")
-    /// New clients isolate their records so a future data model never changes the
-    /// meaning of records an older app already understands.
+    private static let cloudModelMajor = 3
+    private static let deviceIDKey = "icloud-device-id-v1"
+    private static let cachedTabsKey = "icloud-tabs-cache-v2"
+    private static let manifestRecordName = "data-model-manifest"
     private let zoneID = CKRecordZone.ID(zoneName: "MajorTomUserDataV2")
-    private static let dataModelMajor = 2
-    private let synchronizedRecordTypes: [CKRecord.RecordType] = [
-        "MTPreferences",
-        "MTDeviceTabs",
-        "MTClientCertificateDescriptor",
-        "MTClientCertificateAssociation",
-        "MTBookmarkFolder",
-        "MTBookmark",
-        "MTServerTrust",
-    ]
-    private let preferencesRecordID: CKRecord.ID
-    private let tabsRecordID: CKRecord.ID
-    private let manifestRecordID: CKRecord.ID
+    private let legacyZoneID = CKRecordZone.ID(zoneName: "MajorTomUserData")
+    private let defaults: UserDefaults
+    private let localDatabase: MajorTomDatabase?
+    private let repository: CloudSyncRepository?
+    private let container: CKContainer?
+    private let cloudDatabase: CKDatabase?
+    private var engine: CKSyncEngine?
+    private var activeAccount: String?
+    private var attemptedGenerations: [String: Int64] = [:]
+    private var writesBlocked = false
+    private var localPreferences: SyncedBrowserPreferences?
+    private var localClientCertificates: ClientCertificateSyncState?
+    private var localBookmarks: SyncedBookmarks?
+    private var localTabs: CloudTabDeviceSnapshot?
+    private var migrationTask: Task<Void, Never>?
+    private var keyValueObserver: AnyCancellable?
     private let encoder: JSONEncoder = {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return encoder
     }()
     private let decoder = JSONDecoder()
-    private var localPreferences: SyncedBrowserPreferences?
-    private var localClientCertificates: ClientCertificateSyncState?
-    private var localBookmarks: SyncedBookmarks?
-    private var localServerTrust: SyncedServerTrust?
-    private var localTabs: CloudTabDeviceSnapshot?
-    private var syncTask: Task<Void, Never>?
-    private var pendingSync = false
-    /// Set by any local mutation, cleared by a sync that completes successfully.
-    private var hasLocalChangesSinceSync = true
-    private var lastSuccessfulSync: Date?
-    /// How long a refresh with nothing local to push will trust the last result.
-    private static let refreshCoalescingInterval: TimeInterval = 5 * 60
-    /// CloudKit rejects a CKModifyRecordsOperation containing more than 400 items.
-    private static let maximumRecordsPerModify = 400
-
-    private static let deviceIDKey = "icloud-device-id-v1"
-    private static let cachedTabsKey = "icloud-tabs-cache-v1"
 
     private init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
@@ -96,624 +80,805 @@ final class ICloudSyncStore: ObservableObject {
             defaults.set(id.uuidString, forKey: Self.deviceIDKey)
         }
         localDeviceName = Host.current().localizedName ?? "Mac"
+        localDatabase = SharedMajorTomDatabase.shared
+        repository = localDatabase.map(CloudSyncRepository.init(database:))
         if Self.hasCloudKitEntitlement {
-            let container = CKContainer(identifier: "iCloud.dev.gemi.major-tom")
-            self.container = container
-            database = container.privateCloudDatabase
+            let value = CKContainer(identifier: "iCloud.dev.gemi.major-tom")
+            container = value
+            cloudDatabase = value.privateCloudDatabase
         } else {
             container = nil
-            database = nil
-            status = .unavailable("This build is not provisioned for Major Tom iCloud sync")
+            cloudDatabase = nil
+            status = .unavailable(Self.unsavedWarning(
+                "This build is not provisioned for Major Tom iCloud sync"
+            ))
         }
-        preferencesRecordID = CKRecord.ID(recordName: "preferences", zoneID: zoneID)
-        tabsRecordID = CKRecord.ID(
-            recordName: "tabs-\(localDeviceID.uuidString.lowercased())",
-            zoneID: zoneID
-        )
-        manifestRecordID = CKRecord.ID(recordName: "data-model-manifest", zoneID: zoneID)
+        super.init()
 
         if let data = defaults.data(forKey: Self.cachedTabsKey),
            let cached = try? decoder.decode([CloudTabDeviceSnapshot].self, from: data) {
             remoteTabDevices = cached.visibleCloudTabDevices(excluding: localDeviceID)
         }
+        if container != nil, localDatabase != nil {
+            migrationTask = Task { [weak self] in await self?.bootstrap() }
+        }
+        NSUbiquitousKeyValueStore.default.synchronize()
+        keyValueObserver = NotificationCenter.default.publisher(
+            for: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
+            object: NSUbiquitousKeyValueStore.default
+        ).sink { [weak self] _ in
+            Task { @MainActor in self?.applyUbiquitousPreferences() }
+        }
+        applyUbiquitousPreferences()
     }
 
     func configure(preferences: SyncedBrowserPreferences?) {
         localPreferences = preferences
-        markLocalChange()
     }
 
     func updatePreferences(_ snapshot: SyncedBrowserPreferences) {
         localPreferences = snapshot
-        markLocalChange()
+        if let data = try? encoder.encode(snapshot) {
+            NSUbiquitousKeyValueStore.default.set(data, forKey: "browser-preferences-v2")
+        }
+        NSUbiquitousKeyValueStore.default.synchronize()
     }
 
     func configure(clientCertificates: ClientCertificateSyncState?) {
         localClientCertificates = clientCertificates
-        markLocalChange()
+        persistCertificatesIfReady()
     }
 
     func updateClientCertificates(_ snapshot: ClientCertificateSyncState) {
         localClientCertificates = snapshot
-        markLocalChange()
+        persistCertificatesIfReady()
     }
 
     func configure(bookmarks: SyncedBookmarks?) {
         localBookmarks = bookmarks
-        markLocalChange()
+        persistBookmarksIfReady()
     }
 
     func updateBookmarks(_ snapshot: SyncedBookmarks) {
         localBookmarks = snapshot
-        markLocalChange()
-    }
-
-    func configure(serverTrust: SyncedServerTrust?) {
-        localServerTrust = serverTrust
-        markLocalChange()
-    }
-
-    func updateServerTrust(_ snapshot: SyncedServerTrust) {
-        localServerTrust = snapshot
-        markLocalChange()
+        persistBookmarksIfReady()
     }
 
     func updateTabs(_ tabs: [CloudTabSnapshot]) {
-        // Compare the tabs themselves, not the snapshot: it carries a fresh updatedAt
-        // every time, so an unchanged set still looked like a change. The hourly
-        // heartbeat calls straight through to here, and every title change during a page
-        // load reaches it too, so this is the difference between a sync an hour and a
-        // sync whenever a heading streams in.
-        guard localTabs?.tabs != tabs else { return }
+        let normalized = CloudTabURL.deduplicated(tabs)
+        guard localTabs?.tabs != normalized else { return }
         localTabs = CloudTabDeviceSnapshot(
             deviceID: localDeviceID,
             deviceName: localDeviceName,
             updatedAt: Date(),
-            tabs: tabs
+            tabs: normalized
         )
-        markLocalChange()
+        guard let account = activeAccount, let repository else { return }
+        try? repository.enqueue(CloudPendingChange(
+            accountIdentityHash: account,
+            recordType: "MTDeviceTabs",
+            recordName: localDeviceID.uuidString.lowercased(),
+            operation: .save
+        ))
+        requestSend()
     }
 
-    /// Pulls anything new from CloudKit. Called on activation and on demand, so it may
-    /// arrive many times in a row with nothing to contribute.
     func refresh() {
-        if !hasLocalChangesSinceSync,
-           let lastSuccessfulSync,
-           Date().timeIntervalSince(lastSuccessfulSync) < Self.refreshCoalescingInterval {
-            return
-        }
-        requestSync()
-    }
-
-    private func markLocalChange() {
-        hasLocalChangesSinceSync = true
-        requestSync()
-    }
-
-    private func requestSync() {
-        guard syncTask == nil else {
-            pendingSync = true
-            return
-        }
-        syncTask = Task { [weak self] in
-            guard let self else { return }
-            await self.performSync()
-            self.syncTask = nil
-            if self.pendingSync {
-                self.pendingSync = false
-                self.requestSync()
+        guard let engine, !writesBlocked else { return }
+        status = .syncing
+        Task { [weak self] in
+            do {
+                try await engine.fetchChanges()
+                try await engine.sendChanges()
+            } catch {
+                await MainActor.run { self?.status = .failed(Self.description(for: error)) }
             }
         }
     }
 
-    private func performSync() async {
-        guard let container, let database else {
-            status = .unavailable("This build is not provisioned for Major Tom iCloud sync")
-            return
-        }
-        // Several stores configure themselves independently during launch, which can
-        // queue a handful of very short follow-up syncs. Once CloudKit is up to date,
-        // keep that stable status visible while those routine background passes run
-        // instead of flashing "Syncing" between each one. Initial and recovery syncs
-        // still advertise that work, and failures replace the status immediately.
-        if case .upToDate = status {
-            // Preserve the last successful status during a background refresh.
-        } else {
-            status = .syncing
-        }
+    func reuploadAfterCloudDataRemoval() {
+        guard status == .removed, let account = activeAccount else { return }
+        writesBlocked = false
         do {
-            let accountStatus = try await container.accountStatus()
-            guard accountStatus == .available else {
-                status = .unavailable(Self.accountStatusDescription(accountStatus))
-                return
-            }
-
-            _ = try await database.save(CKRecordZone(zoneID: legacyZoneID))
-            _ = try await database.save(CKRecordZone(zoneID: zoneID))
-
-            let manifestRecord = try await fetchManifest(from: database)
-            let v2Records: [CKRecord]
-            if let manifestRecord {
-                guard let data = manifestRecord.encryptedValues["payload"] as? Data,
-                      let manifest = try? decoder.decode(CloudDataModelManifest.self, from: data)
-                else {
-                    status = .failed("The iCloud data-model manifest is unreadable")
-                    return
-                }
-                switch manifest.compatibility(
-                    readerMajor: Self.dataModelMajor,
-                    writerMajor: Self.dataModelMajor
-                ) {
-                case .compatible:
-                    break
-                case .requiresNewerApp:
-                    status = .unavailable("iCloud data requires a newer version of Major Tom")
-                    return
-                case .unexpectedOlderFormat:
-                    status = .failed("The iCloud v2 zone has an unexpected data-model version")
-                    return
-                }
-                // No model payload is queried until the manifest says this client can
-                // interpret it.
-                v2Records = try await fetchAllRecords(from: database, zoneID: zoneID)
-            } else {
-                // An empty v2 zone is safe to claim. Records without a manifest are not:
-                // their encoding cannot be identified without guessing.
-                v2Records = try await fetchAllRecords(from: database, zoneID: zoneID)
-                guard v2Records.isEmpty else {
-                    status = .failed("The iCloud v2 zone has data but no version manifest")
-                    return
-                }
-                let manifest = CloudDataModelManifest(
-                    formatMajor: Self.dataModelMajor,
-                    minimumReaderMajor: Self.dataModelMajor,
-                    minimumWriterMajor: Self.dataModelMajor,
-                    createdAt: Date()
-                )
-                _ = try await database.save(try makeRecord(
-                    type: "MTDataModelManifest",
-                    id: manifestRecordID,
-                    value: manifest
-                ))
-            }
-
-            let legacyRecords = try await fetchAllRecords(
-                from: database,
-                zoneID: legacyZoneID
-            )
-            // Read both feeds during the compatibility window. That keeps changes made
-            // by an older app bidirectional instead of letting the v2 mirror overwrite
-            // them on its next pass.
-            let fetchedRemote = v2Records + legacyRecords
-            // A zone can change while CloudKit is paging through its change history,
-            // so the same record ID may legitimately appear in more than one batch.
-            // Dictionary(uniqueKeysWithValues:) traps on that input. Collapse repeats
-            // first and retain the newest server version for decoding and conflict
-            // handling below.
-            let remoteRecordsByID = newestValuesByID(
-                fetchedRemote,
-                id: \.recordID,
-                modifiedAt: \.modificationDate
-            )
-            let remote = Array(remoteRecordsByID.values)
-            var remotePreferences: SyncedBrowserPreferences?
-            var legacyClientCertificates: SyncedClientCertificates?
-            var remoteCertificateRecords: [SyncedClientCertificateDescriptor] = []
-            var remoteAssociationRecords: [SyncedClientCertificateAssociation] = []
-            var remoteBookmarkFolders: [SyncedBookmarkFolder] = []
-            var remoteBookmarks: [SyncedBookmark] = []
-            var remoteTrustDecisions: [SyncedServerTrustDecision] = []
-            var devices: [CloudTabDeviceSnapshot] = []
-
-            for record in remote {
-                guard let data = record.encryptedValues["payload"] as? Data else { continue }
-                switch record.recordType {
-                case "MTPreferences":
-                    if let value = try? decoder.decode(SyncedBrowserPreferences.self, from: data),
-                       value.shouldReplace(remotePreferences) {
-                        remotePreferences = value
-                    }
-                case "MTDeviceTabs":
-                    if let device = try? decoder.decode(CloudTabDeviceSnapshot.self, from: data) {
-                        devices.append(device)
-                    }
-                case "MTClientCertificates":
-                    legacyClientCertificates = try? decoder.decode(
-                        SyncedClientCertificates.self,
-                        from: data
-                    )
-                case "MTClientCertificateDescriptor":
-                    if let value = try? decoder.decode(
-                        SyncedClientCertificateDescriptor.self,
-                        from: data
-                    ) { remoteCertificateRecords.append(value) }
-                case "MTClientCertificateAssociation":
-                    if let value = try? decoder.decode(
-                        SyncedClientCertificateAssociation.self,
-                        from: data
-                    ) { remoteAssociationRecords.append(value) }
-                case "MTBookmarkFolder":
-                    if let value = try? decoder.decode(SyncedBookmarkFolder.self, from: data) {
-                        remoteBookmarkFolders.append(value)
-                    }
-                case "MTBookmark":
-                    if let value = try? decoder.decode(SyncedBookmark.self, from: data) {
-                        remoteBookmarks.append(value)
-                    }
-                case "MTServerTrust":
-                    if let value = try? decoder.decode(SyncedServerTrustDecision.self, from: data) {
-                        remoteTrustDecisions.append(value)
-                    }
-                default:
-                    break
-                }
-            }
-
-            devices = Array(newestValuesByID(
-                devices,
-                id: \.deviceID,
-                modifiedAt: { $0.updatedAt }
-            ).values)
-
-            if let remotePreferences, remotePreferences.shouldReplace(localPreferences) {
-                localPreferences = remotePreferences
-                receivedPreferences.send(remotePreferences)
-            }
-            var remoteClientCertificates = ClientCertificateSyncState(
-                certificates: remoteCertificateRecords,
-                associations: remoteAssociationRecords
-            )
-            if remoteCertificateRecords.isEmpty, remoteAssociationRecords.isEmpty,
-               let legacyClientCertificates {
-                remoteClientCertificates = ClientCertificateSyncState(legacy: legacyClientCertificates)
-            }
-            let mergedClientCertificates = localClientCertificates.map {
-                $0.merging(remoteClientCertificates)
-            } ?? remoteClientCertificates
-            if mergedClientCertificates != localClientCertificates,
-               (!mergedClientCertificates.certificates.isEmpty
-                    || !mergedClientCertificates.associations.isEmpty) {
-                localClientCertificates = mergedClientCertificates
-                receivedClientCertificates.send(mergedClientCertificates)
-            }
-
-            let remoteBookmarkState = SyncedBookmarks(
-                folders: remoteBookmarkFolders,
-                bookmarks: remoteBookmarks
-            )
-            let mergedBookmarks = localBookmarks.map { $0.merging(remoteBookmarkState) }
-                ?? remoteBookmarkState
-            if mergedBookmarks != localBookmarks,
-               (!mergedBookmarks.folders.isEmpty || !mergedBookmarks.bookmarks.isEmpty) {
-                localBookmarks = mergedBookmarks
-                receivedBookmarks.send(mergedBookmarks)
-            }
-
-            let remoteTrust = SyncedServerTrust(decisions: remoteTrustDecisions)
-            let mergedTrust = localServerTrust.map { $0.merging(remoteTrust) } ?? remoteTrust
-            if mergedTrust != localServerTrust, !mergedTrust.decisions.isEmpty {
-                localServerTrust = mergedTrust
-                receivedServerTrust.send(mergedTrust)
-            }
-
-            hasLocalChangesSinceSync = false
-            lastSuccessfulSync = Date()
-            remoteTabDevices = devices.visibleCloudTabDevices(excluding: localDeviceID)
-            persistCachedTabs(devices)
-
-            var recordsToSave: [CKRecord] = []
-            if let localPreferences,
-               try recordNeedsUpload(
-                    localPreferences,
-                    id: preferencesRecordID,
-                    cloudRecords: remoteRecordsByID
-               ) {
-                recordsToSave.append(try makeRecord(
-                    type: "MTPreferences",
-                    id: preferencesRecordID,
-                    value: localPreferences,
-                    existing: remoteRecordsByID[preferencesRecordID]
-                ))
-            }
-            if let localClientCertificates {
-                recordsToSave += try recordsNeedingUpload(
-                    local: localClientCertificates.certificates,
-                    type: "MTClientCertificateDescriptor",
-                    prefix: "client-certificate",
-                    cloudRecords: remoteRecordsByID
-                )
-                recordsToSave += try recordsNeedingUpload(
-                    local: localClientCertificates.associations,
-                    type: "MTClientCertificateAssociation",
-                    prefix: "client-certificate-association",
-                    cloudRecords: remoteRecordsByID
-                )
-            }
-            if let localBookmarks {
-                recordsToSave += try recordsNeedingUpload(
-                    local: localBookmarks.folders,
-                    type: "MTBookmarkFolder",
-                    prefix: "bookmark-folder",
-                    cloudRecords: remoteRecordsByID
-                )
-                recordsToSave += try recordsNeedingUpload(
-                    local: localBookmarks.bookmarks,
-                    type: "MTBookmark",
-                    prefix: "bookmark",
-                    cloudRecords: remoteRecordsByID
-                )
-            }
-            if let localServerTrust {
-                for decision in localServerTrust.decisions
-                {
-                    let id = recordID(prefix: "server-trust", stableID: decision.id)
-                    if try recordNeedsUpload(decision, id: id, cloudRecords: remoteRecordsByID) {
-                        recordsToSave.append(try makeRecord(
-                            type: "MTServerTrust",
-                            id: id,
-                            value: decision,
-                            existing: remoteRecordsByID[id]
-                        ))
-                    }
-                }
-            }
-            if let localTabs,
-               try recordNeedsUpload(
-                    localTabs,
-                    id: tabsRecordID,
-                    cloudRecords: remoteRecordsByID
-               ) {
-                recordsToSave.append(try makeRecord(
-                    type: "MTDeviceTabs",
-                    id: tabsRecordID,
-                    value: localTabs,
-                    existing: remoteRecordsByID[tabsRecordID]
-                ))
-            }
-            try await save(recordsToSave, to: database)
-
-            // Continue publishing the old record shapes in the original zone. Older
-            // Major Tom builds never see the v2 zone or manifest, but still receive
-            // current bookmarks, preferences, identities, trust, and device tabs.
-            let legacyByID = newestValuesByID(
-                legacyRecords,
-                id: \.recordID,
-                modifiedAt: \.modificationDate
-            )
-            let compatibilityRecords = try makeLegacyCompatibilityRecords(existing: legacyByID)
-            try await save(compatibilityRecords, to: database)
-            status = .upToDate(Date())
+            var state = try repository?.state(for: account) ?? CloudSyncState(accountIdentityHash: account)
+            state.zoneState = .neverEstablished
+            state.engineState = nil
+            try repository?.save(state)
+            configureEngine(for: account, serializedState: nil, createZone: true)
+            enqueueAllLocalData(for: account)
+            refresh()
         } catch {
-            if Self.isConflict(error) {
-                // Refetch and merge the winning server value instead of allowing a
-                // stale device to overwrite it. requestSync() observes this after the
-                // current task has unwound.
-                pendingSync = true
-            }
             status = .failed(Self.description(for: error))
         }
     }
 
-    private func fetchAllRecords(
-        from database: CKDatabase,
-        zoneID: CKRecordZone.ID
-    ) async throws -> [CKRecord] {
-        var records: [CKRecord] = []
+    private func bootstrap() async {
+        guard let container else { return }
+        do {
+            let accountStatus = try await container.accountStatus()
+            guard accountStatus == .available else {
+                status = .unavailable(Self.unsavedWarning(Self.accountStatusDescription(accountStatus)))
+                return
+            }
+            let userID = try await container.userRecordID()
+            try await activateAccount(Self.identityHash(for: userID))
+        } catch {
+            status = .failed(Self.description(for: error))
+        }
+    }
 
-        // A nil zone-change token means "from the beginning of the zone's history",
-        // not "the records that exist now". Replaying that history on every sync became
-        // effectively unbounded after repeated imports and deletions generated many
-        // generations of the same records. A sync needs the current server snapshot for
-        // merge and save-policy decisions, so query each of Major Tom's record types and
-        // follow only its finite current-result cursor.
-        for recordType in synchronizedRecordTypes {
-            let query = CKQuery(recordType: recordType, predicate: NSPredicate(value: true))
-            var page = try await database.records(
-                matching: query,
-                inZoneWith: zoneID,
-                desiredKeys: ["payload"]
+    private func activateAccount(_ account: String) async throws {
+        guard let repository, let cloudDatabase else { return }
+        let priorActive = try repository.activeAccountIdentityHash()
+        activeAccount = account
+        try repository.saveActiveAccountIdentityHash(account)
+        var state = try repository.state(for: account)
+
+        if state.migrationPhase != .ready {
+            status = .syncing
+            try BookmarkRepository(database: localDatabase!, accountIdentityHash: account)
+                .claimUnownedRows()
+            try ClientCertificateSyncRepository(database: localDatabase!, accountIdentityHash: account)
+                .claimUnownedRows()
+            try await importV1Once(account: account)
+            // Existing experimental v2 data is intentionally disposable. Reset this zone
+            // before publishing the new manifest so older v2 builds can never alter it.
+            _ = try? await cloudDatabase.modifyRecordZones(saving: [], deleting: [zoneID])
+            _ = try await cloudDatabase.modifyRecordZones(
+                saving: [CKRecordZone(zoneID: zoneID)], deleting: []
             )
-            while true {
-                for (_, match) in page.matchResults {
-                    switch match {
-                    case .success(let record): records.append(record)
-                    case .failure(let error): throw error
-                    }
+            state = try repository.state(for: account)
+            state.modelMajor = Self.cloudModelMajor
+            state.migratedFromV1 = true
+            state.migrationPhase = .ready
+            state.zoneState = .active
+            state.engineState = nil
+            state.updatedAt = Date()
+            try repository.save(state)
+            try repository.enqueue(CloudPendingChange(
+                accountIdentityHash: account,
+                recordType: "MTDataModelManifest",
+                recordName: Self.manifestRecordName,
+                operation: .save
+            ))
+            enqueueAllLocalData(for: account)
+        } else if priorActive != account {
+            publishAccountDataset(account)
+        }
+
+        let restored = try repository.state(for: account).engineState.flatMap {
+            try? decoder.decode(CKSyncEngine.State.Serialization.self, from: $0)
+        }
+        configureEngine(for: account, serializedState: restored, createZone: false)
+        status = .syncing
+        refresh()
+    }
+
+    private func configureEngine(
+        for account: String,
+        serializedState: CKSyncEngine.State.Serialization?,
+        createZone: Bool
+    ) {
+        guard account == activeAccount, let cloudDatabase else { return }
+        var configuration = CKSyncEngine.Configuration(
+            database: cloudDatabase,
+            stateSerialization: serializedState,
+            delegate: self
+        )
+        configuration.automaticallySync = true
+        let value = CKSyncEngine(configuration)
+        if createZone {
+            value.state.add(pendingDatabaseChanges: [.saveZone(CKRecordZone(zoneID: zoneID))])
+        }
+        value.state.hasPendingUntrackedChanges = true
+        engine = value
+    }
+
+    private func importV1Once(account: String) async throws {
+        guard let cloudDatabase, let localDatabase else { return }
+        let records = try await fetchLegacyRecords(from: cloudDatabase)
+        var folders: [SyncedBookmarkFolder] = []
+        var bookmarks: [SyncedBookmark] = []
+        var certificates: [SyncedClientCertificateDescriptor] = []
+        var associations: [SyncedClientCertificateAssociation] = []
+        for record in records {
+            guard let data = record.encryptedValues["payload"] as? Data else { continue }
+            switch record.recordType {
+            case "MTBookmarkFolder":
+                if let value = try? decoder.decode(SyncedBookmarkFolder.self, from: data) { folders.append(value) }
+            case "MTBookmark":
+                if let value = try? decoder.decode(SyncedBookmark.self, from: data) { bookmarks.append(value) }
+            case "MTClientCertificateDescriptor":
+                if let value = try? decoder.decode(SyncedClientCertificateDescriptor.self, from: data) { certificates.append(value) }
+            case "MTClientCertificateAssociation":
+                if let value = try? decoder.decode(SyncedClientCertificateAssociation.self, from: data) { associations.append(value) }
+            case "MTClientCertificates":
+                if let value = try? decoder.decode(SyncedClientCertificates.self, from: data) {
+                    let state = ClientCertificateSyncState(legacy: value)
+                    certificates += state.certificates
+                    associations += state.associations
                 }
-                guard let cursor = page.queryCursor else { break }
-                page = try await database.records(
-                    continuingMatchFrom: cursor,
+            case "MTPreferences":
+                if let value = try? decoder.decode(SyncedBrowserPreferences.self, from: data) {
+                    receivedPreferences.send(value)
+                }
+            default: break
+            }
+        }
+        if !folders.isEmpty || !bookmarks.isEmpty {
+            let incoming = SyncedBookmarks(folders: folders, bookmarks: bookmarks)
+            let repository = BookmarkRepository(database: localDatabase, accountIdentityHash: account)
+            let local = SyncedBookmarks(collection: try repository.collection(), modifiedAt: .distantPast)
+            let merged = local.merging(incoming)
+            try repository.replace(with: merged.collection)
+            localBookmarks = merged
+            receivedBookmarks.send(merged)
+        }
+        if !certificates.isEmpty || !associations.isEmpty {
+            let incoming = ClientCertificateSyncState(
+                certificates: certificates,
+                associations: associations
+            )
+            let repository = ClientCertificateSyncRepository(
+                database: localDatabase,
+                accountIdentityHash: account
+            )
+            let loaded = try repository.load()
+            let merged = loaded.state.merging(incoming)
+            try repository.save(merged, localFlags: loaded.localFlags)
+            localClientCertificates = merged
+            receivedClientCertificates.send(merged)
+        }
+    }
+
+    private func fetchLegacyRecords(from database: CKDatabase) async throws -> [CKRecord] {
+        let types = ["MTPreferences", "MTClientCertificates", "MTClientCertificateDescriptor",
+                     "MTClientCertificateAssociation", "MTBookmarkFolder", "MTBookmark"]
+        var records: [CKRecord] = []
+        do {
+            for type in types {
+                var page = try await database.records(
+                    matching: CKQuery(recordType: type, predicate: NSPredicate(value: true)),
+                    inZoneWith: legacyZoneID,
                     desiredKeys: ["payload"]
                 )
+                while true {
+                    for (_, result) in page.matchResults {
+                        if case .success(let record) = result { records.append(record) }
+                    }
+                    guard let cursor = page.queryCursor else { break }
+                    page = try await database.records(continuingMatchFrom: cursor, desiredKeys: ["payload"])
+                }
             }
+        } catch let error as CKError where error.code == .zoneNotFound {
+            return []
         }
         return records
     }
 
-    private func fetchManifest(from database: CKDatabase) async throws -> CKRecord? {
+    private func enqueueAllLocalData(for account: String) {
+        if let localBookmarks { persistBookmarks(localBookmarks, account: account) }
+        else if let localDatabase,
+                let collection = try? BookmarkRepository(database: localDatabase, accountIdentityHash: account).collection() {
+            persistBookmarks(SyncedBookmarks(collection: collection, modifiedAt: Date()), account: account)
+        }
+        if let localClientCertificates { persistCertificates(localClientCertificates, account: account) }
+        else if let localDatabase,
+                let state = try? ClientCertificateSyncRepository(database: localDatabase, accountIdentityHash: account).load().state {
+            persistCertificates(state, account: account)
+        }
+        guard let repository, let localDatabase else { return }
+        if let collection = try? BookmarkRepository(
+            database: localDatabase, accountIdentityHash: account
+        ).collection() {
+            for folder in collection.folders {
+                try? repository.enqueue(CloudPendingChange(
+                    accountIdentityHash: account,
+                    recordType: BookmarkRepository.folderRecordType,
+                    recordName: folder.id.uuidString,
+                    operation: .save
+                ))
+                for bookmark in folder.bookmarks {
+                    try? repository.enqueue(CloudPendingChange(
+                        accountIdentityHash: account,
+                        recordType: BookmarkRepository.bookmarkRecordType,
+                        recordName: bookmark.id.uuidString,
+                        operation: .save
+                    ))
+                }
+            }
+        }
+        if let loaded = try? ClientCertificateSyncRepository(
+            database: localDatabase, accountIdentityHash: account
+        ).load().state {
+            for descriptor in loaded.certificates where descriptor.deletedAt == nil {
+                try? repository.enqueue(CloudPendingChange(
+                    accountIdentityHash: account,
+                    recordType: "MTClientCertificateDescriptor",
+                    recordName: descriptor.id.uuidString,
+                    operation: .save
+                ))
+            }
+            for association in loaded.associations where association.deletedAt == nil {
+                try? repository.enqueue(CloudPendingChange(
+                    accountIdentityHash: account,
+                    recordType: "MTClientCertificateAssociation",
+                    recordName: association.id.uuidString,
+                    operation: .save
+                ))
+            }
+        }
+    }
+
+    private func publishAccountDataset(_ account: String) {
+        guard let localDatabase else { return }
+        if let collection = try? BookmarkRepository(database: localDatabase, accountIdentityHash: account).collection() {
+            let value = SyncedBookmarks(collection: collection, modifiedAt: Date())
+            localBookmarks = value
+            receivedBookmarks.send(value)
+        }
+        if let value = try? ClientCertificateSyncRepository(
+            database: localDatabase, accountIdentityHash: account
+        ).load().state {
+            localClientCertificates = value
+            receivedClientCertificates.send(value)
+        }
+    }
+
+    private func persistBookmarksIfReady() {
+        guard let value = localBookmarks, let account = activeAccount else { return }
+        persistBookmarks(value, account: account)
+    }
+
+    private func persistBookmarks(_ value: SyncedBookmarks, account: String) {
+        guard let localDatabase else { return }
         do {
-            return try await database.record(for: manifestRecordID)
-        } catch let error as CKError where error.code == .unknownItem {
+            try BookmarkRepository(database: localDatabase, accountIdentityHash: account)
+                .replace(with: value.collection)
+            requestSend()
+        } catch { status = .failed(Self.description(for: error)) }
+    }
+
+    private func persistCertificatesIfReady() {
+        guard let value = localClientCertificates, let account = activeAccount else { return }
+        persistCertificates(value, account: account)
+    }
+
+    private func persistCertificates(_ value: ClientCertificateSyncState, account: String) {
+        guard let localDatabase else { return }
+        do {
+            let repository = ClientCertificateSyncRepository(
+                database: localDatabase, accountIdentityHash: account
+            )
+            let flags = (try? repository.load().localFlags) ?? [:]
+            try repository.save(value, localFlags: flags)
+            requestSend()
+        } catch { status = .failed(Self.description(for: error)) }
+    }
+
+    private func requestSend() {
+        guard let engine, !writesBlocked else { return }
+        engine.state.hasPendingUntrackedChanges = true
+        Task { try? await engine.sendChanges() }
+    }
+
+    // MARK: CKSyncEngineDelegate
+
+    func nextRecordZoneChangeBatch(
+        _ context: CKSyncEngine.SendChangesContext,
+        syncEngine: CKSyncEngine
+    ) async -> CKSyncEngine.RecordZoneChangeBatch? {
+        guard !writesBlocked, let account = activeAccount, let repository,
+              let changes = try? repository.pendingChanges(for: account), !changes.isEmpty else {
+            syncEngine.state.hasPendingUntrackedChanges = false
+            return nil
+        }
+        var saves: [CKRecord] = []
+        var deletes: [CKRecord.ID] = []
+        attemptedGenerations.removeAll(keepingCapacity: true)
+        for change in changes {
+            let id = CKRecord.ID(recordName: change.recordName, zoneID: zoneID)
+            let pending: CKSyncEngine.PendingRecordZoneChange = change.operation == .save
+                ? .saveRecord(id) : .deleteRecord(id)
+            guard context.options.scope.contains(pending) else { continue }
+            switch change.operation {
+            case .save:
+                if let record = makeRecord(for: change) { saves.append(record) }
+                else {
+                    _ = try? repository.acknowledge(recordName: change.recordName,
+                                                    generation: change.generation, for: account)
+                    continue
+                }
+            case .delete:
+                deletes.append(id)
+            }
+            attemptedGenerations[change.recordName] = change.generation
+        }
+        syncEngine.state.hasPendingUntrackedChanges = changes.count >= 200
+        guard !saves.isEmpty || !deletes.isEmpty else { return nil }
+        return CKSyncEngine.RecordZoneChangeBatch(
+            recordsToSave: saves,
+            recordIDsToDelete: deletes,
+            atomicByZone: false
+        )
+    }
+
+    func handleEvent(_ event: CKSyncEngine.Event, syncEngine: CKSyncEngine) async {
+        do {
+            switch event {
+            case .stateUpdate(let update):
+                guard let account = activeAccount else { return }
+                try repository?.saveEngineState(try encoder.encode(update.stateSerialization), for: account)
+            case .accountChange(let change):
+                let id: CKRecord.ID?
+                switch change.changeType {
+                case .signIn(let current): id = current
+                case .switchAccounts(_, let current): id = current
+                case .signOut:
+                    activeAccount = nil
+                    engine = nil
+                    status = .unavailable(Self.unsavedWarning("Sign in to iCloud to sync"))
+                    return
+                @unknown default:
+                    id = nil
+                }
+                if let id {
+                    let hash = Self.identityHash(for: id)
+                    if hash != activeAccount { try await activateAccount(hash) }
+                }
+            case .fetchedRecordZoneChanges(let changes):
+                try applyFetched(changes)
+            case .fetchedDatabaseChanges(let changes):
+                if changes.deletions.contains(where: { $0.zoneID == zoneID }) {
+                    writesBlocked = true
+                    status = .removed
+                    if let account = activeAccount {
+                        var state = try repository?.state(for: account)
+                        state?.zoneState = .removed
+                        state?.engineState = nil
+                        if let state { try repository?.save(state) }
+                    }
+                }
+            case .sentRecordZoneChanges(let sent):
+                try handleSent(sent)
+            case .sentDatabaseChanges(let sent):
+                if sent.savedZones.contains(where: { $0.zoneID == zoneID }), let account = activeAccount {
+                    var state = try repository?.state(for: account)
+                    state?.zoneState = .active
+                    if let state { try repository?.save(state) }
+                }
+            case .willFetchChanges:
+                status = .syncing
+            case .didFetchChanges:
+                if let account = activeAccount {
+                    var state = try repository?.state(for: account)
+                    state?.lastFetchedAt = Date()
+                    state?.updatedAt = Date()
+                    if let state { try repository?.save(state) }
+                }
+                status = .upToDate(Date())
+            case .willFetchRecordZoneChanges, .didFetchRecordZoneChanges,
+                 .willSendChanges, .didSendChanges:
+                break
+            @unknown default:
+                break
+            }
+        } catch {
+            status = .failed(Self.description(for: error))
+        }
+    }
+
+    private func makeRecord(for change: CloudPendingChange) -> CKRecord? {
+        guard let localDatabase, let account = activeAccount else { return nil }
+        let id = CKRecord.ID(recordName: change.recordName, zoneID: zoneID)
+        let record = restoredRecord(named: change.recordName, account: account)
+            ?? CKRecord(recordType: change.recordType, recordID: id)
+        do {
+            let payload: Data
+            switch change.recordType {
+            case "MTDataModelManifest":
+                payload = try envelope(CloudDataModelManifest(
+                    formatMajor: Self.cloudModelMajor,
+                    minimumReaderMajor: Self.cloudModelMajor,
+                    minimumWriterMajor: Self.cloudModelMajor,
+                    createdAt: Date(timeIntervalSince1970: 0)
+                ), prior: change.recordName)
+            case BookmarkRepository.folderRecordType:
+                guard let uuid = UUID(uuidString: change.recordName),
+                      let value = try BookmarkRepository(database: localDatabase, accountIdentityHash: account)
+                        .folderPayload(id: uuid) else { return nil }
+                payload = try envelope(value, prior: change.recordName)
+            case BookmarkRepository.bookmarkRecordType:
+                guard let uuid = UUID(uuidString: change.recordName),
+                      let value = try BookmarkRepository(database: localDatabase, accountIdentityHash: account)
+                        .bookmarkPayload(id: uuid) else { return nil }
+                payload = try envelope(value, prior: change.recordName)
+            case "MTClientCertificateDescriptor":
+                guard let uuid = UUID(uuidString: change.recordName),
+                      let value = try ClientCertificateSyncRepository(database: localDatabase, accountIdentityHash: account)
+                        .certificatePayload(id: uuid) else { return nil }
+                payload = try envelope(value, prior: change.recordName)
+            case "MTClientCertificateAssociation":
+                guard let uuid = UUID(uuidString: change.recordName),
+                      let value = try ClientCertificateSyncRepository(database: localDatabase, accountIdentityHash: account)
+                        .associationPayload(id: uuid) else { return nil }
+                payload = try envelope(value, prior: change.recordName)
+            case "MTDeviceTabs":
+                guard let localTabs else { return nil }
+                payload = try envelope(localTabs, prior: change.recordName)
+            default: return nil
+            }
+            record.encryptedValues["payload"] = payload as CKRecordValue
+            return record
+        } catch {
+            status = .failed(Self.description(for: error))
             return nil
         }
     }
 
-    private func makeRecord<Value: Encodable>(
-        type: CKRecord.RecordType,
-        id: CKRecord.ID,
-        value: Value,
-        existing: CKRecord? = nil
-    ) throws -> CKRecord {
-        let record = existing ?? CKRecord(recordType: type, recordID: id)
-        record.encryptedValues["payload"] = try encoder.encode(value) as CKRecordValue
-        return record
+    private func envelope<Value: CloudSyncPayload>(_ value: Value, prior recordName: String) throws -> Data {
+        if let account = activeAccount,
+           let prior = try repository?.recordState(recordName: recordName, for: account)?.serverPayload,
+           var decoded = try? CloudRecordPayload<Value>(decoding: prior) {
+            decoded.model = value
+            return try decoded.encoded()
+        }
+        return try CloudRecordPayload(model: value).encoded()
     }
 
-    private func save(_ records: [CKRecord], to database: CKDatabase) async throws {
-        guard !records.isEmpty else { return }
-        for batchStart in stride(
-            from: 0,
-            to: records.count,
-            by: Self.maximumRecordsPerModify
-        ) {
-            let batchEnd = min(batchStart + Self.maximumRecordsPerModify, records.count)
-            let result = try await database.modifyRecords(
-                saving: Array(records[batchStart..<batchEnd]),
-                deleting: [],
-                savePolicy: .ifServerRecordUnchanged,
-                atomically: false
-            )
-            for saveResult in result.saveResults.values {
-                if case .failure(let error) = saveResult { throw error }
+    private func restoredRecord(named name: String, account: String) -> CKRecord? {
+        guard let state = try? repository?.recordState(recordName: name, for: account),
+              let data = state.systemFields else { return nil }
+        let coder = try? NSKeyedUnarchiver(forReadingFrom: data)
+        coder?.requiresSecureCoding = true
+        defer { coder?.finishDecoding() }
+        return coder.flatMap(CKRecord.init(coder:))
+    }
+
+    private func applyFetched(_ changes: CKSyncEngine.Event.FetchedRecordZoneChanges) throws {
+        guard let account = activeAccount, let localDatabase else { return }
+        let pendingDeletes = Set((try repository?.pendingChanges(for: account) ?? [])
+            .filter { $0.operation == .delete }.map(\.recordName))
+        if let manifestRecord = changes.modifications.map(\.record).first(where: {
+            $0.recordType == "MTDataModelManifest"
+        }), let manifest: CloudDataModelManifest = decodeRecord(manifestRecord) {
+            guard manifest.compatibility(readerMajor: Self.cloudModelMajor,
+                                         writerMajor: Self.cloudModelMajor) == .compatible else {
+                writesBlocked = true
+                status = .requiresNewerApp
+                return
+            }
+        }
+        try applyBookmarkChanges(changes, account: account, database: localDatabase,
+                                 pendingDeletes: pendingDeletes)
+        try applyCertificateChanges(changes, account: account, database: localDatabase,
+                                    pendingDeletes: pendingDeletes)
+        applyTabChanges(changes)
+        for record in changes.modifications.map(\.record) {
+            try saveRecordMetadata(record, account: account)
+        }
+        for deletion in changes.deletions {
+            if deletion.recordType == "MTDeviceTabs" {
+                remoteTabDevices.removeAll { $0.deviceID.uuidString.lowercased() == deletion.recordID.recordName }
             }
         }
     }
 
-    private func makeLegacyCompatibilityRecords(
-        existing: [CKRecord.ID: CKRecord]
-    ) throws -> [CKRecord] {
-        var records: [CKRecord] = []
-        if let localPreferences,
-           let record = try compatibilityRecord(
-                type: "MTPreferences",
-                id: CKRecord.ID(recordName: "preferences", zoneID: legacyZoneID),
-                value: localPreferences,
-                existing: existing
-           ) {
-            records.append(record)
-        }
-        if let localClientCertificates {
-            records += try compatibilityRecords(
-                localClientCertificates.certificates,
-                type: "MTClientCertificateDescriptor",
-                prefix: "client-certificate",
-                stableID: { $0.id.uuidString },
-                existing: existing
-            )
-            records += try compatibilityRecords(
-                localClientCertificates.associations,
-                type: "MTClientCertificateAssociation",
-                prefix: "client-certificate-association",
-                stableID: { $0.id.uuidString },
-                existing: existing
-            )
-        }
-        if let localBookmarks {
-            records += try compatibilityRecords(
-                localBookmarks.folders,
-                type: "MTBookmarkFolder",
-                prefix: "bookmark-folder",
-                stableID: { $0.id.uuidString },
-                existing: existing
-            )
-            records += try compatibilityRecords(
-                localBookmarks.bookmarks,
-                type: "MTBookmark",
-                prefix: "bookmark",
-                stableID: { $0.id.uuidString },
-                existing: existing
-            )
-        }
-        if let localServerTrust {
-            records += try compatibilityRecords(
-                localServerTrust.decisions,
-                type: "MTServerTrust",
-                prefix: "server-trust",
-                stableID: { $0.id },
-                existing: existing
-            )
-        }
-        if let localTabs,
-           let record = try compatibilityRecord(
-                type: "MTDeviceTabs",
-                id: CKRecord.ID(
-                    recordName: "tabs-\(localDeviceID.uuidString.lowercased())",
-                    zoneID: legacyZoneID
-                ),
-                value: localTabs,
-                existing: existing
-           ) {
-            records.append(record)
-        }
-        return records
-    }
-
-    private func compatibilityRecords<Value: Encodable>(
-        _ values: [Value],
-        type: CKRecord.RecordType,
-        prefix: String,
-        stableID: (Value) -> String,
-        existing: [CKRecord.ID: CKRecord]
-    ) throws -> [CKRecord] {
-        try values.compactMap { value in
-            try compatibilityRecord(
-                type: type,
-                id: recordID(
-                    prefix: prefix,
-                    stableID: stableID(value),
-                    zoneID: legacyZoneID
-                ),
-                value: value,
-                existing: existing
-            )
-        }
-    }
-
-    private func compatibilityRecord<Value: Encodable>(
-        type: CKRecord.RecordType,
-        id: CKRecord.ID,
-        value: Value,
-        existing: [CKRecord.ID: CKRecord]
-    ) throws -> CKRecord? {
-        let payload = try encoder.encode(value)
-        if existing[id]?.encryptedValues["payload"] as? Data == payload { return nil }
-        let record = existing[id] ?? CKRecord(recordType: type, recordID: id)
-        record.encryptedValues["payload"] = payload as CKRecordValue
-        return record
-    }
-
-    private func recordsNeedingUpload<Record>(
-        local: [Record],
-        type: CKRecord.RecordType,
-        prefix: String,
-        cloudRecords: [CKRecord.ID: CKRecord]
-    ) throws -> [CKRecord]
-    where Record: Encodable & Identifiable & CloudModifiedRecord, Record.ID == UUID {
-        return try local.compactMap { record in
-            let id = recordID(prefix: prefix, stableID: record.id.uuidString)
-            guard try recordNeedsUpload(record, id: id, cloudRecords: cloudRecords) else {
-                return nil
+    private func applyBookmarkChanges(
+        _ changes: CKSyncEngine.Event.FetchedRecordZoneChanges,
+        account: String,
+        database: MajorTomDatabase,
+        pendingDeletes: Set<String>
+    ) throws {
+        let repository = BookmarkRepository(database: database, accountIdentityHash: account)
+        var folders = try repository.collection().folders
+        guard !folders.isEmpty else { return }
+        let favoriteID = folders[0].id
+        var pendingFolders = try repository.pendingFolderIDs()
+        var folderOrder = Dictionary(uniqueKeysWithValues: folders.enumerated().map {
+            ($0.element.id, String(format: "%08d", $0.offset))
+        })
+        var bookmarkOrder: [UUID: String] = [:]
+        for folder in folders {
+            for (index, bookmark) in folder.bookmarks.enumerated() {
+                bookmarkOrder[bookmark.id] = String(format: "%08d", index)
             }
-            return try makeRecord(
-                type: type,
-                id: id,
-                value: record,
-                existing: cloudRecords[id]
-            )
         }
-    }
-
-    private func recordNeedsUpload<Value: Encodable>(
-        _ value: Value,
-        id: CKRecord.ID,
-        cloudRecords: [CKRecord.ID: CKRecord]
-    ) throws -> Bool {
-        try encoder.encode(value) != (cloudRecords[id]?.encryptedValues["payload"] as? Data)
-    }
-
-    private func recordID(
-        prefix: String,
-        stableID: String,
-        zoneID: CKRecordZone.ID? = nil
-    ) -> CKRecord.ID {
-        let digest = SHA256.hash(data: Data(stableID.utf8)).map { String(format: "%02x", $0) }.joined()
-        return CKRecord.ID(recordName: "\(prefix)-\(digest)", zoneID: zoneID ?? self.zoneID)
-    }
-
-    private func persistCachedTabs(_ devices: [CloudTabDeviceSnapshot]) {
-        if let data = try? encoder.encode(devices) {
-            defaults.set(data, forKey: Self.cachedTabsKey)
+        for record in changes.modifications.map(\.record) where record.recordID.zoneID == zoneID {
+            guard !pendingDeletes.contains(record.recordID.recordName) else { continue }
+            if record.recordType == BookmarkRepository.folderRecordType,
+               let payload: CloudBookmarkFolderPayload = decodeRecord(record) {
+                if let index = folders.firstIndex(where: { $0.id == payload.id }) {
+                    folders[index].name = payload.id == favoriteID ? BookmarkCollection.favoritesName : payload.name
+                } else {
+                    folders.append(BookmarkFolder(id: payload.id, name: payload.name))
+                }
+                folderOrder[payload.id] = payload.orderKey
+                let resolvedBookmarks = pendingFolders.compactMap {
+                    $0.value == payload.id ? $0.key : nil
+                }
+                for bookmarkID in resolvedBookmarks {
+                    guard let bookmark = folders.flatMap(\.bookmarks).first(where: { $0.id == bookmarkID }),
+                          let destination = folders.firstIndex(where: { $0.id == payload.id }) else { continue }
+                    for index in folders.indices { folders[index].bookmarks.removeAll { $0.id == bookmarkID } }
+                    folders[destination].bookmarks.append(bookmark)
+                    pendingFolders[bookmarkID] = nil
+                }
+            }
         }
+        for deletion in changes.deletions where deletion.recordType == BookmarkRepository.folderRecordType {
+            guard let id = UUID(uuidString: deletion.recordID.recordName), id != favoriteID,
+                  let index = folders.firstIndex(where: { $0.id == id }) else { continue }
+            let children = folders[index].bookmarks
+            folders.remove(at: index)
+            folders[0].bookmarks.append(contentsOf: children)
+            pendingFolders = pendingFolders.filter { $0.value != id }
+        }
+        for record in changes.modifications.map(\.record)
+        where record.recordType == BookmarkRepository.bookmarkRecordType {
+            guard !pendingDeletes.contains(record.recordID.recordName) else { continue }
+            guard let payload: CloudBookmarkPayload = decodeRecord(record) else { continue }
+            for index in folders.indices { folders[index].bookmarks.removeAll { $0.id == payload.id } }
+            let destination = folders.firstIndex { $0.id == payload.folderID }
+            if destination == nil { pendingFolders[payload.id] = payload.folderID }
+            else { pendingFolders[payload.id] = nil }
+            bookmarkOrder[payload.id] = payload.orderKey
+            folders[destination ?? 0].bookmarks.append(Bookmark(
+                id: payload.id, title: payload.title, url: payload.url,
+                addedAt: payload.addedAt, favicon: payload.favicon
+            ))
+        }
+        for deletion in changes.deletions where deletion.recordType == BookmarkRepository.bookmarkRecordType {
+            guard let id = UUID(uuidString: deletion.recordID.recordName) else { continue }
+            for index in folders.indices { folders[index].bookmarks.removeAll { $0.id == id } }
+            pendingFolders[id] = nil
+        }
+        for index in folders.indices {
+            folders[index].bookmarks.sort {
+                (bookmarkOrder[$0.id] ?? "~") < (bookmarkOrder[$1.id] ?? "~")
+            }
+        }
+        folders.sort { (folderOrder[$0.id] ?? "~") < (folderOrder[$1.id] ?? "~") }
+        if let favorite = folders.firstIndex(where: { $0.id == favoriteID }), favorite != 0 {
+            folders.insert(folders.remove(at: favorite), at: 0)
+        }
+        let collection = BookmarkCollection(folders: folders)
+        try repository.replaceFromCloud(with: collection)
+        try repository.savePendingFolderIDs(pendingFolders)
+        let value = SyncedBookmarks(collection: collection, modifiedAt: Date())
+        localBookmarks = value
+        receivedBookmarks.send(value)
+    }
+
+    private func applyCertificateChanges(
+        _ changes: CKSyncEngine.Event.FetchedRecordZoneChanges,
+        account: String,
+        database: MajorTomDatabase,
+        pendingDeletes: Set<String>
+    ) throws {
+        let repository = ClientCertificateSyncRepository(database: database, accountIdentityHash: account)
+        let loaded = try repository.load()
+        var descriptors = Dictionary(uniqueKeysWithValues: loaded.state.certificates.map { ($0.id, $0) })
+        var associations = Dictionary(uniqueKeysWithValues: loaded.state.associations.map { ($0.id, $0) })
+        let now = Date()
+        for record in changes.modifications.map(\.record) {
+            guard !pendingDeletes.contains(record.recordID.recordName) else { continue }
+            if record.recordType == "MTClientCertificateDescriptor",
+               let payload: CloudClientCertificateDescriptorPayload = decodeRecord(record) {
+                descriptors[payload.id] = SyncedClientCertificateDescriptor(
+                    descriptor: payload.descriptor, modifiedAt: now
+                )
+            } else if record.recordType == "MTClientCertificateAssociation",
+                      let payload: CloudClientCertificateAssociationPayload = decodeRecord(record) {
+                associations[payload.association.id] = SyncedClientCertificateAssociation(
+                    association: payload.association, modifiedAt: now
+                )
+            }
+        }
+        for deletion in changes.deletions {
+            guard let id = UUID(uuidString: deletion.recordID.recordName) else { continue }
+            if deletion.recordType == "MTClientCertificateDescriptor" {
+                descriptors[id] = nil
+                associations = associations.filter { $0.value.association.certificateID != id }
+            } else if deletion.recordType == "MTClientCertificateAssociation" {
+                associations[id] = nil
+            }
+        }
+        let value = ClientCertificateSyncState(
+            certificates: Array(descriptors.values), associations: Array(associations.values)
+        )
+        try repository.saveFromCloud(value, localFlags: loaded.localFlags)
+        localClientCertificates = value
+        receivedClientCertificates.send(value)
+    }
+
+    private func applyTabChanges(_ changes: CKSyncEngine.Event.FetchedRecordZoneChanges) {
+        var devices = Dictionary(uniqueKeysWithValues: remoteTabDevices.map { ($0.deviceID, $0) })
+        for record in changes.modifications.map(\.record) where record.recordType == "MTDeviceTabs" {
+            guard let value: CloudTabDeviceSnapshot = decodeRecord(record),
+                  value.deviceID != localDeviceID else { continue }
+            devices[value.deviceID] = value
+        }
+        for deletion in changes.deletions where deletion.recordType == "MTDeviceTabs" {
+            if let id = UUID(uuidString: deletion.recordID.recordName) { devices[id] = nil }
+        }
+        let values = Array(devices.values)
+        remoteTabDevices = values.visibleCloudTabDevices(excluding: localDeviceID)
+        if let data = try? encoder.encode(values) { defaults.set(data, forKey: Self.cachedTabsKey) }
+    }
+
+    private func decodeRecord<Value: CloudSyncPayload>(_ record: CKRecord) -> Value? {
+        guard let data = record.encryptedValues["payload"] as? Data,
+              let envelope = try? CloudRecordPayload<Value>(decoding: data) else { return nil }
+        return envelope.model
+    }
+
+    private func handleSent(_ sent: CKSyncEngine.Event.SentRecordZoneChanges) throws {
+        guard let account = activeAccount, let repository else { return }
+        for record in sent.savedRecords {
+            if let generation = attemptedGenerations[record.recordID.recordName] {
+                try repository.acknowledge(recordName: record.recordID.recordName,
+                                           generation: generation, for: account)
+            }
+            try saveRecordMetadata(record, account: account)
+        }
+        for id in sent.deletedRecordIDs {
+            if let generation = attemptedGenerations[id.recordName] {
+                try repository.acknowledge(recordName: id.recordName,
+                                           generation: generation, for: account)
+            }
+        }
+        for (id, error) in sent.failedRecordDeletes where error.code == .unknownItem {
+            if let generation = attemptedGenerations[id.recordName] {
+                try repository.acknowledge(recordName: id.recordName,
+                                           generation: generation, for: account)
+            }
+        }
+        for failure in sent.failedRecordSaves where failure.error.code == .serverRecordChanged {
+            if let server = failure.error.userInfo[CKRecordChangedErrorServerRecordKey] as? CKRecord {
+                try saveRecordMetadata(server, account: account)
+            }
+        }
+        var state = try repository.state(for: account)
+        state.lastSentAt = Date()
+        state.updatedAt = Date()
+        try repository.save(state)
+        syncPendingFlag()
+    }
+
+    private func saveRecordMetadata(_ record: CKRecord, account: String) throws {
+        let archiver = NSKeyedArchiver(requiringSecureCoding: true)
+        record.encodeSystemFields(with: archiver)
+        archiver.finishEncoding()
+        try repository?.saveRecordState(CloudRecordState(
+            accountIdentityHash: account,
+            recordType: record.recordType,
+            recordName: record.recordID.recordName,
+            systemFields: archiver.encodedData,
+            serverPayload: record.encryptedValues["payload"] as? Data,
+            payloadDigest: nil,
+            lastSeenEpoch: nil,
+            updatedAt: Date()
+        ))
+    }
+
+    private func syncPendingFlag() {
+        guard let engine, let account = activeAccount else { return }
+        engine.state.hasPendingUntrackedChanges =
+            (try? repository?.hasPendingChanges(for: account)) ?? false
+    }
+
+    private static func identityHash(for recordID: CKRecord.ID) -> String {
+        SHA256.hash(data: Data(recordID.recordName.utf8))
+            .map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func applyUbiquitousPreferences() {
+        guard let data = NSUbiquitousKeyValueStore.default.data(forKey: "browser-preferences-v2"),
+              let value = try? decoder.decode(SyncedBrowserPreferences.self, from: data),
+              value.shouldReplace(localPreferences) else { return }
+        localPreferences = value
+        receivedPreferences.send(value)
     }
 
     private static func accountStatusDescription(_ status: CKAccountStatus) -> String {
@@ -727,37 +892,27 @@ final class ICloudSyncStore: ObservableObject {
         }
     }
 
+    private static func unsavedWarning(_ reason: String) -> String {
+        "\(reason). Bookmarks and identities are saved on this Mac but are not syncing."
+    }
+
     private static var hasCloudKitEntitlement: Bool {
         guard let task = SecTaskCreateFromSelf(nil),
               let identifiers = SecTaskCopyValueForEntitlement(
-                  task,
-                  "com.apple.developer.icloud-container-identifiers" as CFString,
-                  nil
-              ) as? [String] else {
-            return false
-        }
+                task, "com.apple.developer.icloud-container-identifiers" as CFString, nil
+              ) as? [String] else { return false }
         return identifiers.contains("iCloud.dev.gemi.major-tom")
     }
 
     private static func description(for error: Error) -> String {
-        let nsError = error as NSError
-        if nsError.domain == CKError.errorDomain,
-           let code = CKError.Code(rawValue: nsError.code) {
-            switch code {
-            case .notAuthenticated: return "Sign in to iCloud to sync"
-            case .networkUnavailable, .networkFailure: return "Offline; changes are saved locally"
-            case .permissionFailure: return "This build is not provisioned for Major Tom iCloud sync"
-            default: break
-            }
-        }
-        return error.localizedDescription
-    }
-
-    private static func isConflict(_ error: Error) -> Bool {
         let cloudError = error as? CKError
-        if cloudError?.code == .serverRecordChanged { return true }
-        guard cloudError?.code == .partialFailure,
-              let partial = cloudError?.partialErrorsByItemID else { return false }
-        return partial.values.contains { ($0 as? CKError)?.code == .serverRecordChanged }
+        switch cloudError?.code {
+        case .notAuthenticated: return unsavedWarning("Sign in to iCloud to sync")
+        case .networkUnavailable, .networkFailure: return "Offline; changes are saved locally"
+        case .permissionFailure: return unsavedWarning(
+            "This build is not provisioned for Major Tom iCloud sync"
+        )
+        default: return error.localizedDescription
+        }
     }
 }

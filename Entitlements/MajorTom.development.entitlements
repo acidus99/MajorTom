@@ -6,6 +6,10 @@
 	<string>7PDU8G67DD.dev.gemi.major-tom</string>
 	<key>com.apple.developer.team-identifier</key>
 	<string>7PDU8G67DD</string>
+	<key>aps-environment</key>
+	<string>development</string>
+	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
+	<string>7PDU8G67DD.dev.gemi.major-tom</string>
 	<key>com.apple.developer.icloud-container-development-container-identifiers</key>
 	<array>
 		<string>iCloud.dev.gemi.major-tom</string>

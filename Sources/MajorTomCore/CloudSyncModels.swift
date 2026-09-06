@@ -31,6 +31,13 @@ public struct CloudDataModelManifest: Codable, Equatable, Sendable {
     }
 }
 
+extension CloudDataModelManifest: CloudSyncPayload {
+    public static let payloadSchemaVersion = 1
+    public static let knownPayloadKeys: Set<String> = [
+        "formatMajor", "minimumReaderMajor", "minimumWriterMajor", "createdAt"
+    ]
+}
+
 public enum CloudDataModelCompatibility: Equatable, Sendable {
     case compatible
     case requiresNewerApp
@@ -427,14 +434,47 @@ public struct SyncedServerTrust: Codable, Equatable, Sendable {
 /// It intentionally excludes history, cached response bodies, scroll position and
 /// back/forward state: opening a remote tab is a new navigation on this Mac.
 public struct CloudTabSnapshot: Codable, Equatable, Identifiable, Sendable {
-    public var id: UUID
     public var title: String
     public var url: URL
+    public var favicon: String?
 
-    public init(id: UUID, title: String, url: URL) {
-        self.id = id
+    public var id: String { url.absoluteString }
+
+    public init(title: String, url: URL, favicon: String? = nil) {
         self.title = title
         self.url = url
+        self.favicon = favicon
+    }
+}
+
+public enum CloudTabURL {
+    /// Returns a stable cross-device identity while retaining path, query and fragment.
+    public static func normalized(_ url: URL) -> URL? {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme?.lowercased(),
+              !scheme.isEmpty,
+              scheme != "about",
+              scheme != "data" else { return nil }
+        components.scheme = scheme
+        if let host = components.host { components.host = host.lowercased() }
+        if scheme == "gemini" {
+            if components.path.isEmpty { components.path = "/" }
+            if components.port == Int(GeminiRequestTarget.defaultPort) { components.port = nil }
+        }
+        return components.url
+    }
+
+    public static func deduplicated(_ tabs: [CloudTabSnapshot], limit: Int = 200) -> [CloudTabSnapshot] {
+        var seen = Set<String>()
+        var result: [CloudTabSnapshot] = []
+        for tab in tabs {
+            guard let url = normalized(tab.url), seen.insert(url.absoluteString).inserted else {
+                continue
+            }
+            result.append(CloudTabSnapshot(title: tab.title, url: url, favicon: tab.favicon))
+            if result.count == limit { break }
+        }
+        return result
     }
 }
 
@@ -464,6 +504,13 @@ public struct CloudTabDeviceSnapshot: Codable, Equatable, Identifiable, Sendable
     public func isRecent(at date: Date = Date(), maximumAge: TimeInterval = 7 * 24 * 60 * 60) -> Bool {
         updatedAt <= date && date.timeIntervalSince(updatedAt) <= maximumAge
     }
+}
+
+extension CloudTabDeviceSnapshot: CloudSyncPayload {
+    public static let payloadSchemaVersion = 1
+    public static let knownPayloadKeys: Set<String> = [
+        "deviceID", "deviceName", "updatedAt", "tabs"
+    ]
 }
 
 public extension Array where Element == CloudTabDeviceSnapshot {
