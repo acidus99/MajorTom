@@ -46,7 +46,38 @@ final class MajorTomDatabaseTests: XCTestCase {
         XCTAssertTrue(try database.read { try $0.tableExists("client_certificate_sync_descriptors") })
         XCTAssertTrue(try database.read { try $0.tableExists("client_certificate_sync_associations") })
         XCTAssertTrue(try database.read { try $0.tableExists("client_certificate_local_flags") })
+        XCTAssertTrue(try database.read { try $0.tableExists("cloud_sync_state") })
+        XCTAssertTrue(try database.read { try $0.tableExists("cloud_pending_changes") })
+        XCTAssertTrue(try database.read { try $0.tableExists("cloud_record_state") })
         try database.validate()
+    }
+
+    func testCloudMigrationAddsTransitionalBookmarkColumns() throws {
+        let database = try MajorTomDatabase(inMemory: ())
+        try database.write { db in
+            try db.execute(
+                sql: "INSERT INTO bookmark_folders (id, name, position) VALUES ('folder', 'Folder', 0)"
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO bookmarks (id, folder_id, title, url, added_at, position)
+                    VALUES ('first', 'folder', 'First', 'gemini://one', ?, 0),
+                           ('second', 'folder', 'Second', 'gemini://two', ?, 1)
+                    """,
+                arguments: [Date(), Date()]
+            )
+        }
+
+        let keys: [String?] = try database.read { db in
+            try Optional<String>.fetchAll(db, sql: "SELECT order_key FROM bookmarks ORDER BY position")
+        }
+
+        // New databases migrate before these rows are inserted. The nullable columns keep
+        // pre-refactor repository writes valid until the bookmark cutover stage.
+        XCTAssertEqual(keys, [nil, nil])
+        XCTAssertTrue(try database.read { db in
+            try db.columns(in: "bookmarks").contains { $0.name == "order_key" }
+        })
     }
 
     func testDurableDatabaseReopensWithCommittedData() throws {

@@ -7,7 +7,7 @@ class FileBackedDatabaseTestCase: XCTestCase {
 
     func makeFileBackedDatabase() throws -> MajorTomDatabase {
         let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MajorTomTests-(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("MajorTomTests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true

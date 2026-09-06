@@ -233,6 +233,86 @@ public final class MajorTomDatabase: @unchecked Sendable {
                 table.column("synchronizes_with_icloud", .boolean).notNull()
             }
         }
+        migrator.registerMigration("v6-cloud-sync-refactor") { database in
+            try database.create(table: "cloud_sync_state") { table in
+                table.column("account_identity_hash", .text).primaryKey()
+                table.column("engine_state", .blob)
+                table.column("model_major", .integer).notNull()
+                table.column("migrated_from_v1", .boolean).notNull().defaults(to: false)
+                table.column("migration_phase", .text).notNull()
+                table.column("zone_state", .text).notNull()
+                table.column("favorites_folder_id", .text)
+                table.column("last_fetched_at", .datetime)
+                table.column("last_sent_at", .datetime)
+                table.column("updated_at", .datetime).notNull()
+            }
+            try database.create(table: "cloud_pending_changes") { table in
+                table.column("account_identity_hash", .text).notNull()
+                table.column("record_type", .text).notNull()
+                table.column("record_name", .text).notNull()
+                table.column("operation", .text).notNull()
+                    .check { ["save", "delete"].contains($0) }
+                table.column("generation", .integer).notNull()
+                table.column("payload_digest", .text)
+                table.column("enqueued_at", .datetime).notNull()
+                table.primaryKey(["account_identity_hash", "record_name"])
+            }
+            try database.create(table: "cloud_record_state") { table in
+                table.column("account_identity_hash", .text).notNull()
+                table.column("record_type", .text).notNull()
+                table.column("record_name", .text).notNull()
+                table.column("system_fields", .blob)
+                table.column("server_payload", .blob)
+                table.column("payload_digest", .text)
+                table.column("last_seen_epoch", .integer)
+                table.column("updated_at", .datetime).notNull()
+                table.primaryKey(["account_identity_hash", "record_name"])
+            }
+
+            try database.alter(table: "bookmark_folders") { table in
+                table.add(column: "order_key", .text)
+                table.add(column: "account_identity_hash", .text)
+            }
+            try database.alter(table: "bookmarks") { table in
+                table.add(column: "order_key", .text)
+                table.add(column: "account_identity_hash", .text)
+                table.add(column: "pending_folder_id", .text)
+            }
+
+            let folderIDs = try String.fetchAll(
+                database,
+                sql: "SELECT id FROM bookmark_folders ORDER BY position, id"
+            )
+            for (id, orderKey) in zip(folderIDs, OrderKey.initial(count: folderIDs.count)) {
+                try database.execute(
+                    sql: "UPDATE bookmark_folders SET order_key = ? WHERE id = ?",
+                    arguments: [orderKey, id]
+                )
+            }
+            for folderID in folderIDs {
+                let bookmarkIDs = try String.fetchAll(
+                    database,
+                    sql: "SELECT id FROM bookmarks WHERE folder_id = ? ORDER BY position, id",
+                    arguments: [folderID]
+                )
+                for (id, orderKey) in zip(bookmarkIDs, OrderKey.initial(count: bookmarkIDs.count)) {
+                    try database.execute(
+                        sql: "UPDATE bookmarks SET order_key = ? WHERE id = ?",
+                        arguments: [orderKey, id]
+                    )
+                }
+            }
+            try database.create(
+                index: "bookmark_folders_account_order",
+                on: "bookmark_folders",
+                columns: ["account_identity_hash", "order_key"]
+            )
+            try database.create(
+                index: "bookmarks_account_folder_order",
+                on: "bookmarks",
+                columns: ["account_identity_hash", "folder_id", "order_key"]
+            )
+        }
         return migrator
     }
 }
