@@ -82,4 +82,49 @@ final class BookmarkRepositoryTests: XCTestCase {
         XCTAssertTrue(try repository.collection().allBookmarks.isEmpty)
         try database.validate()
     }
+
+    func testAccountsHaveIndependentBookmarkCollectionsAndOutboxes() throws {
+        let database = try MajorTomDatabase(inMemory: ())
+        let first = BookmarkRepository(database: database, accountIdentityHash: "first")
+        let second = BookmarkRepository(database: database, accountIdentityHash: "second")
+        var firstCollection = BookmarkCollection()
+        firstCollection.add(title: "First", url: URL(string: "gemini://first.example/")!)
+        var secondCollection = BookmarkCollection()
+        secondCollection.add(title: "Second", url: URL(string: "https://second.example/path?q=1")!)
+
+        try first.replace(with: firstCollection)
+        try second.replace(with: secondCollection)
+
+        XCTAssertEqual(try first.collection().allBookmarks.map(\.title), ["First"])
+        XCTAssertEqual(try second.collection().allBookmarks.map(\.title), ["Second"])
+        let cloud = CloudSyncRepository(database: database)
+        XCTAssertEqual(try cloud.pendingChanges(for: "first").count, 2)
+        XCTAssertEqual(try cloud.pendingChanges(for: "second").count, 2)
+    }
+
+    func testRemoteReplacementDoesNotEchoIntoOutbox() throws {
+        let database = try MajorTomDatabase(inMemory: ())
+        let repository = BookmarkRepository(database: database, accountIdentityHash: "account")
+        var collection = BookmarkCollection()
+        collection.add(title: "Remote", url: URL(string: "spartan://example/path")!)
+
+        try repository.replaceFromCloud(with: collection)
+
+        XCTAssertFalse(try CloudSyncRepository(database: database)
+            .hasPendingChanges(for: "account"))
+    }
+
+    func testClaimingRowsMovesUnownedCollectionToFirstAccount() throws {
+        let database = try MajorTomDatabase(inMemory: ())
+        let unowned = BookmarkRepository(database: database)
+        var collection = BookmarkCollection()
+        collection.add(title: "Existing", url: URL(string: "gemini://existing.example/")!)
+        try unowned.replace(with: collection)
+
+        let account = BookmarkRepository(database: database, accountIdentityHash: "account")
+        try account.claimUnownedRows()
+
+        XCTAssertEqual(try account.collection().allBookmarks.map(\.title), ["Existing"])
+        XCTAssertTrue(try unowned.collection().allBookmarks.isEmpty)
+    }
 }

@@ -24,8 +24,11 @@ public actor BookmarkStore {
         }
     }
 
-    public init(database: MajorTomDatabase) throws {
-        let repository = BookmarkRepository(database: database)
+    public init(database: MajorTomDatabase, accountIdentityHash: String? = nil) throws {
+        let repository = BookmarkRepository(
+            database: database,
+            accountIdentityHash: accountIdentityHash
+        )
         backend = .sqlite(repository)
         current = try repository.collection()
     }
