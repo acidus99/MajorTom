@@ -48,38 +48,6 @@ public struct CloudClientCertificateAssociationPayload: CloudSyncPayload, Equata
     public init(_ association: ClientCertificateAssociation) { self.association = association }
 }
 
-public struct ServerTrustSyncRepository: Sendable {
-    private let database: MajorTomDatabase
-
-    public init(database: MajorTomDatabase) { self.database = database }
-
-    public func load() throws -> SyncedServerTrust {
-        let decoder = JSONDecoder()
-        return try database.read { db in
-            SyncedServerTrust(decisions: try Data.fetchAll(
-                db,
-                sql: "SELECT payload FROM server_trust_sync ORDER BY id"
-            ).compactMap { try? decoder.decode(SyncedServerTrustDecision.self, from: $0) })
-        }
-    }
-
-    public func save(_ state: SyncedServerTrust) throws {
-        try saveRecords(
-            state.decisions,
-            table: "server_trust_sync",
-            id: { $0.id },
-            modifiedAt: { $0.modifiedAt },
-            database: database
-        )
-    }
-
-    public func importLegacy(_ state: SyncedServerTrust) throws {
-        try importOnce(marker: "legacy-server-trust-sync-v1-imported", database: database) {
-            try save(state)
-        }
-    }
-}
-
 public struct ClientCertificateSyncRepository: Sendable {
     private let database: MajorTomDatabase
     private let accountIdentityHash: String?
@@ -235,18 +203,6 @@ private func updateLocalFlags(
             sql: "DELETE FROM client_certificate_local_flags WHERE id = ? AND account_identity_hash IS ?",
             arguments: [id.uuidString, account]
         )
-    }
-}
-
-private func saveRecords<Record: Encodable>(
-    _ records: [Record],
-    table: String,
-    id: (Record) -> String,
-    modifiedAt: (Record) -> Date,
-    database: MajorTomDatabase
-) throws {
-    try database.write { db in
-        try updateRecords(records, table: table, id: id, modifiedAt: modifiedAt, in: db)
     }
 }
 

@@ -418,7 +418,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
 
 @available(macOS 26.0, *)
 @MainActor
-private final class NativeTabCoordinator {
+final class NativeTabCoordinator {
     static let shared = NativeTabCoordinator()
     static let tabbingIdentifier = "com.acidus.majortom.browser"
 

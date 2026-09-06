@@ -312,7 +312,8 @@ public final class MajorTomDatabase: @unchecked Sendable {
                 on: "bookmarks",
                 columns: ["account_identity_hash", "folder_id", "order_key"]
             )
-
+        }
+        migrator.registerMigration("v7-cloud-certificate-metadata") { database in
             try database.rename(
                 table: "client_certificate_sync_descriptors",
                 to: "client_certificates"

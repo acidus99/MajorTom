@@ -15,17 +15,16 @@ final class BookmarksModel: ObservableObject {
     /// Favicons already in the cache, for decorating bookmark lists.
     @Published private(set) var favicons: [CapsuleEndpoint: String] = [:]
 
-    private let store: BookmarkStore?
+    private var store: BookmarkStore?
+    private let database: MajorTomDatabase?
     private let legacyFileURL: URL?
-    private let defaults = UserDefaults.standard
-    private let syncStorageKey = "bookmarks-cloud-metadata-v1"
-    private let syncRepository: BookmarkSyncRepository?
     private var syncState: SyncedBookmarks?
     private var cloudObserver: AnyCancellable?
+    private var accountObserver: AnyCancellable?
 
     init() {
         let database = SharedMajorTomDatabase.shared
-        syncRepository = database.map(BookmarkSyncRepository.init(database:))
+        self.database = database
         if let root = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
@@ -35,7 +34,9 @@ final class BookmarksModel: ObservableObject {
                 .appendingPathComponent("bookmarks.json")
             legacyFileURL = fileURL
             if let database {
-                store = try? BookmarkStore(database: database)
+                let account = try? CloudSyncRepository(database: database)
+                    .activeAccountIdentityHash()
+                store = try? BookmarkStore(database: database, accountIdentityHash: account)
             } else {
                 store = BookmarkStore(fileURL: fileURL)
             }
@@ -45,6 +46,11 @@ final class BookmarksModel: ObservableObject {
         }
         cloudObserver = ICloudSyncStore.shared.receivedBookmarks.sink { [weak self] state in
             Task { await self?.applyCloudState(state) }
+        }
+        accountObserver = ICloudSyncStore.shared.activeAccountChanged.sink { [weak self] account in
+            guard let self, let database = self.database else { return }
+            self.store = try? BookmarkStore(database: database, accountIdentityHash: account)
+            Task { await self.reload() }
         }
         Task { [weak self] in await self?.reload() }
     }
@@ -214,28 +220,7 @@ final class BookmarksModel: ObservableObject {
         let localCollection = await store.collection()
         collection = localCollection
 
-        if let data = defaults.data(forKey: syncStorageKey),
-           let legacy = try? JSONDecoder().decode(SyncedBookmarks.self, from: data),
-           let syncRepository,
-           (try? syncRepository.importLegacyState(legacy)) != nil {
-            defaults.removeObject(forKey: syncStorageKey)
-        }
-
-        let storedSyncState: SyncedBookmarks?
-        if let syncRepository {
-            storedSyncState = (try? syncRepository.state()) ?? nil
-        } else {
-            storedSyncState = nil
-        }
-        if let stored = storedSyncState {
-            syncState = stored.reconciled(with: localCollection, at: Date())
-        } else if let data = defaults.data(forKey: syncStorageKey),
-                  let stored = try? JSONDecoder().decode(SyncedBookmarks.self, from: data) {
-            syncState = stored.reconciled(with: localCollection, at: Date())
-        } else {
-            syncState = SyncedBookmarks(collection: localCollection, modifiedAt: Date())
-        }
-        persistSyncState()
+        syncState = SyncedBookmarks(collection: localCollection, modifiedAt: Date())
         ICloudSyncStore.shared.configure(bookmarks: syncState)
     }
 
@@ -293,12 +278,6 @@ final class BookmarksModel: ObservableObject {
     }
 
     private func persistSyncState() {
-        guard let syncState else { return }
-        if let syncRepository {
-            try? syncRepository.replace(with: syncState)
-            return
-        }
-        guard let data = try? JSONEncoder().encode(syncState) else { return }
-        defaults.set(data, forKey: syncStorageKey)
+        // Record-level rows and the transactional outbox are the durable sync state.
     }
 }

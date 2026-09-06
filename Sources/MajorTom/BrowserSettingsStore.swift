@@ -37,6 +37,7 @@ final class BrowserSettingsStore: ObservableObject {
     private var modifiedAt: Date
     private var isApplyingRemotePreferences = false
     private var iCloudObserver: AnyCancellable?
+    private var iCloudAccountObserver: AnyCancellable?
     private var uploadTask: Task<Void, Never>?
     private var persistTask: Task<Void, Never>?
 
@@ -69,6 +70,10 @@ final class BrowserSettingsStore: ObservableObject {
 
         iCloudObserver = ICloudSyncStore.shared.receivedPreferences.sink { [weak self] snapshot in
             self?.apply(snapshot)
+        }
+        iCloudAccountObserver = ICloudSyncStore.shared.receivedAccountPreferences.sink {
+            [weak self] snapshot in
+            self?.apply(snapshot, force: true)
         }
         let localSnapshot = storedData == nil ? nil : SyncedBrowserPreferences(
             preferences: preferences,
@@ -117,9 +122,9 @@ final class BrowserSettingsStore: ObservableObject {
         }
     }
 
-    private func apply(_ snapshot: SyncedBrowserPreferences) {
+    private func apply(_ snapshot: SyncedBrowserPreferences, force: Bool = false) {
         let local = SyncedBrowserPreferences(preferences: preferences, modifiedAt: modifiedAt)
-        guard snapshot.shouldReplace(local) else { return }
+        guard force || snapshot.shouldReplace(local) else { return }
         uploadTask?.cancel()
         modifiedAt = snapshot.modifiedAt
         isApplyingRemotePreferences = true

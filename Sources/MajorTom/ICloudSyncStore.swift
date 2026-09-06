@@ -36,6 +36,8 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     @Published private(set) var remoteTabDevices: [CloudTabDeviceSnapshot] = []
 
     let receivedPreferences = PassthroughSubject<SyncedBrowserPreferences, Never>()
+    let receivedAccountPreferences = PassthroughSubject<SyncedBrowserPreferences, Never>()
+    let activeAccountChanged = PassthroughSubject<String, Never>()
     let receivedClientCertificates = PassthroughSubject<ClientCertificateSyncState, Never>()
     let receivedBookmarks = PassthroughSubject<SyncedBookmarks, Never>()
 
@@ -82,7 +84,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         localDeviceName = Host.current().localizedName ?? "Mac"
         localDatabase = SharedMajorTomDatabase.shared
         repository = localDatabase.map(CloudSyncRepository.init(database:))
-        if Self.hasCloudKitEntitlement {
+        if Self.hasRequiredEntitlements {
             let value = CKContainer(identifier: "iCloud.dev.gemi.major-tom")
             container = value
             cloudDatabase = value.privateCloudDatabase
@@ -94,6 +96,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             ))
         }
         super.init()
+        activeAccount = try? repository?.activeAccountIdentityHash()
 
         if let data = defaults.data(forKey: Self.cachedTabsKey),
            let cached = try? decoder.decode([CloudTabDeviceSnapshot].self, from: data) {
@@ -120,6 +123,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         localPreferences = snapshot
         if let data = try? encoder.encode(snapshot) {
             NSUbiquitousKeyValueStore.default.set(data, forKey: "browser-preferences-v2")
+            if let account = activeAccount {
+                defaults.set(data, forKey: "browser-preferences-v2-\(account)")
+            }
         }
         NSUbiquitousKeyValueStore.default.synchronize()
     }
@@ -210,17 +216,21 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     private func activateAccount(_ account: String) async throws {
         guard let repository, let cloudDatabase else { return }
         let priorActive = try repository.activeAccountIdentityHash()
-        activeAccount = account
-        try repository.saveActiveAccountIdentityHash(account)
         var state = try repository.state(for: account)
 
         if state.migrationPhase != .ready {
             status = .syncing
-            try BookmarkRepository(database: localDatabase!, accountIdentityHash: account)
-                .claimUnownedRows()
-            try ClientCertificateSyncRepository(database: localDatabase!, accountIdentityHash: account)
-                .claimUnownedRows()
+            if priorActive == nil {
+                try BookmarkRepository(database: localDatabase!, accountIdentityHash: account)
+                    .claimUnownedRows()
+                try ClientCertificateSyncRepository(database: localDatabase!, accountIdentityHash: account)
+                    .claimUnownedRows()
+            }
             try await importV1Once(account: account)
+            let bookmarkRepository = BookmarkRepository(
+                database: localDatabase!, accountIdentityHash: account
+            )
+            try bookmarkRepository.replace(with: bookmarkRepository.collection())
             // Existing experimental v2 data is intentionally disposable. Reset this zone
             // before publishing the new manifest so older v2 builds can never alter it.
             _ = try? await cloudDatabase.modifyRecordZones(saving: [], deleting: [zoneID])
@@ -242,9 +252,14 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
                 operation: .save
             ))
             enqueueAllLocalData(for: account)
-        } else if priorActive != account {
+        }
+        activeAccount = account
+        try repository.saveActiveAccountIdentityHash(account)
+        activeAccountChanged.send(account)
+        if priorActive != nil, priorActive != account {
             publishAccountDataset(account)
         }
+        publishAccountPreferences(account, isSwitch: priorActive != nil && priorActive != account)
 
         let restored = try repository.state(for: account).engineState.flatMap {
             try? decoder.decode(CKSyncEngine.State.Serialization.self, from: $0)
@@ -312,7 +327,6 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             let merged = local.merging(incoming)
             try repository.replace(with: merged.collection)
             localBookmarks = merged
-            receivedBookmarks.send(merged)
         }
         if !certificates.isEmpty || !associations.isEmpty {
             let incoming = ClientCertificateSyncState(
@@ -327,7 +341,6 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             let merged = loaded.state.merging(incoming)
             try repository.save(merged, localFlags: loaded.localFlags)
             localClientCertificates = merged
-            receivedClientCertificates.send(merged)
         }
     }
 
@@ -357,16 +370,6 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     }
 
     private func enqueueAllLocalData(for account: String) {
-        if let localBookmarks { persistBookmarks(localBookmarks, account: account) }
-        else if let localDatabase,
-                let collection = try? BookmarkRepository(database: localDatabase, accountIdentityHash: account).collection() {
-            persistBookmarks(SyncedBookmarks(collection: collection, modifiedAt: Date()), account: account)
-        }
-        if let localClientCertificates { persistCertificates(localClientCertificates, account: account) }
-        else if let localDatabase,
-                let state = try? ClientCertificateSyncRepository(database: localDatabase, accountIdentityHash: account).load().state {
-            persistCertificates(state, account: account)
-        }
         guard let repository, let localDatabase else { return }
         if let collection = try? BookmarkRepository(
             database: localDatabase, accountIdentityHash: account
@@ -505,6 +508,11 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
 
     func handleEvent(_ event: CKSyncEngine.Event, syncEngine: CKSyncEngine) async {
         do {
+            if case .accountChange = event {
+                // Account events are allowed to replace the current engine below.
+            } else if engine !== syncEngine {
+                return
+            }
             switch event {
             case .stateUpdate(let update):
                 guard let account = activeAccount else { return }
@@ -515,7 +523,6 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
                 case .signIn(let current): id = current
                 case .switchAccounts(_, let current): id = current
                 case .signOut:
-                    activeAccount = nil
                     engine = nil
                     status = .unavailable(Self.unsavedWarning("Sign in to iCloud to sync"))
                     return
@@ -878,7 +885,27 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
               let value = try? decoder.decode(SyncedBrowserPreferences.self, from: data),
               value.shouldReplace(localPreferences) else { return }
         localPreferences = value
+        if let account = activeAccount {
+            defaults.set(data, forKey: "browser-preferences-v2-\(account)")
+        }
         receivedPreferences.send(value)
+    }
+
+    private func publishAccountPreferences(_ account: String, isSwitch: Bool) {
+        let cached = defaults.data(forKey: "browser-preferences-v2-\(account)")
+            .flatMap { try? decoder.decode(SyncedBrowserPreferences.self, from: $0) }
+        if let cached {
+            localPreferences = cached
+            if isSwitch { receivedAccountPreferences.send(cached) }
+            else { receivedPreferences.send(cached) }
+        } else if isSwitch {
+            let value = SyncedBrowserPreferences(
+                preferences: BrowserPreferences(), modifiedAt: .distantPast
+            )
+            localPreferences = value
+            receivedAccountPreferences.send(value)
+        }
+        NSUbiquitousKeyValueStore.default.synchronize()
     }
 
     private static func accountStatusDescription(_ status: CKAccountStatus) -> String {
@@ -896,11 +923,15 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         "\(reason). Bookmarks and identities are saved on this Mac but are not syncing."
     }
 
-    private static var hasCloudKitEntitlement: Bool {
+    private static var hasRequiredEntitlements: Bool {
         guard let task = SecTaskCreateFromSelf(nil),
               let identifiers = SecTaskCopyValueForEntitlement(
                 task, "com.apple.developer.icloud-container-identifiers" as CFString, nil
-              ) as? [String] else { return false }
+              ) as? [String],
+              SecTaskCopyValueForEntitlement(task, "aps-environment" as CFString, nil) != nil,
+              SecTaskCopyValueForEntitlement(
+                task, "com.apple.developer.ubiquity-kvstore-identifier" as CFString, nil
+              ) != nil else { return false }
         return identifiers.contains("iCloud.dev.gemi.major-tom")
     }
 

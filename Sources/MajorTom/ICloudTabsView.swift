@@ -23,12 +23,15 @@ struct ICloudTabsView: View {
                                         object: tab.url
                                     )
                                 } label: {
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(tab.title).lineLimit(1)
-                                        Text(tab.url.absoluteString)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(1)
+                                    HStack(alignment: .top, spacing: 8) {
+                                        if let favicon = tab.favicon { Text(favicon) }
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(tab.title).lineLimit(1)
+                                            Text(tab.url.absoluteString)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
                                     .contentShape(Rectangle())
@@ -50,7 +53,10 @@ struct ICloudTabsView: View {
         .navigationTitle("iCloud Tabs")
         .toolbar {
             ToolbarItem {
-                Button("Refresh", systemImage: "arrow.clockwise") { cloud.refresh() }
+                Button("Refresh", systemImage: "arrow.clockwise") {
+                    NativeTabCoordinator.shared.publishCloudTabsIfNeeded()
+                    cloud.refresh()
+                }
             }
         }
         .safeAreaInset(edge: .bottom) {
@@ -65,7 +71,10 @@ struct ICloudTabsView: View {
             .padding(.vertical, 8)
             .background(.bar)
         }
-        .task { cloud.refresh() }
+        .task {
+            NativeTabCoordinator.shared.publishCloudTabsIfNeeded()
+            cloud.refresh()
+        }
     }
 
     private var emptyDescription: String {

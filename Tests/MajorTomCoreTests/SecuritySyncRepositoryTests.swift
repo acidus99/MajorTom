@@ -31,23 +31,6 @@ final class SecuritySyncRepositoryTests: XCTestCase {
         XCTAssertEqual(loaded?.publicKeySHA256, presented.publicKeySHA256)
     }
 
-    func testServerTrustSyncTombstoneRoundTrips() throws {
-        let database = try MajorTomDatabase(inMemory: ())
-        let repository = ServerTrustSyncRepository(database: database)
-        let date = Date(timeIntervalSince1970: 50)
-        let decision = SyncedServerTrustDecision(
-            endpoint: CapsuleEndpoint(host: "example.com", port: 1_965),
-            publicKeySHA256: String(repeating: "d", count: 64),
-            firstTrustedAt: date,
-            modifiedAt: date,
-            deletedAt: date
-        )
-
-        try repository.save(SyncedServerTrust(decisions: [decision]))
-
-        XCTAssertEqual(try repository.load(), SyncedServerTrust(decisions: [decision]))
-    }
-
     func testClientCertificateMetadataAndLocalFlagRoundTrip() throws {
         let database = try MajorTomDatabase(inMemory: ())
         let repository = ClientCertificateSyncRepository(database: database)

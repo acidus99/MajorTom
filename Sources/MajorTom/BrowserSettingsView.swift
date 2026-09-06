@@ -55,7 +55,10 @@ struct BrowserSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
                 HStack {
-                    Button("Sync Now") { cloud.refresh() }
+                    Button("Sync Now") {
+                        NativeTabCoordinator.shared.publishCloudTabsIfNeeded()
+                        cloud.refresh()
+                    }
                     if cloud.status == .removed {
                         Button("Re-upload This Mac’s Data…") {
                             cloud.reuploadAfterCloudDataRemoval()

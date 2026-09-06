@@ -24,7 +24,8 @@ final class ClientCertificateStore: ObservableObject {
 
     private let defaults: UserDefaults
     private let keychain: ClientCertificateKeychain
-    private let repository: ClientCertificateSyncRepository?
+    private var repository: ClientCertificateSyncRepository?
+    private let database: MajorTomDatabase?
     private let storageKey = "client-certificates-v1"
     private let syncStorageKey = "client-certificate-sync-state-v2"
     private let localStorageFlagsKey = "client-certificate-local-storage-v1"
@@ -32,6 +33,7 @@ final class ClientCertificateStore: ObservableObject {
     private var localSynchronizationFlags: [UUID: Bool] = [:]
     private var isApplyingRemote = false
     private var cloudObserver: AnyCancellable?
+    private var accountObserver: AnyCancellable?
     private var uploadTask: Task<Void, Never>?
     private var managerSelectionRequest: UUID?
     private var identityCache: [UUID: ClientTLSIdentity] = [:]
@@ -44,7 +46,13 @@ final class ClientCertificateStore: ObservableObject {
     ) {
         self.defaults = defaults
         self.keychain = keychain
-        repository = database.map { ClientCertificateSyncRepository(database: $0) }
+        self.database = database
+        let activeAccount = database.flatMap {
+            try? CloudSyncRepository(database: $0).activeAccountIdentityHash()
+        }
+        repository = database.map {
+            ClientCertificateSyncRepository(database: $0, accountIdentityHash: activeAccount)
+        }
         localSynchronizationFlags = (defaults.dictionary(forKey: localStorageFlagsKey) ?? [:])
             .reduce(into: [:]) { result, entry in
                 if let id = UUID(uuidString: entry.key), let value = entry.value as? Bool {
@@ -95,12 +103,30 @@ final class ClientCertificateStore: ObservableObject {
         cloudObserver = ICloudSyncStore.shared.receivedClientCertificates.sink { [weak self] state in
             self?.apply(state)
         }
+        accountObserver = ICloudSyncStore.shared.activeAccountChanged.sink { [weak self] account in
+            self?.switchAccount(to: account)
+        }
         persist(syncState)
         ICloudSyncStore.shared.configure(
             clientCertificates: syncState.certificates.isEmpty && syncState.associations.isEmpty
                 ? nil
                 : syncState
         )
+        refreshAvailability()
+    }
+
+    private func switchAccount(to account: String) {
+        guard let database else { return }
+        let next = ClientCertificateSyncRepository(
+            database: database, accountIdentityHash: account
+        )
+        repository = next
+        guard let loaded = try? next.load() else { return }
+        syncState = loaded.state
+        localSynchronizationFlags = loaded.localFlags
+        certificates = loaded.state.activeCertificates(preservingLocalStorageFrom: certificates)
+        associations = loaded.state.activeAssociations
+        applyLocalStorageFlags()
         refreshAvailability()
     }
 
