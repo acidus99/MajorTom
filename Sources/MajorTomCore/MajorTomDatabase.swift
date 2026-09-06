@@ -312,6 +312,40 @@ public final class MajorTomDatabase: @unchecked Sendable {
                 on: "bookmarks",
                 columns: ["account_identity_hash", "folder_id", "order_key"]
             )
+
+            try database.rename(
+                table: "client_certificate_sync_descriptors",
+                to: "client_certificates"
+            )
+            try database.rename(
+                table: "client_certificate_sync_associations",
+                to: "client_certificate_associations"
+            )
+            try database.alter(table: "client_certificates") { table in
+                table.add(column: "account_identity_hash", .text)
+            }
+            try database.alter(table: "client_certificate_associations") { table in
+                table.add(column: "account_identity_hash", .text)
+                table.add(column: "pending_certificate_id", .text)
+            }
+            try database.alter(table: "client_certificate_local_flags") { table in
+                table.add(column: "account_identity_hash", .text)
+            }
+            // Retained only as a v1 migration source. The column lets the compatibility
+            // repository continue to read old rows without participating in v2 sync.
+            try database.alter(table: "server_trust_sync") { table in
+                table.add(column: "account_identity_hash", .text)
+            }
+            try database.create(
+                index: "client_certificates_account",
+                on: "client_certificates",
+                columns: ["account_identity_hash"]
+            )
+            try database.create(
+                index: "client_certificate_associations_account",
+                on: "client_certificate_associations",
+                columns: ["account_identity_hash"]
+            )
         }
         return migrator
     }

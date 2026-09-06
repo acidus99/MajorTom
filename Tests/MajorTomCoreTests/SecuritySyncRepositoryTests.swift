@@ -78,6 +78,59 @@ final class SecuritySyncRepositoryTests: XCTestCase {
         XCTAssertEqual(loaded.localFlags, [id: false])
     }
 
+    func testCertificateRowsAndDeletesShareTheAccountOutbox() throws {
+        let database = try MajorTomDatabase(inMemory: ())
+        let repository = ClientCertificateSyncRepository(
+            database: database,
+            accountIdentityHash: "account"
+        )
+        let id = UUID()
+        let descriptor = ClientCertificateDescriptor(
+            id: id,
+            commonName: "Identity",
+            notBefore: .distantPast,
+            notAfter: .distantFuture,
+            certificateSHA256: String(repeating: "a", count: 64),
+            publicKeySHA256: String(repeating: "b", count: 64)
+        )
+        let state = ClientCertificateSyncState().reconciled(
+            certificates: [descriptor], associations: [], at: Date(timeIntervalSince1970: 10)
+        )
+        try repository.save(state, localFlags: [id: true])
+
+        var pending = try CloudSyncRepository(database: database).pendingChanges(for: "account")
+        XCTAssertEqual(pending.map(\.operation), [.save])
+
+        try repository.save(ClientCertificateSyncState(), localFlags: [:])
+        pending = try CloudSyncRepository(database: database).pendingChanges(for: "account")
+        XCTAssertEqual(pending.map(\.operation), [.delete])
+        XCTAssertTrue(try repository.load().state.certificates.isEmpty)
+    }
+
+    func testUnchangedLocalFlagsDoNotRewriteEveryRow() throws {
+        let database = try MajorTomDatabase(inMemory: ())
+        let repository = ClientCertificateSyncRepository(database: database)
+        let id = UUID()
+        try repository.save(ClientCertificateSyncState(), localFlags: [id: true])
+        let before = try database.read { try Int.fetchOne($0, sql: "SELECT total_changes()")! }
+
+        try repository.save(ClientCertificateSyncState(), localFlags: [id: true])
+
+        let after = try database.read { try Int.fetchOne($0, sql: "SELECT total_changes()")! }
+        XCTAssertEqual(after, before)
+    }
+
+    func testFetchedCertificateMetadataDoesNotEcho() throws {
+        let database = try MajorTomDatabase(inMemory: ())
+        let repository = ClientCertificateSyncRepository(
+            database: database,
+            accountIdentityHash: "account"
+        )
+        try repository.saveFromCloud(ClientCertificateSyncState(), localFlags: [:])
+        XCTAssertFalse(try CloudSyncRepository(database: database)
+            .hasPendingChanges(for: "account"))
+    }
+
     private func identity(host: String, fingerprint: String) -> TrustedServerIdentity {
         TrustedServerIdentity(
             endpoint: CapsuleEndpoint(host: host, port: 1_965),
