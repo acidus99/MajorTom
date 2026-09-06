@@ -333,9 +333,10 @@ Written here so the rule survives the implementer:
 
 ## 5. Local schema changes
 
-All in `Sources/MajorTomCore/MajorTomDatabase.swift`, as a new migration
-`v6-cloud-sync-refactor`. GRDB migrations are transactional; this one must be safe to
-interrupt and re-run.
+All in `Sources/MajorTomCore/MajorTomDatabase.swift`. Core sync state and bookmark columns
+ship in `v6-cloud-sync-refactor`; certificate table changes ship in the following
+`v7-cloud-certificate-metadata` migration so running an intermediate refactor commit and then
+updating remains safe. GRDB migrations are transactional and safe to interrupt.
 
 ### 5.1 New tables
 
@@ -403,6 +404,8 @@ Leave the `position` columns in place for this migration — dropping them is a 
 later migration once the new ordering is proven. Stop reading them.
 
 ### 5.3 Renamed tables
+
+These changes are the `v7-cloud-certificate-metadata` migration.
 
 ```sql
 ALTER TABLE client_certificate_sync_descriptors  RENAME TO client_certificates;
