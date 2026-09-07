@@ -74,116 +74,51 @@ final class GeminiFaviconTests: XCTestCase {
     func testPathIsAtTheServerRoot() {
         XCTAssertEqual(GeminiFavicon.path, "/favicon.txt")
     }
-}
 
-final class FaviconStoreTests: XCTestCase {
-    private let endpoint = CapsuleEndpoint(host: "example.com", port: 1_965)
-    private var directory: URL!
-
-    override func setUpWithError() throws {
-        directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("MajorTomFaviconTests-\(UUID().uuidString)", isDirectory: true)
+    func testCompleteSuccessfulPlainTextResponseIsValidated() {
+        let response = ContentResponse(
+            url: URL(string: "gemini://example.com/favicon.txt")!,
+            status: 20,
+            meta: Data("text/plain; charset=utf-8".utf8),
+            mimeType: "text/plain",
+            body: Data("🚀\n".utf8),
+            receivedAt: Date()
+        )
+        XCTAssertEqual(GeminiFavicon.parse(response: response), "🚀")
     }
 
-    override func tearDownWithError() throws {
-        try? FileManager.default.removeItem(at: directory)
+    func testResponseRequiresSuccessPlainTextAndUTF8() {
+        let url = URL(string: "gemini://example.com/favicon.txt")!
+        for response in [
+            ContentResponse(url: url, status: 51, meta: Data(), mimeType: nil, body: Data(), receivedAt: Date()),
+            ContentResponse(url: url, status: 20, meta: Data("image/png".utf8), mimeType: "image/png", body: Data("🚀".utf8), receivedAt: Date()),
+            ContentResponse(url: url, status: 20, meta: Data("text/plain".utf8), mimeType: "text/plain", body: Data([0xFF]), receivedAt: Date())
+        ] {
+            XCTAssertNil(GeminiFavicon.parse(response: response))
+        }
     }
 
-    private func makeStore(lifetime: TimeInterval = FaviconStore.defaultLifetime) -> FaviconStore {
-        FaviconStore(fileURL: directory.appendingPathComponent("favicons.json"), lifetime: lifetime)
+    func testFaviconURLUsesEndpointAndOmitsDefaultPort() {
+        XCTAssertEqual(
+            GeminiFavicon.url(for: CapsuleEndpoint(host: "example.com", port: 1_965))?.absoluteString,
+            "gemini://example.com/favicon.txt"
+        )
+        XCTAssertEqual(
+            GeminiFavicon.url(for: CapsuleEndpoint(host: "example.com", port: 1_966))?.absoluteString,
+            "gemini://example.com:1966/favicon.txt"
+        )
     }
 
-    func testUnprobedCapsuleIsUnknown() async {
-        let store = makeStore()
-        let lookup = await store.favicon(for: endpoint)
-        XCTAssertEqual(lookup, .unknown)
-    }
+    func testNegativeResponseRepresentsNoAcceptableFavicon() {
+        let url = URL(string: "gemini://example.com/favicon.txt")!
+        let receivedAt = Date(timeIntervalSince1970: 1_000)
+        let response = GeminiFavicon.negativeResponse(for: url, receivedAt: receivedAt)
 
-    func testRecordedFaviconIsReturned() async throws {
-        let store = makeStore()
-        try await store.record("\u{1F346}", for: endpoint)
-        let lookup = await store.favicon(for: endpoint)
-        XCTAssertEqual(lookup, .known("\u{1F346}"))
-    }
-
-    func testFreshRecordPreservesObservationTimeAndKnownAbsence() async throws {
-        let store = makeStore()
-        let date = Date(timeIntervalSince1970: 1_000)
-        try await store.record(nil, for: endpoint, at: date)
-        let record = await store.freshRecord(for: endpoint, now: date.addingTimeInterval(1))
-        XCTAssertEqual(record, FaviconRecord(endpoint: endpoint, emoji: nil, fetchedAt: date))
-    }
-
-    /// The RFC asks that "no favicon" be remembered, so the capsule is not re-probed on
-    /// every page view.
-    func testAbsenceIsRemembered() async throws {
-        let store = makeStore()
-        try await store.record(nil, for: endpoint)
-        let lookup = await store.favicon(for: endpoint)
-        XCTAssertEqual(lookup, .absent)
-    }
-
-    func testExpiredRecordBecomesUnknownAgain() async throws {
-        let store = makeStore(lifetime: 60)
-        try await store.record("\u{1F346}", for: endpoint, at: Date(timeIntervalSince1970: 1_000))
-        let stale = await store.favicon(for: endpoint, now: Date(timeIntervalSince1970: 1_100))
-        XCTAssertEqual(stale, .unknown)
-        let fresh = await store.favicon(for: endpoint, now: Date(timeIntervalSince1970: 1_030))
-        XCTAssertEqual(fresh, .known("\u{1F346}"))
-    }
-
-    func testExpiredAbsenceIsProbedAgain() async throws {
-        let store = makeStore(lifetime: 60)
-        try await store.record(nil, for: endpoint, at: Date(timeIntervalSince1970: 1_000))
-        let stale = await store.favicon(for: endpoint, now: Date(timeIntervalSince1970: 1_100))
-        XCTAssertEqual(stale, .unknown)
-    }
-
-    func testRecordsSurviveReopening() async throws {
-        let store = makeStore()
-        try await store.record("\u{1F680}", for: endpoint)
-
-        let reopened = makeStore()
-        let lookup = await reopened.favicon(for: endpoint)
-        XCTAssertEqual(lookup, .known("\u{1F680}"))
-    }
-
-    /// A host on another port is a different server per the RFC, so it gets its own entry.
-    func testPortIsPartOfTheIdentity() async throws {
-        let store = makeStore()
-        try await store.record("\u{1F346}", for: endpoint)
-        let other = await store.favicon(for: CapsuleEndpoint(host: "example.com", port: 1_966))
-        XCTAssertEqual(other, .unknown)
-    }
-
-    func testClearingRemovesEverything() async throws {
-        let store = makeStore()
-        try await store.record("\u{1F346}", for: endpoint)
-        try await store.removeAll()
-        let lookup = await store.favicon(for: endpoint)
-        XCTAssertEqual(lookup, .unknown)
-        let count = await store.recordCount()
-        XCTAssertEqual(count, 0)
-    }
-
-    func testClearingPersists() async throws {
-        let store = makeStore()
-        try await store.record("\u{1F346}", for: endpoint)
-        try await store.removeAll()
-
-        let reopened = makeStore()
-        let count = await reopened.recordCount()
-        XCTAssertEqual(count, 0)
-    }
-
-    func testKnownFaviconsExcludeAbsentAndStaleEntries() async throws {
-        let store = makeStore(lifetime: 60)
-        let base = Date(timeIntervalSince1970: 1_000)
-        try await store.record("\u{1F346}", for: endpoint, at: base)
-        try await store.record(nil, for: CapsuleEndpoint(host: "none.example", port: 1_965), at: base)
-        try await store.record("\u{1F680}", for: CapsuleEndpoint(host: "old.example", port: 1_965), at: Date(timeIntervalSince1970: 0))
-
-        let known = await store.knownFavicons(now: base.addingTimeInterval(10))
-        XCTAssertEqual(known, [endpoint: "\u{1F346}"])
+        XCTAssertEqual(response.url, url)
+        XCTAssertEqual(response.status, 51)
+        XCTAssertTrue(response.meta.isEmpty)
+        XCTAssertNil(response.mimeType)
+        XCTAssertTrue(response.body.isEmpty)
+        XCTAssertEqual(response.receivedAt, receivedAt)
     }
 }

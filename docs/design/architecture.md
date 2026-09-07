@@ -126,7 +126,7 @@ remote metadata deletion never deletes Keychain material.
 | Global browsing history | SQLite URL row | Local only, one-year retention |
 | Window/tab session, Back/Forward entries, response snapshots, cursor, zoom, reading state | Standalone `MajorTomBackForward.db` rows | Local only |
 | Cancelled Gemini input draft | SQLite prompt-URL row | Local only, fourteen-day expiry |
-| Capsule favicon probe cache | Small local JSON cache | Local only; a bookmark carries its last observation separately |
+| Reusable Gemini image and favicon responses | Standalone `ContentCache.db` rows | Local only; a bookmark carries its last favicon observation separately |
 | Downloads and explicitly saved pages | User-selected filesystem location | Outside app sync |
 
 `UserDefaults` is an on-disk preferences plist owned by macOS, not a network service. Major Tom
@@ -160,9 +160,29 @@ final normalized session save complete. The standalone pool then performs a trun
 checkpoint, closes, and removes the disconnected `-wal` and `-shm` files; crash recovery
 retains SQLite's normal companion-file behavior.
 
-The older URL-keyed `page_cache` is not a Back/Forward source. A future resource-cache design
-will decide general response reuse, associated resources, omnibar indexing, offline behavior,
-and eviction independently of the per-visit history model.
+Reusable network responses live separately in `ContentCache.db`, keyed only by URL. The
+cache is a passive store: callers ask for a fresh complete response, remove one, or store one
+with a fixed lifetime and a caller-supplied resource type. It never initiates a request and
+never decides cache policy. Each row preserves status, exact meta bytes, reporting MIME type,
+exact body bytes, original receipt time, expiration, and last access. Entries are limited to
+16 MiB, the store is limited to 256 MiB, and least-recently-used responses are evicted when
+necessary.
+
+Gemini cache policy is deliberately small. Completed successful image responses fetched from
+Gemini URLs are reusable for 24 hours. A capsule's completed `/favicon.txt` response is first
+validated by the favicon feature; valid responses and synthetic `51 NOT FOUND` responses for
+all completed unacceptable answers are retained for 30 days. Incomplete or failed favicon
+requests create no entry. Reload skips the content cache for the page and its inline images
+and removes any matching stored response before requesting it again. Cache writes are ordered
+off the UI path, then flushed before orderly termination; the database is checkpointed and
+closed like the Back/Forward database.
+
+Stored Gemini responses replay header, body, and completion events through the same consumer
+used by live transport responses. This is a narrow compatibility boundary, not a universal
+protocol-neutral streaming framework. The policy can remain a no-op for future protocols
+until their own reuse rules are justified. The older `page_cache` table is inert and is not
+used by either cache. Omnibar indexing and purposeful offline browsing remain separate future
+systems.
 
 ## Presentation boundary
 

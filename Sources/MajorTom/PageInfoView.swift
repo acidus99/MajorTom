@@ -10,6 +10,8 @@ struct PageInformation: Identifiable {
     var meta: String
     var byteCount: Int
     var mimeType: String
+    var responseWasCached: Bool?
+    var responseReceivedAt: Date?
     /// Absent for a local file, a generated error page, or a page restored from cache
     /// without reconnecting.
     var identity: PresentedServerIdentity?
@@ -47,6 +49,10 @@ struct PageInfoView: View {
                     .textSelection(.enabled)
                 Text(byteSummary)
                     .foregroundStyle(.secondary)
+                if let deliverySummary {
+                    Text(deliverySummary)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Divider()
@@ -128,6 +134,15 @@ struct PageInfoView: View {
     private var byteSummary: String {
         let formatted = information.byteCount.formatted(.number)
         return information.byteCount == 1 ? "1 byte" : "\(formatted) bytes"
+    }
+
+    private var deliverySummary: String? {
+        guard let wasCached = information.responseWasCached,
+              let receivedAt = information.responseReceivedAt else { return nil }
+        let source = wasCached ? "Cached" : "Live"
+        let absolute = Self.receivedFormatter.string(from: receivedAt)
+        let relative = Self.relativeFormatter.localizedString(for: receivedAt, relativeTo: Date())
+        return "\(source) • Received \(absolute) (\(relative))"
     }
 
     // MARK: - Checks
@@ -284,6 +299,19 @@ struct PageInfoView: View {
         formatter.calendar = Calendar(identifier: .gregorian)
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss 'GMT'"
+        return formatter
+    }()
+
+    private static let receivedFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .full
         return formatter
     }()
 }

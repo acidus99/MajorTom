@@ -489,7 +489,7 @@ private final class PreformattedBlockStateScriptHandler: NSObject, WKScriptMessa
 @available(macOS 26.0, *)
 @MainActor
 final class BrowserModel: ObservableObject {
-    enum HistoryDisposition {
+    enum HistoryDisposition: Equatable {
         case new, reload, traversal
     }
 
@@ -561,6 +561,8 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var usedClientCertificate: ClientCertificateDescriptor?
     private var responseStatus: Int?
     private var responseMeta = ""
+    private var responseWasCached: Bool?
+    private var responseReceivedAt: Date?
     @Published var inputValidationMessage: String?
     @Published private(set) var pageZoom = 1.0
     @Published private(set) var retryNotBefore: Date?
@@ -586,6 +588,8 @@ final class BrowserModel: ObservableObject {
     private let clientCertificates = ClientCertificateStore.shared
     private let trustPolicy = ServerTrustPolicy()
     private let trustStore: TrustedIdentityStore?
+    private let contentCache = SharedContentCache.shared
+    private let cacheDecider = GeminiCacheDecider()
     private let renderer = HTMLDocumentStreamRenderer()
     private var cancellables = Set<AnyCancellable>()
 
@@ -601,6 +605,8 @@ final class BrowserModel: ObservableObject {
     private let backForwardCache = SharedBackForwardCacheStore.shared
     private var backForwardDebounceTask: Task<Void, Never>?
     private var backForwardWriteTask: Task<Void, Never>?
+    private var contentCacheWriteTask: Task<Void, Never>?
+    private var bypassesContentCacheForPage = false
     /// While a traversal's replacement document is loading, its initial scroll events
     /// must not overwrite the offset we are about to restore.
     private var pendingScrollRestoration: (historyIndex: Int, offset: Double)?
@@ -923,6 +929,9 @@ final class BrowserModel: ObservableObject {
         usedClientCertificate = nil
         responseStatus = nil
         responseMeta = ""
+        responseWasCached = nil
+        responseReceivedAt = nil
+        bypassesContentCacheForPage = false
         // The document is going away, so its hover state is stale.
         hoveredLinkURL = nil
         if !keepsFavicon { favicon = nil }
@@ -1084,6 +1093,10 @@ final class BrowserModel: ObservableObject {
         backForwardDebounceTask = nil
         persistCurrentBackForwardEntry()
         await backForwardWriteTask?.value
+    }
+
+    func flushContentCacheWrites() async {
+        await contentCacheWriteTask?.value
     }
 
     private func prepareScrollRestoration(for index: Int) {
@@ -1287,7 +1300,8 @@ final class BrowserModel: ObservableObject {
             currentSourceBytes,
             of: resourceURL,
             mimeType: currentMIMEType,
-            disposition: .new
+            disposition: .new,
+            receivedAt: responseReceivedAt ?? Date()
         )
     }
 
@@ -1303,7 +1317,8 @@ final class BrowserModel: ObservableObject {
         _ bytes: Data,
         of resourceURL: URL,
         mimeType: String,
-        disposition: HistoryDisposition
+        disposition: HistoryDisposition,
+        receivedAt: Date = Date()
     ) {
         guard let sourceURL = ViewSourceURL.wrap(resourceURL) else { return }
         abandonScrollRestoration(for: disposition)
@@ -1316,7 +1331,7 @@ final class BrowserModel: ObservableObject {
             mimeType: mimeType,
             body: bytes,
             completion: .complete,
-            receivedAt: Date(),
+            receivedAt: receivedAt,
             title: heading,
             responseStatus: responseStatus,
             responseMeta: responseMeta,
@@ -1552,6 +1567,8 @@ final class BrowserModel: ObservableObject {
                 meta: responseMeta,
                 byteCount: currentSourceBytes.count,
                 mimeType: currentMIMEType,
+                responseWasCached: responseWasCached,
+                responseReceivedAt: responseReceivedAt,
                 identity: serverIdentity,
                 trusted: trusted,
                 clientCertificate: usedClientCertificate,
@@ -1712,6 +1729,7 @@ final class BrowserModel: ObservableObject {
         let staysWithinCapsule = CapsuleEndpoint(url: target.url)
             == committedURL.flatMap(CapsuleEndpoint.init(url:))
         beginNavigation(disposition: disposition, keepsFavicon: staysWithinCapsule)
+        bypassesContentCacheForPage = disposition == .reload
 
         isLoading = true
         statusText = "Connecting to \(target.endpoint.host)…"
@@ -1724,7 +1742,8 @@ final class BrowserModel: ObservableObject {
                 disposition: disposition,
                 visited: [],
                 redirectCount: 0,
-                renderAsSource: renderAsSource
+                renderAsSource: renderAsSource,
+                bypassesContentCache: disposition == .reload
             )
         }
     }
@@ -1734,7 +1753,8 @@ final class BrowserModel: ObservableObject {
         disposition: HistoryDisposition,
         visited: Set<URL>,
         redirectCount: Int,
-        renderAsSource: Bool = false
+        renderAsSource: Bool = false,
+        bypassesContentCache: Bool = false
     ) async {
         guard !Task.isCancelled else { return }
         guard redirectCount <= 10, !visited.contains(target.url) else {
@@ -1757,19 +1777,34 @@ final class BrowserModel: ObservableObject {
         var gemtextParser = IncrementalGemtextParser()
         var contentStarted = false
 
+        if bypassesContentCache {
+            try? await contentCache?.removeResponse(for: target.url)
+        }
+        let cachedResponse = bypassesContentCache
+            ? nil
+            : try? await contentCache?.freshResponse(for: target.url)
+        let responseIsCached = cachedResponse != nil
+        var receivedAt = cachedResponse?.receivedAt ?? Date()
+
         let resolvedClientCertificate = await clientCertificates.resolvedCertificate(for: target.url)
         let sentClientCertificate = resolvedClientCertificate?.tlsIdentity == nil
             ? nil
             : resolvedClientCertificate?.descriptor
 
         do {
-            let events = transport.events(
-                for: target,
-                clientIdentity: resolvedClientCertificate?.tlsIdentity,
-                configuration: GeminiTransportConfiguration()
-            ) { [weak self] identity, _ in
-                guard let self else { return false }
-                return await self.authorize(identity)
+            let events: AsyncThrowingStream<GeminiTransportEvent, any Error>
+            if let cachedResponse {
+                statusText = "Loading cached response…"
+                events = GeminiResponseReplay.events(for: cachedResponse)
+            } else {
+                events = transport.events(
+                    for: target,
+                    clientIdentity: resolvedClientCertificate?.tlsIdentity,
+                    configuration: GeminiTransportConfiguration()
+                ) { [weak self] identity, _ in
+                    guard let self else { return false }
+                    return await self.authorize(identity)
+                }
             }
 
             for try await event in events {
@@ -1781,9 +1816,12 @@ final class BrowserModel: ObservableObject {
                     serverIdentity = identity
                     statusText = "Verifying capsule identity…"
                 case .responseHeader(let header):
+                    if !responseIsCached { receivedAt = Date() }
                     responseHeader = header
                     responseStatus = header.status
                     responseMeta = header.meta
+                    responseWasCached = responseIsCached
+                    responseReceivedAt = receivedAt
                     statusText = "Response \(header.status)"
 
                     if header.isRedirect {
@@ -1810,7 +1848,8 @@ final class BrowserModel: ObservableObject {
                             disposition: disposition,
                             visited: nextVisited,
                             redirectCount: redirectCount + 1,
-                            renderAsSource: renderAsSource
+                            renderAsSource: renderAsSource,
+                            bypassesContentCache: bypassesContentCache
                         )
                         return
                     }
@@ -1912,7 +1951,7 @@ final class BrowserModel: ObservableObject {
                         return
                     }
 
-                    usedClientCertificate = sentClientCertificate
+                    usedClientCertificate = responseIsCached ? nil : sentClientCertificate
 
                     mimeType = header.meta.split(separator: ";", maxSplits: 1).first
                         .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
@@ -1961,6 +2000,17 @@ final class BrowserModel: ObservableObject {
 
                 case .completed:
                     guard let header = responseHeader, header.isSuccess else { return }
+                    if !responseIsCached {
+                        let response = ContentResponse(
+                            url: target.url,
+                            status: header.status,
+                            meta: Data(header.meta.utf8),
+                            mimeType: mimeType,
+                            body: sourceBytes,
+                            receivedAt: receivedAt
+                        )
+                        storeInContentCacheIfNeeded(response, for: target)
+                    }
                     if renderAsSource {
                         guard mimeType.hasPrefix("text/") else {
                             showGeneratedPage(
@@ -1976,7 +2026,8 @@ final class BrowserModel: ObservableObject {
                             sourceBytes,
                             of: target.url,
                             mimeType: mimeType,
-                            disposition: disposition
+                            disposition: disposition,
+                            receivedAt: receivedAt
                         )
                         return
                     }
@@ -2012,14 +2063,16 @@ final class BrowserModel: ObservableObject {
                         mimeType: mimeType,
                         body: sourceBytes,
                         completion: .complete,
-                        receivedAt: Date(),
+                        receivedAt: receivedAt,
                         title: title,
                         documentTitle: documentTitle,
                         responseStatus: header.status,
                         responseMeta: header.meta,
                         clientCertificateID: sentClientCertificate?.id
                     ))
-                    statusText = "Loaded \(sourceBytes.count) bytes"
+                    statusText = responseIsCached
+                        ? "Cached • \(sourceBytes.count) bytes"
+                        : "Loaded \(sourceBytes.count) bytes"
                     // Only now, once the reader has actually landed on this capsule: the
                     // RFC forbids probing for a favicon any earlier.
                     Task { await refreshFavicon(forCapsuleAt: target.url) }
@@ -2454,6 +2507,8 @@ final class BrowserModel: ObservableObject {
         responseStatus = cached.responseStatus
             ?? (cached.url.scheme?.lowercased() == "gemini" ? 20 : nil)
         responseMeta = cached.responseMeta ?? (responseStatus == nil ? "" : cached.mimeType)
+        responseWasCached = true
+        responseReceivedAt = cached.receivedAt
         title = cached.title ?? displayTitle(for: cached.url)
         documentTitle = cached.documentTitle
         // Re-rendering a cached page replays its events, so seed the claim with the
@@ -2522,6 +2577,35 @@ final class BrowserModel: ObservableObject {
     ) {
         let previous = backForwardWriteTask
         backForwardWriteTask = Task {
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await operation()
+        }
+    }
+
+    private func storeInContentCacheIfNeeded(
+        _ response: ContentResponse,
+        for target: GeminiRequestTarget
+    ) {
+        guard let contentCache else { return }
+        guard case .store(let resourceType, let lifetime) = cacheDecider.decision(
+            for: target,
+            response: response
+        ) else { return }
+        enqueueContentCacheWrite {
+            _ = try? await contentCache.store(
+                response,
+                resourceType: resourceType,
+                lifetime: lifetime
+            )
+        }
+    }
+
+    private func enqueueContentCacheWrite(
+        _ operation: @escaping @Sendable () async -> Void
+    ) {
+        let previous = contentCacheWriteTask
+        contentCacheWriteTask = Task {
             await previous?.value
             guard !Task.isCancelled else { return }
             await operation()
@@ -2792,7 +2876,8 @@ final class BrowserModel: ObservableObject {
             let metadata = await self.loadInlineImage(
                 url,
                 continuation: resource.continuation,
-                redirects: 0
+                redirects: 0,
+                bypassesContentCache: bypassesContentCacheForPage
             )
             await self.imageLimiter.release()
             if let metadata {
@@ -2854,7 +2939,8 @@ final class BrowserModel: ObservableObject {
             let metadata = await self.loadInlineImage(
                 url,
                 continuation: resource.continuation,
-                redirects: 0
+                redirects: 0,
+                bypassesContentCache: bypassesContentCacheForPage
             )
             await self.imageLimiter.release()
             if let metadata {
@@ -2976,9 +3062,9 @@ final class BrowserModel: ObservableObject {
     }
 
     private enum FaviconProbe {
-        case found(String)
+        case found(String, ContentResponse)
         /// The capsule answered, but not with a conforming favicon.
-        case absent
+        case absent(receivedAt: Date)
         /// The probe never got an answer, so nothing may be concluded or cached.
         case failed
     }
@@ -2998,42 +3084,68 @@ final class BrowserModel: ObservableObject {
         // proxy, and the proxy's favicon is not the site's.
         guard url.scheme?.lowercased() == "gemini",
               let endpoint = CapsuleEndpoint(url: url),
-              let store = SharedFaviconStore.shared else {
+              let faviconURL = GeminiFavicon.url(for: endpoint),
+              let probeTarget = try? GeminiRequestTarget(faviconURL.absoluteString) else {
             favicon = nil
             return
         }
 
-        if let record = await store.freshRecord(for: endpoint) {
-            favicon = record.emoji
+        if let response = try? await contentCache?.freshResponse(for: faviconURL) {
+            let emoji = GeminiFavicon.parse(response: response)
+            if emoji == nil, response.status != 51 {
+                let negative = GeminiFavicon.negativeResponse(
+                    for: faviconURL,
+                    receivedAt: response.receivedAt
+                )
+                enqueueContentCacheWrite { [contentCache] in
+                    _ = try? await contentCache?.store(
+                        negative,
+                        resourceType: .favicon,
+                        lifetime: GeminiFavicon.cacheLifetime
+                    )
+                }
+            }
+            favicon = emoji
             navigation.updateCurrentMetadata(title: documentTitle ?? title, favicon: favicon)
             persistCurrentBackForwardEntry()
             BookmarksModel.shared.updateFavicon(
-                record.emoji,
+                emoji,
                 for: endpoint,
-                fetchedAt: record.fetchedAt
+                fetchedAt: response.receivedAt
             )
             return
         }
         favicon = nil
 
-        guard let probeTarget = try? GeminiRequestTarget(
-            "gemini://\(endpoint.host):\(endpoint.port)\(GeminiFavicon.path)"
-        ) else { return }
-
         let probe = await self.probeFavicon(probeTarget)
-        let fetchedAt = Date()
         switch probe {
         case .failed:
-            // A connection that never answered says nothing about whether a favicon
-            // exists, and caching that as "absent" would hide it for a week.
+            // A connection that never completed says nothing about whether a favicon
+            // exists and must not create a negative cache entry.
             return
-        case .found(let emoji):
-            try? await store.record(emoji, for: endpoint, at: fetchedAt)
-            BookmarksModel.shared.updateFavicon(emoji, for: endpoint, fetchedAt: fetchedAt)
+        case .found(let emoji, let response):
+            enqueueContentCacheWrite { [contentCache] in
+                _ = try? await contentCache?.store(
+                    response,
+                    resourceType: .favicon,
+                    lifetime: GeminiFavicon.cacheLifetime
+                )
+            }
+            BookmarksModel.shared.updateFavicon(emoji, for: endpoint, fetchedAt: response.receivedAt)
             applyFaviconIfStillCurrent(emoji, endpoint: endpoint)
-        case .absent:
-            try? await store.record(nil, for: endpoint, at: fetchedAt)
-            BookmarksModel.shared.updateFavicon(nil, for: endpoint, fetchedAt: fetchedAt)
+        case .absent(let receivedAt):
+            let negative = GeminiFavicon.negativeResponse(
+                for: faviconURL,
+                receivedAt: receivedAt
+            )
+            enqueueContentCacheWrite { [contentCache] in
+                _ = try? await contentCache?.store(
+                    negative,
+                    resourceType: .favicon,
+                    lifetime: GeminiFavicon.cacheLifetime
+                )
+            }
+            BookmarksModel.shared.updateFavicon(nil, for: endpoint, fetchedAt: receivedAt)
             applyFaviconIfStillCurrent(nil, endpoint: endpoint)
         }
     }
@@ -3050,7 +3162,9 @@ final class BrowserModel: ObservableObject {
 
     private func probeFavicon(_ target: GeminiRequestTarget) async -> FaviconProbe {
         var body = Data()
-        var accepted = false
+        var responseHeader: GeminiResponseHeader?
+        var receivedAt = Date()
+        var completed = false
         do {
             let events = transport.events(
                 for: target,
@@ -3067,15 +3181,12 @@ final class BrowserModel: ObservableObject {
             for try await event in events {
                 switch event {
                 case .responseHeader(let header):
-                    // The RFC requires status 20 with a text/plain MIME type. Anything
-                    // else — most often 51 — means the capsule simply has no favicon,
-                    // which the RFC is explicit is not an error.
-                    let mime = header.meta.split(separator: ";", maxSplits: 1).first
-                        .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
-                    guard header.isSuccess, mime == "text/plain" else { return .absent }
-                    accepted = true
+                    responseHeader = header
+                    receivedAt = Date()
                 case .body(let data):
                     body.append(data)
+                case .completed:
+                    completed = true
                 default:
                     break
                 }
@@ -3083,17 +3194,28 @@ final class BrowserModel: ObservableObject {
         } catch {
             return .failed
         }
-        guard accepted else { return .failed }
-        guard let emoji = GeminiFavicon.parse(String(decoding: body, as: UTF8.self)) else {
-            return .absent
+        guard completed, let responseHeader else { return .failed }
+        let mime = responseHeader.meta.split(separator: ";", maxSplits: 1).first
+            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
+        let response = ContentResponse(
+            url: target.url,
+            status: responseHeader.status,
+            meta: Data(responseHeader.meta.utf8),
+            mimeType: mime,
+            body: body,
+            receivedAt: receivedAt
+        )
+        guard let emoji = GeminiFavicon.parse(response: response) else {
+            return .absent(receivedAt: receivedAt)
         }
-        return .found(emoji)
+        return .found(emoji, response)
     }
 
     private func loadInlineImage(
         _ url: URL,
         continuation: AsyncThrowingStream<URLSchemeTaskResult, any Error>.Continuation,
-        redirects: Int
+        redirects: Int,
+        bypassesContentCache: Bool
     ) async -> LoadedInlineImage? {
         guard redirects <= 5,
               let target = try? GeminiRequestTarget(url.absoluteString) else {
@@ -3101,28 +3223,46 @@ final class BrowserModel: ObservableObject {
             return nil
         }
         do {
-            let events = transport.events(
-                for: target,
-                configuration: GeminiTransportConfiguration(
-                    maximumResponseByteCount: 16 * 1_024 * 1_024
-                )
-            ) { [weak self] identity, _ in
-                guard let self else { return false }
-                return await self.authorize(identity)
+            if bypassesContentCache {
+                try? await contentCache?.removeResponse(for: target.url)
+            }
+            let cachedResponse = bypassesContentCache
+                ? nil
+                : try? await contentCache?.freshResponse(for: target.url)
+            let responseIsCached = cachedResponse != nil
+            var receivedAt = cachedResponse?.receivedAt ?? Date()
+            let events: AsyncThrowingStream<GeminiTransportEvent, any Error>
+            if let cachedResponse {
+                events = GeminiResponseReplay.events(for: cachedResponse)
+            } else {
+                events = transport.events(
+                    for: target,
+                    configuration: GeminiTransportConfiguration(
+                        maximumResponseByteCount: 16 * 1_024 * 1_024
+                    )
+                ) { [weak self] identity, _ in
+                    guard let self else { return false }
+                    return await self.authorize(identity)
+                }
             }
             var accepted = false
             var mimeType = ""
             var byteCount = 0
+            var body = Data()
+            var responseHeader: GeminiResponseHeader?
             for try await event in events {
                 switch event {
                 case .responseHeader(let header):
+                    if !responseIsCached { receivedAt = Date() }
+                    responseHeader = header
                     if header.isRedirect,
                        let redirected = URL(string: header.meta, relativeTo: url)?.absoluteURL,
                        isSameCapsule(redirected, url) {
                         return await loadInlineImage(
                             redirected,
                             continuation: continuation,
-                            redirects: redirects + 1
+                            redirects: redirects + 1,
+                            bypassesContentCache: bypassesContentCache
                         )
                     }
                     let mime = header.meta.split(separator: ";", maxSplits: 1).first
@@ -3141,8 +3281,19 @@ final class BrowserModel: ObservableObject {
                     )))
                 case .body(let data) where accepted:
                     byteCount += data.count
+                    body.append(data)
                     continuation.yield(.data(data))
                 case .completed:
+                    if !responseIsCached, let responseHeader, accepted {
+                        storeInContentCacheIfNeeded(ContentResponse(
+                            url: target.url,
+                            status: responseHeader.status,
+                            meta: Data(responseHeader.meta.utf8),
+                            mimeType: mimeType,
+                            body: body,
+                            receivedAt: receivedAt
+                        ), for: target)
+                    }
                     continuation.finish()
                     return accepted
                         ? LoadedInlineImage(mimeType: mimeType, byteCount: byteCount)
@@ -3173,16 +3324,28 @@ final class BrowserModel: ObservableObject {
         }
         var body = Data()
         var mimeType = "application/octet-stream"
-        let events = transport.events(
-            for: target,
-            configuration: GeminiTransportConfiguration()
-        ) { [weak self] identity, _ in
-            guard let self else { return false }
-            return await self.authorize(identity)
+        let cachedResponse = try? await contentCache?.freshResponse(for: target.url)
+        let responseIsCached = cachedResponse != nil
+        var receivedAt = cachedResponse?.receivedAt ?? Date()
+        let events: AsyncThrowingStream<GeminiTransportEvent, any Error>
+        if let cachedResponse {
+            events = GeminiResponseReplay.events(for: cachedResponse)
+        } else {
+            events = transport.events(
+                for: target,
+                configuration: GeminiTransportConfiguration()
+            ) { [weak self] identity, _ in
+                guard let self else { return false }
+                return await self.authorize(identity)
+            }
         }
+        var responseHeader: GeminiResponseHeader?
+        var completed = false
         for try await event in events {
             switch event {
             case .responseHeader(let header):
+                if !responseIsCached { receivedAt = Date() }
+                responseHeader = header
                 // A download that redirects previously died with "Gemini status 31".
                 if header.isRedirect {
                     let meta = header.meta.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3202,9 +3365,24 @@ final class BrowserModel: ObservableObject {
                     .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? mimeType
             case .body(let data):
                 body.append(data)
+            case .completed:
+                completed = true
             default:
                 break
             }
+        }
+        guard completed, let responseHeader else {
+            throw GeminiTransportError.connectionFailed("The response ended before it completed.")
+        }
+        if !responseIsCached {
+            storeInContentCacheIfNeeded(ContentResponse(
+                url: target.url,
+                status: responseHeader.status,
+                meta: Data(responseHeader.meta.utf8),
+                mimeType: mimeType,
+                body: body,
+                receivedAt: receivedAt
+            ), for: target)
         }
         return (body, mimeType, url)
     }

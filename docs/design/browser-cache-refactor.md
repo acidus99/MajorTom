@@ -2,9 +2,10 @@
 
 Status: Implemented first milestone
 
-This design is intentionally limited to fast, faithful Back/Forward traversal. General
-resource caching, associated-resource retention, omnibar indexing, offline browsing,
-scheduled downloads, and protocol cache policy are separate future work.
+This design is intentionally limited to fast, faithful Back/Forward traversal. Reusable image
+and favicon responses now live in the separate `ContentCache.db` system described by the
+architecture document. Omnibar indexing, purposeful offline browsing, and scheduled downloads
+remain separate future work.
 
 ## User-visible behavior
 

@@ -226,13 +226,10 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         // Tom window can join another compatible Major Tom window.
         NSWindow.allowsAutomaticWindowTabbing = true
 
-        // Both stores read and decode their whole file inside an actor's initialiser,
-        // which runs on whichever thread first touches them. That was the main actor,
-        // while the first tab was being created: BrowserModel.init reaches for both. Warm
-        // them here instead, before any window exists.
+        // Open durable stores before the first tab needs them.
         Task.detached(priority: .utility) {
             _ = SharedTrustedIdentityStore.shared
-            _ = SharedFaviconStore.shared
+            _ = SharedContentCache.shared
         }
     }
 
@@ -407,6 +404,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
                 await NativeTabCoordinator.shared.prepareForTermination()
             }
             BrowserSettingsStore.shared.flushPendingWrites()
+            try? SharedContentCacheDatabase.shared?.checkpointAndClose()
             try? SharedBackForwardCacheDatabase.shared?.checkpointAndClose()
             hasPreparedForTermination = true
             terminationTask = nil
@@ -426,6 +424,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         // Preferences coalesce their writes, so a change made moments before quitting
         // may still be waiting. History and drafts commit directly to SQLite.
         BrowserSettingsStore.shared.flushPendingWrites()
+        try? SharedContentCacheDatabase.shared?.checkpointAndClose()
         try? SharedBackForwardCacheDatabase.shared?.checkpointAndClose()
     }
 
@@ -779,6 +778,7 @@ final class NativeTabCoordinator {
         var seen = Set<ObjectIdentifier>()
         for browser in browsers where seen.insert(ObjectIdentifier(browser)).inserted {
             await browser.flushBackForwardPersistence()
+            await browser.flushContentCacheWrites()
         }
         persistSession()
     }

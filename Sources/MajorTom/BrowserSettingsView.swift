@@ -176,7 +176,7 @@ struct BrowserSettingsView: View {
     private var qualityOfLife: some View {
         Form {
             Toggle("Show capsule favicons", isOn: store.binding(\.showsFavicons))
-            Text("A capsule may publish one emoji at /favicon.txt. Major Tom shows it on the Page Information button and on the tab, asks for it only after you visit the capsule, and remembers the answer for a week.")
+            Text("A capsule may publish one emoji at /favicon.txt. Major Tom shows it on the Page Information button and on the tab, asks for it only after you visit the capsule, and remembers the answer for 30 days.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             HStack {
@@ -228,7 +228,8 @@ struct BrowserSettingsView: View {
 
     private func clearFaviconCache() {
         Task {
-            try? await SharedFaviconStore.shared?.removeAll()
+            try? await SharedContentCache.shared?.removeAll(ofType: .favicon)
+            BookmarksModel.shared.refreshFavicons()
             faviconCacheCleared = true
             // Transient confirmation: this is an action, not a state to stay latched on.
             try? await Task.sleep(for: .seconds(2))

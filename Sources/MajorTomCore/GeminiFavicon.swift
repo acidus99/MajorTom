@@ -9,6 +9,40 @@ import Foundation
 public enum GeminiFavicon {
     /// The path a favicon always lives at, relative to the server root.
     public static let path = "/favicon.txt"
+    public static let cacheLifetime: TimeInterval = 30 * 24 * 60 * 60
+
+    public static func url(for endpoint: CapsuleEndpoint) -> URL? {
+        var components = URLComponents()
+        components.scheme = "gemini"
+        components.host = endpoint.host
+        if endpoint.port != GeminiRequestTarget.defaultPort {
+            components.port = Int(endpoint.port)
+        }
+        components.path = path
+        return components.url
+    }
+
+    /// Validates the complete protocol response as well as the favicon document.
+    public static func parse(response: ContentResponse) -> String? {
+        guard let status = response.status,
+              status / 10 == 2,
+              response.mimeType?.lowercased() == "text/plain",
+              let body = String(data: response.body, encoding: .utf8) else { return nil }
+        return parse(body)
+    }
+
+    /// Normalizes every completed but unacceptable favicon response to the one
+    /// negative entry understood by the favicon feature.
+    public static func negativeResponse(for url: URL, receivedAt: Date) -> ContentResponse {
+        ContentResponse(
+            url: url,
+            status: 51,
+            meta: Data(),
+            mimeType: nil,
+            body: Data(),
+            receivedAt: receivedAt
+        )
+    }
 
     /// Returns the emoji to display, or `nil` when the document does not conform.
     public static func parse(_ body: String) -> String? {

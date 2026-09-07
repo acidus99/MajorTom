@@ -26,23 +26,6 @@ enum SharedTrustedIdentityStore {
     }()
 }
 
-/// The one favicon cache for the whole application.
-///
-/// Shared for the same reason the trusted-identity store is: each instance holds the file
-/// in memory and rewrites it wholesale, so a second instance would overwrite the first's
-/// records.
-enum SharedFaviconStore {
-    static let shared: FaviconStore? = {
-        guard let root = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else { return nil }
-        return FaviconStore(fileURL: root
-            .appendingPathComponent("Major Tom", isDirectory: true)
-            .appendingPathComponent("favicons.json"))
-    }()
-}
-
 /// The one local SQLite database for browser-owned durable state.
 enum SharedMajorTomDatabase {
     static let shared: MajorTomDatabase? = {
@@ -62,6 +45,26 @@ enum SharedBackForwardCacheDatabase {
 
 enum SharedBackForwardCacheStore {
     static let shared = SharedBackForwardCacheDatabase.shared.map(BackForwardCacheStore.init(database:))
+}
+
+/// Reusable network responses live independently of browser history and user data.
+enum SharedContentCacheDatabase {
+    static let shared: ContentCacheDatabase? = {
+        guard let fileURL = try? ContentCacheDatabase.defaultFileURL(),
+              let database = try? ContentCacheDatabase(fileURL: fileURL) else { return nil }
+        // The old JSON file was only a disposable cache. Once the replacement database
+        // is available, leaving it behind would imply that it was still authoritative.
+        let legacyFile = fileURL.deletingLastPathComponent().appendingPathComponent("favicons.json")
+        try? FileManager.default.removeItem(at: legacyFile)
+        return database
+    }()
+}
+
+enum SharedContentCache {
+    static let shared: ContentCache? = {
+        guard let database = SharedContentCacheDatabase.shared else { return nil }
+        return ContentCache(database: database)
+    }()
 }
 
 // PageCompletionState, CachedPage and RestoredTabState now live in MajorTomCore beside

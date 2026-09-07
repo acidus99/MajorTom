@@ -27,7 +27,7 @@ The unified address field accepts Gemini locations and searches. A submitted exp
 
 Document themes are independent of application appearance. Dracula Dark is the default document theme. On first launch, Major Tom opens `gemini://gemi.dev/major-tom/` as its homepage.
 
-When a visited capsule provides a favicon, its full-color emoji appears on the Page Information control and the tab. Without a favicon, the Page Information control uses the standard information-in-a-circle symbol.
+When a visited capsule provides a valid favicon, its full-color emoji appears on the Page Information control and the tab. Without a favicon, the Page Information control uses the standard information-in-a-circle symbol. Major Tom remembers both valid favicons and confirmed absence for 30 days; failed or interrupted favicon checks are tried again later.
 
 A bookmark carries the most recently observed favicon state for its capsule, including a
 confirmed absence. This snapshot synchronizes with the bookmark so a newly installed Mac can
@@ -49,6 +49,14 @@ automatic same-capsule images, and inline rendering enhancements. Application ap
 proxy configuration, and Favorites-bar visibility remain local to each Mac.
 
 View Source and Save Page As always use the original response body. Caching must preserve response metadata, completion state, and enough source to reproduce a page under changed reading preferences.
+
+Major Tom avoids repeated Gemini image transfers with a local response cache. A completed,
+successful Gemini image may be reused for 24 hours whether it was first displayed inline,
+opened directly, or fetched for a user action. Reload always requests the page and its inline
+images again instead of consulting that cache. Cache reuse never initiates a request itself,
+and cached responses follow the same parsing and presentation path as live responses. Page
+Information identifies content as Live or Cached and shows when the response was originally
+received. This cache remains on one Mac and does not synchronize.
 
 ## History and unfinished input
 

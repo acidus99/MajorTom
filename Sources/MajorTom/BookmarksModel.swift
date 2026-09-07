@@ -73,7 +73,13 @@ final class BookmarksModel: ObservableObject {
 
     func refreshFavicons() {
         Task { [weak self] in
-            let known = await SharedFaviconStore.shared?.knownFavicons() ?? [:]
+            let responses = (try? await SharedContentCache.shared?.freshResponses(ofType: .favicon)) ?? []
+            var known: [CapsuleEndpoint: String] = [:]
+            for response in responses {
+                guard let endpoint = CapsuleEndpoint(url: response.url),
+                      let emoji = GeminiFavicon.parse(response: response) else { continue }
+                known[endpoint] = emoji
+            }
             self?.favicons = known
         }
     }
@@ -84,10 +90,11 @@ final class BookmarksModel: ObservableObject {
         Task { [weak self] in
             let snapshot: BookmarkFaviconSnapshot?
             if let endpoint = CapsuleEndpoint(url: url),
-               let record = await SharedFaviconStore.shared?.freshRecord(for: endpoint) {
+               let faviconURL = GeminiFavicon.url(for: endpoint),
+               let response = try? await SharedContentCache.shared?.freshResponse(for: faviconURL) {
                 snapshot = BookmarkFaviconSnapshot(
-                    emoji: record.emoji,
-                    fetchedAt: record.fetchedAt
+                    emoji: GeminiFavicon.parse(response: response),
+                    fetchedAt: response.receivedAt
                 )
             } else {
                 snapshot = nil
