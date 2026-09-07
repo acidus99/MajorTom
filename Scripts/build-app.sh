@@ -102,6 +102,35 @@ plist="$contents/Info.plist"
 
 signing_identity="${MAJOR_TOM_CODESIGN_IDENTITY:--}"
 entitlements_path="${MAJOR_TOM_ENTITLEMENTS_PATH:-$project_root/Entitlements/MajorTom.development.entitlements}"
+provisioning_profile="${MAJOR_TOM_PROVISIONING_PROFILE:-}"
+if [[ "$signing_identity" != "-" ]] \
+    && ! security find-identity -v -p codesigning | grep -Fq -- "$signing_identity"; then
+    if [[ "$configuration" == "release" ]]; then
+        echo "Configured code-signing identity is not valid in this keychain: $signing_identity" >&2
+        exit 2
+    fi
+    echo "Note: Configured development signing identity is unavailable; using an ad-hoc signature." >&2
+    signing_identity="-"
+fi
+if [[ "$signing_identity" != "-" && -n "$provisioning_profile" && -f "$provisioning_profile" ]]; then
+    profile_plist="$(mktemp)"
+    if security cms -D -i "$provisioning_profile" > "$profile_plist" 2>/dev/null; then
+        requested_aps="$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$entitlements_path" 2>/dev/null || true)"
+        profile_aps="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:aps-environment' "$profile_plist" 2>/dev/null || true)"
+        [[ -n "$profile_aps" ]] \
+            || profile_aps="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.aps-environment' "$profile_plist" 2>/dev/null || true)"
+        if [[ -n "$requested_aps" && "$profile_aps" != "$requested_aps" ]]; then
+            rm -f "$profile_plist"
+            if [[ "$configuration" == "release" ]]; then
+                echo "Provisioning profile does not authorize the requested $requested_aps APNs environment." >&2
+                exit 2
+            fi
+            echo "Note: Provisioning profile does not authorize the requested $requested_aps APNs environment; using an ad-hoc signature." >&2
+            signing_identity="-"
+        fi
+    fi
+    rm -f "$profile_plist"
+fi
 if [[ "$signing_identity" == "-" ]]; then
     # Restricted iCloud entitlements require an Apple-issued signing identity.
     # Putting them on an ad-hoc signature makes macOS kill the executable before
@@ -113,7 +142,6 @@ else
         echo "Entitlements file not found: $entitlements_path" >&2
         exit 2
     fi
-    provisioning_profile="${MAJOR_TOM_PROVISIONING_PROFILE:-}"
     if [[ -n "$provisioning_profile" ]]; then
         if [[ ! -f "$provisioning_profile" ]]; then
             echo "Provisioning profile not found: $provisioning_profile" >&2
