@@ -39,15 +39,15 @@ public struct PersistedApplicationSession: Equatable, Sendable {
 
 /// Normalized, local-only window/tab/Back-Forward restoration state.
 public struct SessionRepository: Sendable {
-    private let database: MajorTomDatabase
-    private let cache: PageCacheRepository
+    private let database: BackForwardCacheDatabase
 
-    public init(database: MajorTomDatabase) {
+    public init(database: BackForwardCacheDatabase) {
         self.database = database
-        cache = PageCacheRepository(database: database)
     }
 
     public func save(_ session: PersistedApplicationSession, at date: Date = Date()) throws {
+        let encoder = JSONEncoder()
+        var activeEntryIDs = Set<String>()
         try database.write { db in
             try db.execute(sql: "DELETE FROM browser_windows")
             try db.execute(sql: "DELETE FROM browser_session")
@@ -69,37 +69,104 @@ public struct SessionRepository: Sendable {
                     ]
                 )
                 for (tabPosition, tab) in window.tabs.enumerated() {
-                    let tabID = UUID().uuidString
+                    let tabID = tab.tabID.uuidString.lowercased()
                     try db.execute(
                         sql: """
                             INSERT INTO browser_tabs (
-                                id, window_id, position, history_index, zoom, title, document_title
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                                id, window_id, position, history_index, zoom
+                            ) VALUES (?, ?, ?, ?, ?)
                             """,
                         arguments: [
-                            tabID, windowID, tabPosition, tab.historyIndex,
-                            tab.zoom, tab.title, tab.documentTitle
+                            tabID, windowID, tabPosition, tab.historyIndex, tab.zoom
                         ]
                     )
-                    for (historyPosition, url) in tab.history.enumerated() {
+                    var entries = tab.entries.isEmpty
+                        ? tab.history.enumerated().map { index, url in
+                            BackForwardEntry(
+                                url: url,
+                                title: tab.cachedPages.first { $0.url == url }?.documentTitle
+                                    ?? tab.cachedPages.first { $0.url == url }?.title,
+                                page: tab.cachedPages.first { $0.url == url },
+                                presentation: HistoryPresentationState(
+                                    scrollY: tab.scrollOffsets?[index] ?? 0
+                                )
+                            )
+                        }
+                        : tab.entries
+                    if entries.indices.contains(tab.historyIndex), entries[tab.historyIndex].title == nil {
+                        entries[tab.historyIndex].title = tab.documentTitle ?? tab.title
+                    }
+                    for (historyPosition, entry) in entries.enumerated() {
+                        activeEntryIDs.insert(entry.id.uuidString.lowercased())
+                        let usesClientCertificate = entry.page?.clientCertificateID != nil
+                        let page = usesClientCertificate ? nil : entry.page
+                        if usesClientCertificate {
+                            // A certificate-authenticated reload must also remove an older,
+                            // unauthenticated representation for this same visit.
+                            try db.execute(
+                                sql: """
+                                    UPDATE browser_tab_history
+                                    SET response_status = NULL, response_meta = NULL,
+                                        response_body = NULL, completion = NULL,
+                                        received_at = NULL, client_certificate_id = NULL
+                                    WHERE id = ?
+                                    """,
+                                arguments: [entry.id.uuidString.lowercased()]
+                            )
+                        }
+                        try db.execute(
+                            sql: "DELETE FROM browser_tab_history WHERE tab_id = ? AND position = ? AND id <> ?",
+                            arguments: [tabID, historyPosition, entry.id.uuidString.lowercased()]
+                        )
+                        let state = try encoder.encode(entry.presentation)
                         try db.execute(
                             sql: """
                                 INSERT INTO browser_tab_history (
-                                    tab_id, position, url, scroll_offset
-                                ) VALUES (?, ?, ?, ?)
+                                    id, tab_id, position, url, title, favicon,
+                                    response_status, response_meta, response_body, completion,
+                                    received_at, client_certificate_id, presentation_state
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ON CONFLICT(id) DO UPDATE SET
+                                    tab_id = excluded.tab_id,
+                                    position = excluded.position,
+                                    url = excluded.url,
+                                    title = excluded.title,
+                                    favicon = excluded.favicon,
+                                    response_status = COALESCE(excluded.response_status, response_status),
+                                    response_meta = COALESCE(excluded.response_meta, response_meta),
+                                    response_body = COALESCE(excluded.response_body, response_body),
+                                    completion = COALESCE(excluded.completion, completion),
+                                    received_at = COALESCE(excluded.received_at, received_at),
+                                    presentation_state = excluded.presentation_state
                                 """,
                             arguments: [
-                                tabID, historyPosition, url.absoluteString,
-                                tab.scrollOffsets?[historyPosition] ?? 0
+                                entry.id.uuidString.lowercased(), tabID, historyPosition,
+                                entry.url.absoluteString, entry.title, entry.favicon,
+                                page?.responseStatus,
+                                page.map { page in
+                                    page.responseMeta.flatMap { $0.isEmpty ? nil : $0 } ?? page.mimeType
+                                },
+                                page?.body, page?.completion.rawValue, page?.receivedAt,
+                                page?.clientCertificateID?.uuidString.lowercased(), state
                             ]
                         )
                     }
                 }
             }
+            let storedEntryIDs = try String.fetchAll(db, sql: "SELECT id FROM browser_tab_history")
+            let staleEntryIDs = storedEntryIDs.filter { !activeEntryIDs.contains($0) }
+            for chunkStart in stride(from: 0, to: staleEntryIDs.count, by: 500) {
+                let chunk = Array(staleEntryIDs[chunkStart..<min(chunkStart + 500, staleEntryIDs.count)])
+                let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+                try db.execute(
+                    sql: "DELETE FROM browser_tab_history WHERE id IN (\(placeholders))",
+                    arguments: StatementArguments(chunk)
+                )
+            }
         }
     }
 
-    public func load(accessedAt: Date = Date()) throws -> PersistedApplicationSession? {
+    public func load() throws -> PersistedApplicationSession? {
         let snapshot: (keyWindowIndex: Int, windows: [PersistedBrowserWindow])? = try database.read { db in
             guard let keyWindowIndex = try Int.fetchOne(
                 db,
@@ -117,23 +184,29 @@ public struct SessionRepository: Sendable {
                     let tabID: String = tabRow["id"]
                     let historyRows = try Row.fetchAll(
                         db,
-                        sql: "SELECT position, url, scroll_offset FROM browser_tab_history WHERE tab_id = ? ORDER BY position",
+                        sql: "SELECT * FROM browser_tab_history WHERE tab_id = ? ORDER BY position",
                         arguments: [tabID]
                     )
-                    let history = historyRows.compactMap { (row: Row) -> URL? in URL(string: row["url"]) }
-                    var offsets: [Int: Double] = [:]
-                    for (position, row) in historyRows.enumerated() {
-                        let offset: Double = row["scroll_offset"]
-                        if offset > 0 { offsets[position] = offset }
+                    let selectedIndex: Int = tabRow["history_index"]
+                    let entries = historyRows.enumerated().compactMap { position, row in
+                        BackForwardCacheStore.entry(row, includePage: position == selectedIndex)
                     }
+                    let history = entries.map(\.url)
+                    let current = entries.indices.contains(selectedIndex)
+                        ? entries[selectedIndex]
+                        : nil
                     return RestoredTabState(
+                        tabID: UUID(uuidString: tabID) ?? UUID(),
+                        entries: entries,
                         history: history,
                         historyIndex: tabRow["history_index"],
-                        cachedPages: [],
+                        cachedPages: entries.compactMap(\.page),
                         zoom: tabRow["zoom"],
-                        title: tabRow["title"],
-                        documentTitle: tabRow["document_title"],
-                        scrollOffsets: offsets
+                        title: current?.title,
+                        documentTitle: current?.title,
+                        scrollOffsets: Dictionary(uniqueKeysWithValues: entries.indices.map {
+                            ($0, entries[$0].presentation.scrollY)
+                        })
                     )
                 }
                 let frame: PersistedWindowFrame?
@@ -153,23 +226,7 @@ public struct SessionRepository: Sendable {
             }
             return (keyWindowIndex, windows)
         }
-        guard var snapshot else { return nil }
-        // Startup needs only the representation currently visible in each tab. Older
-        // Back/Forward entries remain cheap URL rows and are fetched from the shared
-        // cache lazily if the reader traverses to them.
-        let urls = Set(snapshot.windows.flatMap(\.tabs).compactMap { tab in
-            tab.history.indices.contains(tab.historyIndex) ? tab.history[tab.historyIndex] : nil
-        })
-        let pages = try cache.pages(for: urls, accessedAt: accessedAt)
-        for windowIndex in snapshot.windows.indices {
-            for tabIndex in snapshot.windows[windowIndex].tabs.indices {
-                let tab = snapshot.windows[windowIndex].tabs[tabIndex]
-                snapshot.windows[windowIndex].tabs[tabIndex].cachedPages =
-                    tab.history.indices.contains(tab.historyIndex)
-                    ? [tab.history[tab.historyIndex]].compactMap { pages[$0] }
-                    : []
-            }
-        }
+        guard let snapshot else { return nil }
         return PersistedApplicationSession(
             windows: snapshot.windows,
             keyWindowIndex: snapshot.keyWindowIndex
@@ -178,8 +235,10 @@ public struct SessionRepository: Sendable {
 
     public func clear() throws {
         try database.write { db in
+            try db.execute(sql: "DELETE FROM browser_tab_history")
             try db.execute(sql: "DELETE FROM browser_windows")
             try db.execute(sql: "DELETE FROM browser_session")
         }
     }
+
 }

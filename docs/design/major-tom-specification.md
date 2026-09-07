@@ -66,13 +66,16 @@ empties it, or after fourteen days. Drafts never synchronize to another Mac.
 
 Window restoration is separate from global history. Major Tom restores each window's frame,
 tab order and selection, and each tab's Back/Forward list, cursor, zoom, titles, and per-entry
-scroll position. Back and Forward prefer an available cached representation; when it has been
-evicted, Major Tom reloads that entry without changing the tab's Back/Forward structure.
+scroll position. Every visit can retain its URL, title, favicon, exact response status, meta
+and bytes, plus expanded image-link URLs and collapsed preformatted sections. Back and Forward
+reconstruct that exact visit with current rendering preferences and restore its reading state.
+When saved response bytes are unavailable, Major Tom reloads the entry without changing the
+tab's Back/Forward structure. Client-certificate-authenticated response bodies are not retained.
 
-Cached response bodies and their full-text index are local browser data and never synchronize.
-The cross-tab cache retains an individual response of at most 32 MiB, expires responses after
-120 days, and evicts least-recently-used responses until total source bodies occupy no more
-than 1 GiB. Clear Browsing Data removes global history, restored-session state, and this cache.
+Back/Forward response snapshots are local browser data and never synchronize. Each tab keeps
+at most 32 MiB of response bodies in memory; the active session's entries remain in its
+standalone SQLite file so older entries can be loaded on demand. Clear Browsing Data removes
+global history and the complete saved Back/Forward session.
 
 ## Trust, security, and privacy
 

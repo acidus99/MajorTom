@@ -86,6 +86,17 @@ public final class MajorTomDatabase: @unchecked Sendable {
         }
     }
 
+    /// Removes browser snapshots left in this database by the superseded cache design.
+    /// New Back/Forward data is owned by `BackForwardCacheDatabase`.
+    public func clearLegacyBrowserCache() throws {
+        try write { database in
+            try database.execute(sql: "DELETE FROM page_cache")
+            try database.execute(sql: "DELETE FROM page_cache_fts")
+            try database.execute(sql: "DELETE FROM browser_windows")
+            try database.execute(sql: "DELETE FROM browser_session")
+        }
+    }
+
     private static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1-foundation") { database in

@@ -54,8 +54,79 @@ public struct CachedPage: Codable, Equatable, Sendable {
     }
 }
 
+/// Browser-owned interaction state that belongs to one visit in a tab's Back/Forward list.
+/// The response remains authoritative; this small envelope records only how the reader left it.
+public struct HistoryPresentationState: Codable, Equatable, Sendable {
+    public var version: Int
+    public var scrollY: Double
+    public var expandedImages: [URL]
+    public var collapsedPreformatted: [Int]
+
+    public init(
+        version: Int = 1,
+        scrollY: Double = 0,
+        expandedImages: [URL] = [],
+        collapsedPreformatted: [Int] = []
+    ) {
+        self.version = version
+        self.scrollY = scrollY.isFinite ? max(0, scrollY) : 0
+        self.expandedImages = Array(Set(expandedImages)).sorted { $0.absoluteString < $1.absoluteString }
+        self.collapsedPreformatted = Array(Set(collapsedPreformatted.filter { $0 > 0 })).sorted()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, scrollY, expandedImages, collapsedPreformatted
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            version: try values.decodeIfPresent(Int.self, forKey: .version) ?? 1,
+            scrollY: try values.decodeIfPresent(Double.self, forKey: .scrollY) ?? 0,
+            expandedImages: try values.decodeIfPresent([URL].self, forKey: .expandedImages) ?? [],
+            collapsedPreformatted: try values.decodeIfPresent([Int].self, forKey: .collapsedPreformatted) ?? []
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(version, forKey: .version)
+        try values.encode(scrollY, forKey: .scrollY)
+        try values.encode(expandedImages, forKey: .expandedImages)
+        try values.encode(collapsedPreformatted, forKey: .collapsedPreformatted)
+    }
+}
+
+/// One particular visit, not merely the latest response for a URL.
+public struct BackForwardEntry: Codable, Equatable, Sendable, Identifiable {
+    public let id: UUID
+    public var url: URL
+    public var title: String?
+    public var favicon: String?
+    public var page: CachedPage?
+    public var presentation: HistoryPresentationState
+
+    public init(
+        id: UUID = UUID(),
+        url: URL,
+        title: String? = nil,
+        favicon: String? = nil,
+        page: CachedPage? = nil,
+        presentation: HistoryPresentationState = HistoryPresentationState()
+    ) {
+        self.id = id
+        self.url = url
+        self.title = title
+        self.favicon = favicon
+        self.page = page
+        self.presentation = presentation
+    }
+}
+
 /// One tab's durable navigation state, as written to and read from a saved session.
 public struct RestoredTabState: Codable, Equatable, Sendable {
+    public var tabID: UUID
+    public var entries: [BackForwardEntry]
     public var history: [URL]
     public var historyIndex: Int
     public var cachedPages: [CachedPage]
@@ -67,6 +138,8 @@ public struct RestoredTabState: Codable, Equatable, Sendable {
     public var scrollOffsets: [Int: Double]?
 
     public init(
+        tabID: UUID = UUID(),
+        entries: [BackForwardEntry]? = nil,
         history: [URL],
         historyIndex: Int,
         cachedPages: [CachedPage],
@@ -75,6 +148,16 @@ public struct RestoredTabState: Codable, Equatable, Sendable {
         documentTitle: String? = nil,
         scrollOffsets: [Int: Double]? = nil
     ) {
+        self.tabID = tabID
+        self.entries = entries ?? history.enumerated().map { index, url in
+            let page = cachedPages.first { $0.url == url }
+            return BackForwardEntry(
+                url: url,
+                title: page?.documentTitle ?? page?.title,
+                page: page,
+                presentation: HistoryPresentationState(scrollY: scrollOffsets?[index] ?? 0)
+            )
+        }
         self.history = history
         self.historyIndex = historyIndex
         self.cachedPages = cachedPages
@@ -82,6 +165,41 @@ public struct RestoredTabState: Codable, Equatable, Sendable {
         self.title = title
         self.documentTitle = documentTitle
         self.scrollOffsets = scrollOffsets
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case tabID, entries, history, historyIndex, cachedPages, zoom, title, documentTitle, scrollOffsets
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let history = try values.decodeIfPresent([URL].self, forKey: .history) ?? []
+        let cachedPages = try values.decodeIfPresent([CachedPage].self, forKey: .cachedPages) ?? []
+        let scrollOffsets = try values.decodeIfPresent([Int: Double].self, forKey: .scrollOffsets)
+        self.init(
+            tabID: try values.decodeIfPresent(UUID.self, forKey: .tabID) ?? UUID(),
+            entries: try values.decodeIfPresent([BackForwardEntry].self, forKey: .entries),
+            history: history,
+            historyIndex: try values.decodeIfPresent(Int.self, forKey: .historyIndex) ?? -1,
+            cachedPages: cachedPages,
+            zoom: try values.decodeIfPresent(Double.self, forKey: .zoom) ?? 1,
+            title: try values.decodeIfPresent(String.self, forKey: .title),
+            documentTitle: try values.decodeIfPresent(String.self, forKey: .documentTitle),
+            scrollOffsets: scrollOffsets
+        )
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(tabID, forKey: .tabID)
+        try values.encode(entries, forKey: .entries)
+        try values.encode(history, forKey: .history)
+        try values.encode(historyIndex, forKey: .historyIndex)
+        try values.encode(cachedPages, forKey: .cachedPages)
+        try values.encode(zoom, forKey: .zoom)
+        try values.encodeIfPresent(title, forKey: .title)
+        try values.encodeIfPresent(documentTitle, forKey: .documentTitle)
+        try values.encodeIfPresent(scrollOffsets, forKey: .scrollOffsets)
     }
 }
 
@@ -115,17 +233,22 @@ public struct NavigationState: Equatable, Sendable {
     /// of a long session put together, so the budget is in bytes rather than entries.
     public static let defaultCacheByteBudget = 32 * 1_024 * 1_024
 
-    public private(set) var history: [URL] = []
+    public let tabID: UUID
+    public private(set) var entries: [BackForwardEntry] = []
+    public var history: [URL] { entries.map(\.url) }
     /// Index into `history`, or -1 when nothing has been committed.
     public private(set) var historyIndex: Int = -1
-    public private(set) var cachedPages: [URL: CachedPage] = [:]
+    public var cachedPages: [URL: CachedPage] {
+        Dictionary(entries.compactMap { entry in entry.page.map { (entry.url, $0) } },
+                   uniquingKeysWith: { _, newest in newest })
+    }
 
     /// Reading positions keyed by history entry rather than by URL, so two visits to one
     /// address can hold different positions.
-    private var scrollOffsets: [Int: Double] = [:]
     private let cacheByteBudget: Int
 
-    public init(cacheByteBudget: Int = NavigationState.defaultCacheByteBudget) {
+    public init(tabID: UUID = UUID(), cacheByteBudget: Int = NavigationState.defaultCacheByteBudget) {
+        self.tabID = tabID
         self.cacheByteBudget = cacheByteBudget
     }
 
@@ -138,24 +261,36 @@ public struct NavigationState: Equatable, Sendable {
         restoring state: RestoredTabState,
         cacheByteBudget: Int = NavigationState.defaultCacheByteBudget
     ) {
+        tabID = state.tabID
         self.cacheByteBudget = cacheByteBudget
-        history = state.history
-        historyIndex = state.history.isEmpty
+        entries = state.entries.isEmpty && !state.history.isEmpty
+            ? state.history.enumerated().map { index, url in
+                let page = state.cachedPages.first { $0.url == url }
+                return BackForwardEntry(
+                    url: url,
+                    title: page?.documentTitle ?? page?.title,
+                    page: page,
+                    presentation: HistoryPresentationState(scrollY: state.scrollOffsets?[index] ?? 0)
+                )
+            }
+            : state.entries
+        historyIndex = entries.isEmpty
             ? -1
-            : min(max(state.historyIndex, 0), state.history.count - 1)
-        cachedPages = Dictionary(
-            state.cachedPages.map { ($0.url, $0) },
-            uniquingKeysWith: { first, _ in first }
-        )
-        scrollOffsets = (state.scrollOffsets ?? [:]).filter {
-            history.indices.contains($0.key) && $0.value.isFinite && $0.value >= 0
-        }
+            : min(max(state.historyIndex, 0), entries.count - 1)
     }
 
     // MARK: - Position
 
     public var committedURL: URL? {
-        history.indices.contains(historyIndex) ? history[historyIndex] : nil
+        entries.indices.contains(historyIndex) ? entries[historyIndex].url : nil
+    }
+
+    public var currentEntryID: UUID? {
+        entries.indices.contains(historyIndex) ? entries[historyIndex].id : nil
+    }
+
+    public var currentEntry: BackForwardEntry? {
+        entries.indices.contains(historyIndex) ? entries[historyIndex] : nil
     }
 
     public var canGoBack: Bool { historyIndex > 0 }
@@ -180,16 +315,14 @@ public struct NavigationState: Equatable, Sendable {
         case .new:
             // A new destination supersedes the forward branch, and the offsets recorded
             // for the entries that branch contained.
-            if historyIndex + 1 < history.count {
-                history.removeSubrange((historyIndex + 1)...)
-                scrollOffsets = scrollOffsets.filter { $0.key <= historyIndex }
+            if historyIndex + 1 < entries.count {
+                entries.removeSubrange((historyIndex + 1)...)
             }
             // Re-committing the entry already at the cursor is not a new entry. Following
             // a link back to the page you are on should not grow the history.
-            guard history.last != url else { return false }
-            history.append(url)
-            historyIndex = history.count - 1
-            scrollOffsets[historyIndex] = 0
+            guard entries.last?.url != url else { return false }
+            entries.append(BackForwardEntry(url: url))
+            historyIndex = entries.count - 1
             return true
         }
     }
@@ -200,62 +333,107 @@ public struct NavigationState: Equatable, Sendable {
     public mutating func goBack() -> URL? {
         guard canGoBack else { return nil }
         historyIndex -= 1
-        return history[historyIndex]
+        return entries[historyIndex].url
     }
 
     /// Steps the cursor forward one entry.
     public mutating func goForward() -> URL? {
         guard canGoForward else { return nil }
         historyIndex += 1
-        return history[historyIndex]
+        return entries[historyIndex].url
     }
 
     // MARK: - Reading position
 
     /// The offset saved for the entry the cursor is on.
-    public var scrollOffset: Double { scrollOffsets[historyIndex] ?? 0 }
+    public var scrollOffset: Double {
+        entries.indices.contains(historyIndex) ? entries[historyIndex].presentation.scrollY : 0
+    }
 
     public func scrollOffset(forHistoryIndex index: Int) -> Double {
-        scrollOffsets[index] ?? 0
+        entries.indices.contains(index) ? entries[index].presentation.scrollY : 0
+    }
+
+    public func presentationState(forHistoryIndex index: Int) -> HistoryPresentationState? {
+        entries.indices.contains(index) ? entries[index].presentation : nil
     }
 
     /// Records how far down the current entry the reader has scrolled.
     public mutating func recordScrollOffset(_ offset: Double) {
-        guard history.indices.contains(historyIndex) else { return }
-        scrollOffsets[historyIndex] = max(0, offset)
+        guard entries.indices.contains(historyIndex), offset.isFinite else { return }
+        entries[historyIndex].presentation.scrollY = max(0, offset)
+    }
+
+    public mutating func setImage(_ url: URL, expanded: Bool) {
+        guard entries.indices.contains(historyIndex) else { return }
+        var values = Set(entries[historyIndex].presentation.expandedImages)
+        if expanded { values.insert(url) } else { values.remove(url) }
+        entries[historyIndex].presentation.expandedImages = values.sorted { $0.absoluteString < $1.absoluteString }
+    }
+
+    public mutating func setPreformattedSection(_ index: Int, collapsed: Bool) {
+        guard entries.indices.contains(historyIndex), index > 0 else { return }
+        var values = Set(entries[historyIndex].presentation.collapsedPreformatted)
+        if collapsed { values.insert(index) } else { values.remove(index) }
+        entries[historyIndex].presentation.collapsedPreformatted = values.sorted()
+    }
+
+    public mutating func updateCurrentMetadata(title: String?, favicon: String?) {
+        guard entries.indices.contains(historyIndex) else { return }
+        entries[historyIndex].title = title
+        entries[historyIndex].favicon = favicon
     }
 
     // MARK: - Cache
 
-    public func cachedPage(for url: URL) -> CachedPage? { cachedPages[url] }
+    public func cachedPage(for url: URL) -> CachedPage? {
+        guard entries.indices.contains(historyIndex), entries[historyIndex].url == url else { return nil }
+        return entries[historyIndex].page
+    }
 
     /// Stores a representation, evicting the least recently received pages if the tab is
     /// now over budget. The entry for the page on screen is never evicted: reload and the
     /// content-theme re-render both read it back.
     public mutating func cache(_ page: CachedPage) {
-        cachedPages[page.url] = page
+        guard entries.indices.contains(historyIndex), entries[historyIndex].url == page.url else { return }
+        entries[historyIndex].page = page
+        entries[historyIndex].title = page.documentTitle ?? page.title
         evictIfOverBudget()
     }
 
+    public mutating func cache(_ page: CachedPage, for entryID: UUID) {
+        guard let index = entries.firstIndex(where: { $0.id == entryID }),
+              entries[index].url == page.url else { return }
+        entries[index].page = page
+        entries[index].title = page.documentTitle ?? page.title
+        evictIfOverBudget()
+    }
+
+    public mutating func removeCurrentCachedPage() {
+        guard entries.indices.contains(historyIndex) else { return }
+        entries[historyIndex].page = nil
+    }
+
     public mutating func removeCachedPage(for url: URL) {
-        cachedPages.removeValue(forKey: url)
+        for index in entries.indices where entries[index].url == url {
+            entries[index].page = nil
+        }
     }
 
     public var cachedByteCount: Int {
-        cachedPages.values.reduce(0) { $0 + $1.body.count }
+        entries.compactMap(\.page).reduce(0) { $0 + $1.body.count }
     }
 
     private mutating func evictIfOverBudget() {
         var total = cachedByteCount
         guard total > cacheByteBudget else { return }
-        let protectedURL = committedURL
-        let candidates = cachedPages.values
-            .filter { $0.url != protectedURL }
-            .sorted { $0.receivedAt < $1.receivedAt }
-        for candidate in candidates {
+        let candidates = entries.indices
+            .filter { $0 != historyIndex && entries[$0].page != nil }
+            .sorted { entries[$0].page!.receivedAt < entries[$1].page!.receivedAt }
+        for index in candidates {
             guard total > cacheByteBudget else { break }
-            cachedPages.removeValue(forKey: candidate.url)
-            total -= candidate.body.count
+            total -= entries[index].page?.body.count ?? 0
+            entries[index].page = nil
         }
     }
 
@@ -267,13 +445,17 @@ public struct NavigationState: Equatable, Sendable {
         documentTitle: String?
     ) -> RestoredTabState {
         RestoredTabState(
+            tabID: tabID,
+            entries: entries,
             history: history,
             historyIndex: historyIndex,
             cachedPages: Array(cachedPages.values),
             zoom: zoom,
             title: title,
             documentTitle: documentTitle,
-            scrollOffsets: scrollOffsets
+            scrollOffsets: Dictionary(uniqueKeysWithValues: entries.indices.map {
+                ($0, entries[$0].presentation.scrollY)
+            })
         )
     }
 }

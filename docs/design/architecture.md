@@ -124,9 +124,8 @@ remote metadata deletion never deletes Keychain material.
 | User-approved server trust | SQLite endpoint row | Local only |
 | Open-tab summaries for other Macs | Live window model plus small UserDefaults display cache | One replaceable CloudKit record per device; URL, title, and favicon only |
 | Global browsing history | SQLite URL row | Local only, one-year retention |
-| Window/tab session, Back/Forward list, cursor, zoom, scroll | Normalized SQLite session rows | Local only |
+| Window/tab session, Back/Forward entries, response snapshots, cursor, zoom, reading state | Standalone `MajorTomBackForward.db` rows | Local only |
 | Cancelled Gemini input draft | SQLite prompt-URL row | Local only, fourteen-day expiry |
-| Page source cache and full-text index | SQLite cache and FTS5 | Local only, 120 days / 1 GiB / 32 MiB per response / LRU |
 | Capsule favicon probe cache | Small local JSON cache | Local only; a bookmark carries its last observation separately |
 | Downloads and explicitly saved pages | User-selected filesystem location | Outside app sync |
 
@@ -141,23 +140,29 @@ the local row deletion. CloudKit records are physically deleted. Delete wins ove
 edit, and a stale send completion cannot remove a newer outbox generation. Local
 cache/history/session clearing remains physical local deletion because those data never sync.
 
-Session restoration uses normalized `browser_windows`, `browser_tabs`, and
-`browser_tab_history` rows. The Back/Forward rows are deliberately distinct from global
-history: they preserve ordering, cursor position, and a scroll offset for each visit, while
-global history remains one URL-keyed recency list. Saving a session transactionally replaces
-only this small structural snapshot; cached source bodies are not embedded in it. Legacy
-UserDefaults session blobs are decoded once, their embedded pages are admitted through the
-normal cache limits, and the blob is removed only after the normalized session commits.
+Session restoration and exact Back/Forward snapshots live in the standalone
+`MajorTomBackForward.db` database. Its normalized `browser_windows`, `browser_tabs`, and
+`browser_tab_history` rows preserve window and tab order, each tab's cursor, and one row per
+visit. A visit carries its URL, one title, favicon, response status and meta, exact source
+bytes, completion state, and versioned JSON presentation state. The presentation state keeps
+scroll position, expanded image-link URLs, and one-based indexes of collapsed preformatted
+sections. The response meta supplies the MIME type; there is no duplicate MIME column.
+New standalone SQLite databases introduced by the browser-cache refactor use the `.db`
+filename extension.
 
-The local `page_cache` is shared by all tabs and stores exact source bytes, response metadata,
-completion state, titles, and the client-certificate identifier used for the response. Reads
-touch `last_accessed_at`; maintenance enforces a 120-day age limit, a 1 GiB aggregate body
-limit, a 32 MiB per-response admission limit, and least-recently-used eviction. Text responses
-also update `page_cache_fts`, an FTS5 index intended for omnibar title and previously visited
-content search. Neither table is a CloudKit source. Startup hydrates only the current page of
-each restored tab; older Back/Forward entries remain lightweight URL rows. Tabs retain a small
-in-memory hot set, then fall back to the shared cache before a traversal reloads the network
-resource, and both kinds of cache hit update LRU recency.
+Startup hydrates only the current response in each restored tab. Older entries retain their
+metadata and are loaded lazily from the standalone database on traversal. Repeated visits to
+one URL remain different entries and can therefore preserve different response bytes and
+reading state. Client-certificate-authenticated response bodies are not retained.
+
+Orderly application termination is deferred until pending per-tab Back/Forward writes and the
+final normalized session save complete. The standalone pool then performs a truncating WAL
+checkpoint, closes, and removes the disconnected `-wal` and `-shm` files; crash recovery
+retains SQLite's normal companion-file behavior.
+
+The older URL-keyed `page_cache` is not a Back/Forward source. A future resource-cache design
+will decide general response reuse, associated resources, omnibar indexing, offline behavior,
+and eviction independently of the per-visit history model.
 
 ## Presentation boundary
 

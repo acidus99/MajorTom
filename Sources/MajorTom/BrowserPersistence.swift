@@ -51,10 +51,17 @@ enum SharedMajorTomDatabase {
     }()
 }
 
-enum SharedPageCache {
-    static let shared = SharedMajorTomDatabase.shared.map { database in
-        PageCacheRepository(database: database)
-    }
+/// Window, tab, and Back/Forward snapshots live in their own SQLite file so response
+/// bodies never share a database with bookmarks, trust, certificates, or sync state.
+enum SharedBackForwardCacheDatabase {
+    static let shared: BackForwardCacheDatabase? = {
+        guard let fileURL = try? BackForwardCacheDatabase.defaultFileURL() else { return nil }
+        return try? BackForwardCacheDatabase(fileURL: fileURL)
+    }()
+}
+
+enum SharedBackForwardCacheStore {
+    static let shared = SharedBackForwardCacheDatabase.shared.map(BackForwardCacheStore.init(database:))
 }
 
 // PageCompletionState, CachedPage and RestoredTabState now live in MajorTomCore beside
@@ -88,11 +95,9 @@ final class SessionRestorationStore {
     private let key = "last-window-session-v1"
     private let applicationKey = "last-application-session-v2"
     private let sessionRepository: SessionRepository?
-    private let pageCache: PageCacheRepository?
 
     private init() {
-        sessionRepository = SharedMajorTomDatabase.shared.map(SessionRepository.init(database:))
-        pageCache = SharedPageCache.shared
+        sessionRepository = SharedBackForwardCacheDatabase.shared.map(SessionRepository.init(database:))
     }
 
     /// Migration only: reads a session written by a release that predates native
@@ -109,7 +114,7 @@ final class SessionRestorationStore {
         }
         if let data = defaults.data(forKey: applicationKey),
            let state = try? JSONDecoder().decode(RestoredApplicationState.self, from: data) {
-            saveApplication(state, importingEmbeddedCache: true)
+            saveApplication(state)
             return state
         }
         // Migrate the old single-window format instead of discarding its tab caches.
@@ -122,25 +127,13 @@ final class SessionRestorationStore {
             )],
             keyWindowIndex: 0
         )
-        saveApplication(state, importingEmbeddedCache: true)
+        saveApplication(state)
         return state
     }
 
     func saveApplication(_ state: RestoredApplicationState) {
-        saveApplication(state, importingEmbeddedCache: false)
-    }
-
-    private func saveApplication(
-        _ state: RestoredApplicationState,
-        importingEmbeddedCache: Bool
-    ) {
-        if let sessionRepository, let pageCache {
+        if let sessionRepository {
             do {
-                if importingEmbeddedCache {
-                    for page in state.windows.flatMap(\.tabs).flatMap(\.cachedPages) {
-                        try pageCache.store(page)
-                    }
-                }
                 try sessionRepository.save(Self.persistedSession(state))
                 // The normalized rows are now authoritative. Removing both legacy
                 // formats prevents future saves from rewriting cached bodies as JSON.
@@ -158,7 +151,9 @@ final class SessionRestorationStore {
 
     func clear() {
         try? sessionRepository?.clear()
-        try? pageCache?.clear()
+        // Old builds wrote sessions and URL-keyed page bodies into MajorTom.sqlite.
+        // They are no longer read, but Clear Browsing Data must still erase them.
+        try? SharedMajorTomDatabase.shared?.clearLegacyBrowserCache()
         defaults.removeObject(forKey: key)
         defaults.removeObject(forKey: applicationKey)
     }

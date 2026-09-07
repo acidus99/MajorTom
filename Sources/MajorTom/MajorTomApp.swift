@@ -217,6 +217,8 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
     private var importDataObserver: (any NSObjectProtocol)?
     private var menuObserver: (any NSObjectProtocol)?
     private var openICloudTabObserver: (any NSObjectProtocol)?
+    private var terminationTask: Task<Void, Never>?
+    private var hasPreparedForTermination = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Native tab dragging is an AppKit window-tabbing feature. Opt in before the
@@ -395,13 +397,36 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         true
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if hasPreparedForTermination { return .terminateNow }
+        if terminationTask != nil { return .terminateLater }
+
+        terminationTask = Task { @MainActor [weak self, weak sender] in
+            guard let self, let sender else { return }
+            if #available(macOS 26.0, *) {
+                await NativeTabCoordinator.shared.prepareForTermination()
+            }
+            BrowserSettingsStore.shared.flushPendingWrites()
+            try? SharedBackForwardCacheDatabase.shared?.checkpointAndClose()
+            hasPreparedForTermination = true
+            terminationTask = nil
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        // Normal termination has already performed the asynchronous preparation above.
+        // Keep this synchronous fallback for termination paths that bypass the delegate
+        // query, while avoiding any attempt to write after the pool has closed.
+        guard !hasPreparedForTermination else { return }
         if #available(macOS 26.0, *) {
             NativeTabCoordinator.shared.persistSession()
         }
         // Preferences coalesce their writes, so a change made moments before quitting
         // may still be waiting. History and drafts commit directly to SQLite.
         BrowserSettingsStore.shared.flushPendingWrites()
+        try? SharedBackForwardCacheDatabase.shared?.checkpointAndClose()
     }
 
     /// AppKit sends this responder-chain action when the native tab bar's plus button
@@ -747,6 +772,15 @@ final class NativeTabCoordinator {
             windows: windows,
             keyWindowIndex: keyWindowIndex
         ))
+    }
+
+    func prepareForTermination() async {
+        let browsers = registeredTabs.values.compactMap(\.browser)
+        var seen = Set<ObjectIdentifier>()
+        for browser in browsers where seen.insert(ObjectIdentifier(browser)).inserted {
+            await browser.flushBackForwardPersistence()
+        }
+        persistSession()
     }
 
     private func restorePendingSession(from rootWindow: NSWindow) {

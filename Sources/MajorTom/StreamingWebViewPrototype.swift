@@ -438,6 +438,56 @@ private enum PreformattedBlockPresentationScript {
 
 @available(macOS 26.0, *)
 @MainActor
+private final class PreformattedBlockStateScriptHandler: NSObject, WKScriptMessageHandler {
+    static let name = "majorTomPreformattedState"
+
+    static let userScript = WKUserScript(
+        source: """
+        (() => {
+          const report = (block) => {
+            if (!(block instanceof HTMLDetailsElement) || !block.matches('.pre-block.multiline')) { return; }
+            const blocks = Array.from(document.querySelectorAll('.pre-block'));
+            const index = blocks.indexOf(block);
+            if (index < 0) { return; }
+            window.webkit.messageHandlers.\(name).postMessage({ index: index + 1, collapsed: !block.open });
+          };
+
+          // WebKit does not reliably deliver a details element's `toggle` event to a
+          // document-level listener. Observing the `open` attribute catches both ways a
+          // block changes: clicking its summary and Major Tom's click-to-collapse code.
+          new MutationObserver((records) => {
+            for (const record of records) {
+              if (record.type === 'attributes' && record.attributeName === 'open') {
+                report(record.target);
+              }
+            }
+          }).observe(document, { attributes: true, attributeFilter: ['open'], subtree: true });
+        })();
+        """,
+        injectionTime: .atDocumentStart,
+        forMainFrameOnly: true,
+        in: .defaultClient
+    )
+
+    weak var browser: BrowserModel?
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage
+    ) {
+        guard let payload = message.body as? [String: Any],
+              let index = payload["index"] as? NSNumber,
+              let collapsed = payload["collapsed"] as? NSNumber else { return }
+        browser?.recordPreformattedState(
+            index: index.intValue,
+            collapsed: collapsed.boolValue,
+            from: message.frameInfo.request.url
+        )
+    }
+}
+
+@available(macOS 26.0, *)
+@MainActor
 final class BrowserModel: ObservableObject {
     enum HistoryDisposition {
         case new, reload, traversal
@@ -548,7 +598,9 @@ final class BrowserModel: ObservableObject {
     /// position in each of them. Owned by Core so those rules can be tested without
     /// WebKit; see `NavigationState`.
     private var navigation = NavigationState()
-    private let pageCache = SharedPageCache.shared
+    private let backForwardCache = SharedBackForwardCacheStore.shared
+    private var backForwardDebounceTask: Task<Void, Never>?
+    private var backForwardWriteTask: Task<Void, Never>?
     /// While a traversal's replacement document is loading, its initial scroll events
     /// must not overwrite the offset we are about to restore.
     private var pendingScrollRestoration: (historyIndex: Int, offset: Double)?
@@ -580,11 +632,13 @@ final class BrowserModel: ObservableObject {
     private let linkActivationScriptHandler: LinkActivationScriptHandler
     private let inlineImageScriptHandler: InlineImageScriptHandler
     private let scrollPositionScriptHandler: ScrollPositionScriptHandler
+    private let preformattedStateScriptHandler: PreformattedBlockStateScriptHandler
     /// Numbers link lines within the current document so an expanded image can be
     /// attached to the exact line that was clicked.
     private var linkSequence = 0
     /// Line identifiers whose image is currently expanded, for toggling back off.
     private var expandedInlineImages: Set<String> = []
+    private var expandableImageLines: [URL: String] = [:]
     private var contextSharingPicker: NSSharingServicePicker?
     private var lastPreferences: BrowserPreferences
 
@@ -597,6 +651,7 @@ final class BrowserModel: ObservableObject {
         let linkActivationScriptHandler = LinkActivationScriptHandler()
         let inlineImageScriptHandler = InlineImageScriptHandler()
         let scrollPositionScriptHandler = ScrollPositionScriptHandler()
+        let preformattedStateScriptHandler = PreformattedBlockStateScriptHandler()
         let userContentController = WKUserContentController()
         userContentController.addUserScript(ContextMenuScriptHandler.userScript)
         userContentController.add(
@@ -613,6 +668,12 @@ final class BrowserModel: ObservableObject {
         userContentController.addUserScript(LinkActivationScriptHandler.userScript)
         userContentController.addUserScript(InlineImagePresentationScript.userScript)
         userContentController.addUserScript(PreformattedBlockPresentationScript.userScript)
+        userContentController.addUserScript(PreformattedBlockStateScriptHandler.userScript)
+        userContentController.add(
+            preformattedStateScriptHandler,
+            contentWorld: .defaultClient,
+            name: PreformattedBlockStateScriptHandler.name
+        )
         userContentController.add(
             linkActivationScriptHandler,
             contentWorld: .defaultClient,
@@ -651,6 +712,7 @@ final class BrowserModel: ObservableObject {
         self.linkActivationScriptHandler = linkActivationScriptHandler
         self.inlineImageScriptHandler = inlineImageScriptHandler
         self.scrollPositionScriptHandler = scrollPositionScriptHandler
+        self.preformattedStateScriptHandler = preformattedStateScriptHandler
         self.page = WebPage(
             configuration: configuration,
             navigationDecider: BrowserNavigationDecider(router: router)
@@ -672,6 +734,7 @@ final class BrowserModel: ObservableObject {
                 ?? "New Tab"
             self.documentTitle = restoredState.documentTitle
                 ?? currentCachedPage?.documentTitle
+            self.favicon = self.navigation.currentEntry?.favicon
         } else {
             self.locationText = initialURL?.absoluteString ?? settings.preferences.homepage
         }
@@ -680,6 +743,7 @@ final class BrowserModel: ObservableObject {
         linkActivationScriptHandler.browser = self
         inlineImageScriptHandler.browser = self
         scrollPositionScriptHandler.browser = self
+        preformattedStateScriptHandler.browser = self
 
         router.openURL = { [weak self] url in
             self?.openLink(url)
@@ -739,7 +803,8 @@ final class BrowserModel: ObservableObject {
     }
 
     var restorationState: RestoredTabState {
-        navigation.restorationState(
+        navigation.updateCurrentMetadata(title: documentTitle ?? title, favicon: favicon)
+        return navigation.restorationState(
             zoom: pageZoom,
             title: title,
             documentTitle: documentTitle
@@ -819,6 +884,13 @@ final class BrowserModel: ObservableObject {
         disposition: HistoryDisposition,
         keepsFavicon: Bool = false
     ) {
+        if case .traversal = disposition {
+            // The caller moved the cursor only after persisting the page being left.
+        } else {
+            backForwardDebounceTask?.cancel()
+            navigation.updateCurrentMetadata(title: documentTitle ?? title, favicon: favicon)
+            persistCurrentBackForwardEntry()
+        }
         abandonScrollRestoration(for: disposition)
 
         navigationTask?.cancel()
@@ -975,6 +1047,8 @@ final class BrowserModel: ObservableObject {
 
     func goBack() {
         guard navigation.canGoBack else { return }
+        backForwardDebounceTask?.cancel()
+        persistCurrentBackForwardEntry()
         prepareScrollRestoration(for: navigation.historyIndex - 1)
         guard let url = navigation.goBack() else { return }
         updateNavigationAvailability()
@@ -983,6 +1057,8 @@ final class BrowserModel: ObservableObject {
 
     func goForward() {
         guard navigation.canGoForward else { return }
+        backForwardDebounceTask?.cancel()
+        persistCurrentBackForwardEntry()
         prepareScrollRestoration(for: navigation.historyIndex + 1)
         guard let url = navigation.goForward() else { return }
         updateNavigationAvailability()
@@ -993,6 +1069,21 @@ final class BrowserModel: ObservableObject {
         guard documentURL == activeWebDocumentURL,
               pendingScrollRestoration?.historyIndex != navigation.historyIndex else { return }
         navigation.recordScrollOffset(offset)
+        scheduleBackForwardPersistence()
+    }
+
+    fileprivate func recordPreformattedState(index: Int, collapsed: Bool, from documentURL: URL?) {
+        guard documentURL == activeWebDocumentURL else { return }
+        navigation.setPreformattedSection(index, collapsed: collapsed)
+        scheduleBackForwardPersistence()
+    }
+
+    /// Flushes this tab's coalesced presentation state before the shared database closes.
+    func flushBackForwardPersistence() async {
+        backForwardDebounceTask?.cancel()
+        backForwardDebounceTask = nil
+        persistCurrentBackForwardEntry()
+        await backForwardWriteTask?.value
     }
 
     private func prepareScrollRestoration(for index: Int) {
@@ -1001,7 +1092,8 @@ final class BrowserModel: ObservableObject {
             historyIndex: index,
             offset: offset
         )
-        isRestoringHistoryScroll = offset > 0
+        isRestoringHistoryScroll = navigation.presentationState(forHistoryIndex: index)
+            .map(Self.needsPresentationRestoration) ?? false
     }
 
     func goHome() {
@@ -1570,6 +1662,26 @@ final class BrowserModel: ObservableObject {
             displayCachedPage(cached)
             return
         }
+        if let entryID = navigation.currentEntryID, let backForwardCache {
+            Task { [weak self] in
+                let stored = try? await backForwardCache.entry(id: entryID)
+                guard let self, self.navigation.currentEntryID == entryID else { return }
+                if let page = stored?.page {
+                    self.navigation.cache(page, for: entryID)
+                    self.title = stored?.title ?? page.title ?? self.displayTitle(for: url)
+                    self.favicon = stored?.favicon
+                    BrowsingHistoryStore.shared.record(url)
+                    self.displayCachedPage(page)
+                } else {
+                    self.navigateHistoryWithoutCache(to: url)
+                }
+            }
+            return
+        }
+        navigateHistoryWithoutCache(to: url)
+    }
+
+    private func navigateHistoryWithoutCache(to url: URL) {
         if url.isFileURL {
             openFile(url, disposition: .traversal)
             return
@@ -2092,6 +2204,7 @@ final class BrowserModel: ObservableObject {
         // Line numbering restarts with each document, and no expansion survives it.
         linkSequence = 0
         expandedInlineImages.removeAll()
+        expandableImageLines.removeAll()
         let document = documentStore.createDocument()
         activeWebDocumentURL = document.url
         let navigation = page.load(document.url)
@@ -2126,6 +2239,7 @@ final class BrowserModel: ObservableObject {
         guard navigation.historyIndex == restoration.historyIndex,
               pendingScrollRestoration?.historyIndex == restoration.historyIndex else { return }
         do {
+            await restorePresentationState()
             _ = try await page.callJavaScript(
                 """
                 window.scrollTo(0, \(restoration.offset));
@@ -2148,6 +2262,29 @@ final class BrowserModel: ObservableObject {
         if pendingScrollRestoration?.historyIndex == restoration.historyIndex {
             pendingScrollRestoration = nil
             isRestoringHistoryScroll = false
+        }
+    }
+
+    private func restorePresentationState() async {
+        guard let entry = navigation.currentEntry else { return }
+        let collapsed = entry.presentation.collapsedPreformatted
+        if !collapsed.isEmpty {
+            let indices = collapsed.map(String.init).joined(separator: ",")
+            _ = try? await page.callJavaScript(
+                """
+                (() => {
+                  const collapsed = new Set([\(indices)]);
+                  document.querySelectorAll('.pre-block').forEach((block, index) => {
+                    if (collapsed.has(index + 1)) { block.open = false; }
+                  });
+                })();
+                """
+            )
+        }
+        for url in entry.presentation.expandedImages {
+            guard let lineIdentifier = expandableImageLines[url],
+                  !expandedInlineImages.contains(lineIdentifier) else { continue }
+            toggleInlineImage(lineIdentifier: lineIdentifier, url: url)
         }
     }
 
@@ -2293,6 +2430,14 @@ final class BrowserModel: ObservableObject {
 
     private func displayCachedPage(_ cached: CachedPage) {
         navigationTask?.cancel()
+        if pendingScrollRestoration == nil, navigation.currentEntry != nil {
+            pendingScrollRestoration = (
+                historyIndex: navigation.historyIndex,
+                offset: navigation.scrollOffset
+            )
+            isRestoringHistoryScroll = (navigation.currentEntry?.presentation)
+                .map(Self.needsPresentationRestoration) ?? false
+        }
         internalPage = nil
         isLoading = false
         // A restored/cached page has no live TLS connection. Leaving the previous
@@ -2330,19 +2475,61 @@ final class BrowserModel: ObservableObject {
 
     /// Keeps a small hot set in the tab while the durable cache owns the global limits.
     private func cache(_ page: CachedPage) {
-        navigation.cache(page)
-        _ = try? pageCache?.store(page)
+        if page.clientCertificateID == nil {
+            navigation.cache(page)
+        } else {
+            navigation.removeCurrentCachedPage()
+        }
+        navigation.updateCurrentMetadata(title: page.documentTitle ?? page.title, favicon: favicon)
+        if page.clientCertificateID != nil,
+           let backForwardCache, let entry = navigation.currentEntry {
+            let tabID = navigation.tabID
+            let position = navigation.historyIndex
+            enqueueBackForwardWrite {
+                try? await backForwardCache.removeResponse(id: entry.id)
+                try? await backForwardCache.save(entry, tabID: tabID, position: position)
+            }
+            return
+        }
+        persistCurrentBackForwardEntry()
     }
 
-    /// Back/Forward first checks the tab's hot set, then the cross-tab SQLite cache.
+    /// Back/Forward first checks the tab's hot set, then its entry in the standalone cache.
     private func cachedPage(for url: URL) -> CachedPage? {
-        if let page = navigation.cachedPage(for: url) {
-            _ = try? pageCache?.touch(url)
-            return page
+        navigation.cachedPage(for: url)
+    }
+
+    private func scheduleBackForwardPersistence() {
+        backForwardDebounceTask?.cancel()
+        backForwardDebounceTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            self?.persistCurrentBackForwardEntry()
         }
-        guard let pageCache, let page = try? pageCache.page(for: url) else { return nil }
-        navigation.cache(page)
-        return page
+    }
+
+    private func persistCurrentBackForwardEntry() {
+        guard let backForwardCache, let entry = navigation.currentEntry else { return }
+        let tabID = navigation.tabID
+        let position = navigation.historyIndex
+        enqueueBackForwardWrite {
+            try? await backForwardCache.save(entry, tabID: tabID, position: position)
+        }
+    }
+
+    private func enqueueBackForwardWrite(
+        _ operation: @escaping @Sendable () async -> Void
+    ) {
+        let previous = backForwardWriteTask
+        backForwardWriteTask = Task {
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            await operation()
+        }
+    }
+
+    private static func needsPresentationRestoration(_ state: HistoryPresentationState) -> Bool {
+        state.scrollY > 0 || !state.expandedImages.isEmpty || !state.collapsedPreformatted.isEmpty
     }
 
     /// Whether a failed connection is one where an archived copy might help.
@@ -2407,7 +2594,7 @@ final class BrowserModel: ObservableObject {
         // its initial y=0 layout. restoreScrollPosition reveals it only after the saved
         // offset has crossed the compositor boundary, avoiding a one-frame top flash.
         if pendingScrollRestoration?.historyIndex == navigation.historyIndex,
-           pendingScrollRestoration?.offset ?? 0 > 0 {
+           (navigation.currentEntry?.presentation).map(Self.needsPresentationRestoration) == true {
             theme += "\nhtml { visibility: hidden !important; }"
         }
         theme += "\n" + settings.preferences.contentWidth.css
@@ -2554,6 +2741,11 @@ final class BrowserModel: ObservableObject {
             // image, so a single link is never both auto-inlined and click-expandable.
             isExpandableImage = !willAutoInline(destination: destination, baseURL: baseURL)
                 && GemtextLinkHint.isInlineImageCandidate(destination: destination, relativeTo: baseURL)
+            if isExpandableImage,
+               let absolute = URL(string: destination, relativeTo: baseURL)?.absoluteURL,
+               let linkIdentifier {
+                expandableImageLines[absolute] = linkIdentifier
+            }
         }
 
         yieldToDocument(renderer.render(
@@ -2635,11 +2827,15 @@ final class BrowserModel: ObservableObject {
     /// undo and keeps a long page of image links from growing without bound.
     func toggleInlineImage(lineIdentifier: String, url: URL) {
         if expandedInlineImages.remove(lineIdentifier) != nil {
+            navigation.setImage(url, expanded: false)
+            scheduleBackForwardPersistence()
             Task { await removeInlineImage(lineIdentifier: lineIdentifier) }
             return
         }
 
         expandedInlineImages.insert(lineIdentifier)
+        navigation.setImage(url, expanded: true)
+        scheduleBackForwardPersistence()
         let figureIdentifier = "mt-inline-\(lineIdentifier)"
         let fileName = inlineImageFileName(for: url, fallback: nil)
         let resource = resourceStore.createResource()
@@ -2809,6 +3005,8 @@ final class BrowserModel: ObservableObject {
 
         if let record = await store.freshRecord(for: endpoint) {
             favicon = record.emoji
+            navigation.updateCurrentMetadata(title: documentTitle ?? title, favicon: favicon)
+            persistCurrentBackForwardEntry()
             BookmarksModel.shared.updateFavicon(
                 record.emoji,
                 for: endpoint,
@@ -2846,6 +3044,8 @@ final class BrowserModel: ObservableObject {
         guard let current = committedURL.flatMap(CapsuleEndpoint.init(url:)),
               current == endpoint else { return }
         favicon = emoji
+        navigation.updateCurrentMetadata(title: documentTitle ?? title, favicon: emoji)
+        persistCurrentBackForwardEntry()
     }
 
     private func probeFavicon(_ target: GeminiRequestTarget) async -> FaviconProbe {

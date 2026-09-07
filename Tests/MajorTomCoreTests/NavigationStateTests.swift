@@ -107,6 +107,56 @@ final class NavigationStateTests: XCTestCase {
         XCTAssertEqual(state.scrollOffset(forHistoryIndex: 2), 940)
     }
 
+    func testRepeatedURLVisitsKeepDifferentResponsesAndPresentationState() {
+        var state = NavigationState()
+        state.commit(one, disposition: .new)
+        state.cache(page(url: one, bytes: 10))
+        state.setImage(URL(string: "gemini://example.com/one.png")!, expanded: true)
+        state.setPreformattedSection(3, collapsed: true)
+        state.commit(two, disposition: .new)
+        state.commit(one, disposition: .new)
+        state.cache(page(url: one, bytes: 20))
+
+        XCTAssertEqual(state.entries[0].page?.body.count, 10)
+        XCTAssertEqual(state.entries[2].page?.body.count, 20)
+        XCTAssertEqual(state.entries[0].presentation.collapsedPreformatted, [3])
+        XCTAssertTrue(state.entries[2].presentation.collapsedPreformatted.isEmpty)
+    }
+
+    func testPresentationStateStoresOnlyExpandedImagesAndCollapsedPreformattedSections() {
+        var state = NavigationState()
+        let image = URL(string: "gemini://example.com/photo.png")!
+        state.commit(one, disposition: .new)
+        state.setImage(image, expanded: true)
+        state.setImage(image, expanded: true)
+        state.setPreformattedSection(1, collapsed: true)
+        state.setPreformattedSection(3, collapsed: true)
+        state.setPreformattedSection(1, collapsed: false)
+
+        XCTAssertEqual(state.currentEntry?.presentation.expandedImages, [image])
+        XCTAssertEqual(state.currentEntry?.presentation.collapsedPreformatted, [3])
+    }
+
+    func testPresentationStateDecodingSanitizesStoredValues() throws {
+        let data = Data(#"{"version":1,"scrollY":-5,"expandedImages":["gemini://example.com/b.png","gemini://example.com/b.png","gemini://example.com/a.png"],"collapsedPreformatted":[3,-1,3,1]}"#.utf8)
+
+        let state = try JSONDecoder().decode(HistoryPresentationState.self, from: data)
+
+        XCTAssertEqual(state.scrollY, 0)
+        XCTAssertEqual(state.expandedImages.map(\.lastPathComponent), ["a.png", "b.png"])
+        XCTAssertEqual(state.collapsedPreformatted, [1, 3])
+    }
+
+    func testLegacyRestorationDataCreatesStableEntryModel() throws {
+        let data = Data(#"{"history":["gemini://example.com/one"],"historyIndex":0,"cachedPages":[],"zoom":1,"title":"Old","scrollOffsets":{"0":42}}"#.utf8)
+
+        let restored = try JSONDecoder().decode(RestoredTabState.self, from: data)
+
+        XCTAssertEqual(restored.entries.map(\.url), [one])
+        XCTAssertEqual(restored.entries[0].presentation.scrollY, 42)
+        XCTAssertEqual(restored.title, "Old")
+    }
+
     func testScrollOffsetIsClampedAtZero() {
         var state = NavigationState()
         state.commit(one, disposition: .new)
@@ -174,8 +224,8 @@ final class NavigationStateTests: XCTestCase {
     func testRestorationRoundTripsHistoryAndCache() {
         var state = NavigationState()
         state.commit(one, disposition: .new)
-        state.commit(two, disposition: .new)
         state.cache(page(url: one, bytes: 10))
+        state.commit(two, disposition: .new)
         state.cache(page(url: two, bytes: 20))
 
         let saved = state.restorationState(zoom: 1.3, title: "Two", documentTitle: "Two")
@@ -184,8 +234,8 @@ final class NavigationStateTests: XCTestCase {
         XCTAssertEqual(restored.history, [one, two])
         XCTAssertEqual(restored.committedURL, two)
         XCTAssertEqual(saved.zoom, 1.3)
-        XCTAssertEqual(restored.cachedPage(for: one)?.body.count, 10)
-        XCTAssertEqual(restored.cachedPage(for: two)?.body.count, 20)
+        XCTAssertEqual(restored.entries[0].page?.body.count, 10)
+        XCTAssertEqual(restored.entries[1].page?.body.count, 20)
     }
 
     func testRestorationRoundTripsScrollOffsetsByHistoryEntry() {

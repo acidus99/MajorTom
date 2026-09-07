@@ -52,6 +52,34 @@ final class MajorTomDatabaseTests: XCTestCase {
         try database.validate()
     }
 
+    func testLegacyBrowserCacheClearRemovesOldSessionAndPageRows() throws {
+        let database = try MajorTomDatabase(inMemory: ())
+        try database.write { db in
+            try db.execute(
+                sql: "INSERT INTO browser_session (singleton, key_window_index, updated_at) VALUES (1, 0, ?)",
+                arguments: [Date()]
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO page_cache (
+                        url, mime_type, body, body_size, completion,
+                        received_at, last_accessed_at
+                    ) VALUES ('gemini://example.com/', 'text/gemini', ?, 4, 'complete', ?, ?)
+                    """,
+                arguments: [Data("test".utf8), Date(), Date()]
+            )
+        }
+
+        try database.clearLegacyBrowserCache()
+
+        XCTAssertEqual(try database.read {
+            try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM browser_session")
+        }, 0)
+        XCTAssertEqual(try database.read {
+            try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM page_cache")
+        }, 0)
+    }
+
     func testCloudMigrationAddsTransitionalBookmarkColumns() throws {
         let database = try MajorTomDatabase(inMemory: ())
         try database.write { db in

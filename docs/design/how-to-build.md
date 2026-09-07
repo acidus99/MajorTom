@@ -34,6 +34,12 @@ MAJOR_TOM_PROVISIONING_PROFILE="/absolute/path/to/Major Tom Development.provisio
 Scripts/build-app.sh
 ```
 
+For debug builds, the packaging script validates that the configured signing identity is
+available and that an embedded profile authorizes the requested APNs environment. If either
+check fails, it falls back to an ad-hoc signature so the resulting application remains
+launchable, and prints that iCloud sync is unavailable. Release builds fail instead of
+silently changing their signing mode.
+
 For a reusable local development-signing setup, create `private/env/build-local.env` with those same two variables. The `private/env/` directory is ignored by Git; the release setup below shows how to create it from scratch.
 
 The first development use creates Major Tom's private CloudKit zone and record types. Every
