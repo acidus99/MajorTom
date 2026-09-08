@@ -644,6 +644,11 @@ final class BrowserModel: ObservableObject {
     /// While a traversal's replacement document is loading, its initial scroll events
     /// must not overwrite the offset we are about to restore.
     private var pendingScrollRestoration: (historyIndex: Int, offset: Double)?
+    /// Restored inline images load through WebKit after their document finishes. Keep
+    /// track of their final layout so their added height can be corrected after the
+    /// normal initial restoration has revealed the document.
+    private var pendingRestoredInlineImageCount = 0
+    private var pendingInlineImageScrollCorrection: (historyIndex: Int, offset: Double)?
     /// The opaque URL of the document currently hosted by WebKit. Script messages from
     /// a page being replaced can arrive just after the next entry commits; checking this
     /// identity prevents that late message from being filed under the new history entry.
@@ -1254,6 +1259,8 @@ final class BrowserModel: ObservableObject {
         )
         isRestoringHistoryScroll = navigation.presentationState(forHistoryIndex: index)
             .map(Self.needsPresentationRestoration) ?? false
+        pendingRestoredInlineImageCount = 0
+        pendingInlineImageScrollCorrection = nil
     }
 
     func goHome() {
@@ -2459,8 +2466,19 @@ final class BrowserModel: ObservableObject {
     ) async {
         guard navigation.historyIndex == restoration.historyIndex,
               pendingScrollRestoration?.historyIndex == restoration.historyIndex else { return }
+        let restoredImageCount = await restorePresentationState()
+        if restoredImageCount > 0 {
+            pendingInlineImageScrollCorrection = restoration
+        }
+        await applyScrollRestoration(restoration)
+    }
+
+    private func applyScrollRestoration(
+        _ restoration: (historyIndex: Int, offset: Double)
+    ) async {
+        guard navigation.historyIndex == restoration.historyIndex,
+              pendingScrollRestoration?.historyIndex == restoration.historyIndex else { return }
         do {
-            await restorePresentationState()
             _ = try await page.callJavaScript(
                 """
                 window.scrollTo(0, \(restoration.offset));
@@ -2486,8 +2504,8 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    private func restorePresentationState() async {
-        guard let entry = navigation.currentEntry else { return }
+    private func restorePresentationState() async -> Int {
+        guard let entry = navigation.currentEntry else { return 0 }
         let collapsed = entry.presentation.collapsedPreformatted
         if !collapsed.isEmpty {
             let indices = collapsed.map(String.init).joined(separator: ",")
@@ -2502,16 +2520,31 @@ final class BrowserModel: ObservableObject {
                 """
             )
         }
+        var restoredImageCount = 0
         for url in entry.presentation.expandedImages {
             guard let lineIdentifier = expandableImageLines[url],
                   !expandedInlineImages.contains(lineIdentifier) else { continue }
-            toggleInlineImage(lineIdentifier: lineIdentifier, url: url)
+            expandedInlineImages.insert(lineIdentifier)
+            restoredImageCount += 1
+            let task = Task { [weak self] in
+                guard let self else { return }
+                await self.expandInlineImage(
+                    lineIdentifier: lineIdentifier,
+                    url: url,
+                    completesScrollRestoration: true
+                )
+            }
+            imageTasks.append(task)
         }
+        pendingRestoredInlineImageCount = restoredImageCount
+        return restoredImageCount
     }
 
     private func abandonScrollRestoration(for disposition: HistoryDisposition) {
         guard case .new = disposition else { return }
         pendingScrollRestoration = nil
+        pendingRestoredInlineImageCount = 0
+        pendingInlineImageScrollCorrection = nil
         isRestoringHistoryScroll = false
     }
 
@@ -3172,37 +3205,81 @@ final class BrowserModel: ObservableObject {
         expandedInlineImages.insert(lineIdentifier)
         navigation.setImage(url, expanded: true)
         scheduleBackForwardPersistence()
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.expandInlineImage(lineIdentifier: lineIdentifier, url: url)
+        }
+        imageTasks.append(task)
+    }
+
+    /// Restored image links need a second scroll correction after their layout completes.
+    /// Otherwise WebKit clamps the initial offset against the shorter document and leaves
+    /// a reader above their original position after the image appears.
+    private func expandInlineImage(
+        lineIdentifier: String,
+        url: URL,
+        completesScrollRestoration: Bool = false
+    ) async {
         let figureIdentifier = "mt-inline-\(lineIdentifier)"
         let fileName = inlineImageFileName(for: url, fallback: nil)
         let resource = resourceStore.createResource()
-        let task = Task { [weak self] in
-            guard let self else { return }
-            // Markup first: the image element has to exist for WebKit to request the
-            // resource URL that the fetch below streams into.
-            await self.insertInlineImage(
-                lineIdentifier: lineIdentifier,
-                resourceURL: resource.url,
-                linkURL: url,
+        // Markup first: the image element has to exist for WebKit to request the
+        // resource URL that the fetch below streams into.
+        await insertInlineImage(
+            lineIdentifier: lineIdentifier,
+            resourceURL: resource.url,
+            linkURL: url,
+            figureIdentifier: figureIdentifier,
+            fileName: fileName
+        )
+        await imageLimiter.acquire()
+        let metadata = await loadInlineImage(
+            url,
+            continuation: resource.continuation,
+            redirects: 0,
+            bypassesContentCache: bypassesContentCacheForPage
+        )
+        await imageLimiter.release()
+        if let metadata {
+            await updateInlineImageMetadata(
                 figureIdentifier: figureIdentifier,
-                fileName: fileName
+                metadata: metadata
             )
-            await self.imageLimiter.acquire()
-            let metadata = await self.loadInlineImage(
-                url,
-                continuation: resource.continuation,
-                redirects: 0,
-                bypassesContentCache: bypassesContentCacheForPage
-            )
-            await self.imageLimiter.release()
-            if let metadata {
-                await self.updateInlineImageMetadata(
-                    figureIdentifier: figureIdentifier,
-                    metadata: metadata
-                )
-            }
-            await self.setLineLoading(lineIdentifier: lineIdentifier, isLoading: false)
         }
-        imageTasks.append(task)
+        await setLineLoading(lineIdentifier: lineIdentifier, isLoading: false)
+        if completesScrollRestoration {
+            await restoredInlineImageDidFinishLoading()
+        }
+    }
+
+    private func restoredInlineImageDidFinishLoading() async {
+        guard pendingRestoredInlineImageCount > 0 else { return }
+        pendingRestoredInlineImageCount -= 1
+        guard pendingRestoredInlineImageCount == 0,
+              let correction = pendingInlineImageScrollCorrection else { return }
+        pendingInlineImageScrollCorrection = nil
+        _ = try? await page.callJavaScript(
+            scrollCorrectionScript(offset: correction.offset)
+        )
+    }
+
+    /// A resource stream finishing does not guarantee that WebKit has decoded and laid
+    /// out its image yet. Wait for every restored inline image, not merely the one whose
+    /// stream happened to finish last, before applying the final absolute offset.
+    private func scrollCorrectionScript(offset: Double) -> String {
+        """
+        await Promise.all(Array.from(document.querySelectorAll('img[data-mt-inline-image]')).map(async (image) => {
+          if (!image.complete) {
+            await new Promise((resolve) => {
+              image.addEventListener('load', resolve, { once: true });
+              image.addEventListener('error', resolve, { once: true });
+            });
+          }
+          if (image.decode) { await image.decode().catch(() => {}); }
+        }));
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        window.scrollTo(0, \(offset));
+        """
     }
 
     private func insertInlineImage(
