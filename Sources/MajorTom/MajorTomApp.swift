@@ -1848,7 +1848,8 @@ private struct BrowserTabView: View {
                     )
                         .opacity(
                             browser.hasPresentedInitialDocument
-                                && !browser.isRestoringHistoryScroll ? 1 : 0
+                                && (!browser.isRestoringHistoryScroll
+                                    || browser.isPresentingHistorySwipe) ? 1 : 0
                         )
                         // Keep document content edge-to-edge beneath the floating chrome,
                         // like Safari. StreamingWebViewPrototype separately insets only

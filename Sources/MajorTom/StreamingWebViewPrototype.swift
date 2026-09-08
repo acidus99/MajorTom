@@ -2,8 +2,21 @@ import AppKit
 import Combine
 import Foundation
 import MajorTomCore
+import os
 import SwiftUI
 import WebKit
+
+private let browserHistoryLogger = Logger(
+    subsystem: "dev.gemi.major-tom",
+    category: "BackForwardGesture"
+)
+
+fileprivate enum BrowserHistorySwipeDirection {
+    case back
+    case forward
+
+    var sign: CGFloat { self == .back ? 1 : -1 }
+}
 
 @available(macOS 26.0, *)
 @MainActor
@@ -489,6 +502,19 @@ private final class PreformattedBlockStateScriptHandler: NSObject, WKScriptMessa
 @available(macOS 26.0, *)
 @MainActor
 final class BrowserModel: ObservableObject {
+    fileprivate struct HistorySwipePresentation {
+        let direction: BrowserHistorySwipeDirection
+        let viewportWidth: CGFloat
+        var offset: CGFloat
+        var isReady: Bool
+    }
+
+    private struct PendingHistorySwipe {
+        let sourceEntryID: BackForwardEntry.ID
+        let targetEntryID: BackForwardEntry.ID
+        let direction: BrowserHistorySwipeDirection
+    }
+
     enum HistoryDisposition: Equatable {
         case new, reload, traversal
     }
@@ -573,6 +599,8 @@ final class BrowserModel: ObservableObject {
     /// Keeps a history entry that needs a nonzero offset behind the same placeholder
     /// until WebKit has laid it out and the offset has been applied.
     @Published private(set) var isRestoringHistoryScroll = false
+    @Published fileprivate var historySwipePresentation: HistorySwipePresentation?
+    var isPresentingHistorySwipe: Bool { historySwipePresentation != nil }
 
     /// Snapshots used to build the native click-and-hold history menus. The navigation
     /// state remains the source of truth; these are deliberately ordered nearest first.
@@ -580,6 +608,7 @@ final class BrowserModel: ObservableObject {
     var forwardHistoryEntries: [BackForwardEntry] { navigation.forwardHistoryEntries }
 
     let page: WebPage
+    let historySwipePage: WebPage
 
     /// Set by the owning window session. A tab cannot create tabs or windows itself.
     var openInNewTab: ((URL, _ inBackground: Bool) -> Void)?
@@ -619,6 +648,8 @@ final class BrowserModel: ObservableObject {
     /// a page being replaced can arrive just after the next entry commits; checking this
     /// identity prevents that late message from being filed under the new history entry.
     private var activeWebDocumentURL: URL?
+    private var pendingHistorySwipe: PendingHistorySwipe?
+    private var historySwipeGeneration = 0
     private var pendingClientCertificateChallenge: (
         target: GeminiRequestTarget,
         disposition: HistoryDisposition,
@@ -725,6 +756,10 @@ final class BrowserModel: ObservableObject {
         self.scrollPositionScriptHandler = scrollPositionScriptHandler
         self.preformattedStateScriptHandler = preformattedStateScriptHandler
         self.page = WebPage(
+            configuration: configuration,
+            navigationDecider: BrowserNavigationDecider(router: router)
+        )
+        self.historySwipePage = WebPage(
             configuration: configuration,
             navigationDecider: BrowserNavigationDecider(router: router)
         )
@@ -1060,22 +1095,130 @@ final class BrowserModel: ObservableObject {
     }
 
     func goBack() {
+        browserHistoryLogger.notice(
+            "goBack requested modelIndex=\(self.navigation.historyIndex) canBack=\(self.navigation.canGoBack) current=\(self.committedURL?.absoluteString ?? "nil", privacy: .public)"
+        )
         guard let entry = navigation.backHistoryEntries.first else { return }
         go(toHistoryEntryWithID: entry.id)
     }
 
     func goForward() {
+        browserHistoryLogger.notice(
+            "goForward requested modelIndex=\(self.navigation.historyIndex) canForward=\(self.navigation.canGoForward) current=\(self.committedURL?.absoluteString ?? "nil", privacy: .public)"
+        )
         guard let entry = navigation.forwardHistoryEntries.first else { return }
         go(toHistoryEntryWithID: entry.id)
     }
 
     func go(toHistoryEntryWithID id: BackForwardEntry.ID) {
+        browserHistoryLogger.notice(
+            "model traversal begin targetID=\(id.uuidString, privacy: .public) fromIndex=\(self.navigation.historyIndex)"
+        )
         backForwardDebounceTask?.cancel()
         persistCurrentBackForwardEntry()
-        guard let url = navigation.go(toHistoryEntryWithID: id) else { return }
+        guard let url = navigation.go(toHistoryEntryWithID: id) else {
+            browserHistoryLogger.error("model traversal rejected targetID=\(id.uuidString, privacy: .public)")
+            return
+        }
+        browserHistoryLogger.notice(
+            "model cursor moved index=\(self.navigation.historyIndex) url=\(url.absoluteString, privacy: .public)"
+        )
         prepareScrollRestoration(for: navigation.historyIndex)
         updateNavigationAvailability()
         navigateHistory(to: url)
+    }
+
+    fileprivate func prepareHistorySwipe(
+        direction: BrowserHistorySwipeDirection,
+        viewportWidth: CGFloat,
+        offset: CGFloat
+    ) async -> Bool {
+        guard let sourceEntryID = navigation.currentEntryID,
+              let destination = direction == .back
+                ? navigation.backHistoryEntries.first
+                : navigation.forwardHistoryEntries.first else { return false }
+
+        historySwipeGeneration += 1
+        let generation = historySwipeGeneration
+        pendingHistorySwipe = PendingHistorySwipe(
+            sourceEntryID: sourceEntryID,
+            targetEntryID: destination.id,
+            direction: direction
+        )
+        historySwipePresentation = HistorySwipePresentation(
+            direction: direction,
+            viewportWidth: viewportWidth,
+            offset: 0,
+            isReady: false
+        )
+
+        var cached = destination.page
+        if cached == nil, let backForwardCache {
+            cached = try? await backForwardCache.entry(id: destination.id)?.page
+        }
+        guard generation == historySwipeGeneration,
+              navigation.currentEntryID == sourceEntryID,
+              pendingHistorySwipe?.targetEntryID == destination.id else { return false }
+
+        if let cached {
+            navigation.cache(cached, for: destination.id)
+        }
+        do {
+            try await renderHistorySwipeDestination(cached, entry: destination)
+        } catch {
+            browserHistoryLogger.error(
+                "history swipe staging failed targetID=\(destination.id.uuidString, privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
+            pendingHistorySwipe = nil
+            historySwipePresentation = nil
+            return false
+        }
+        guard generation == historySwipeGeneration,
+              navigation.currentEntryID == sourceEntryID,
+              var presentation = historySwipePresentation else { return false }
+        presentation.isReady = true
+        presentation.offset = direction.sign * min(abs(offset), viewportWidth)
+        historySwipePresentation = presentation
+        browserHistoryLogger.notice(
+            "history swipe staging ready targetID=\(destination.id.uuidString, privacy: .public) cached=\(cached != nil)"
+        )
+        return true
+    }
+
+    fileprivate func updateHistorySwipe(offset: CGFloat) {
+        guard var presentation = historySwipePresentation, presentation.isReady else { return }
+        presentation.offset = presentation.direction.sign
+            * min(max(0, presentation.direction.sign * offset), presentation.viewportWidth)
+        historySwipePresentation = presentation
+    }
+
+    fileprivate func finishHistorySwipe(cancelled: Bool) {
+        guard let pendingHistorySwipe, var presentation = historySwipePresentation else { return }
+        let generation = historySwipeGeneration
+        if !cancelled {
+            go(toHistoryEntryWithID: pendingHistorySwipe.targetEntryID)
+        }
+        presentation.offset = cancelled ? 0 : presentation.direction.sign * presentation.viewportWidth
+        withAnimation(.easeOut(duration: 0.22)) {
+            historySwipePresentation = presentation
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(230))
+            if !cancelled {
+                for _ in 0..<20 where self?.isRestoringHistoryScroll == true {
+                    try? await Task.sleep(for: .milliseconds(25))
+                }
+            }
+            guard self?.historySwipeGeneration == generation else { return }
+            self?.historySwipePresentation = nil
+            self?.pendingHistorySwipe = nil
+        }
+    }
+
+    fileprivate func cancelHistorySwipePreparation() {
+        historySwipeGeneration += 1
+        pendingHistorySwipe = nil
+        historySwipePresentation = nil
     }
 
     fileprivate func recordScrollPosition(_ offset: Double, from documentURL: URL?) {
@@ -1674,26 +1817,34 @@ final class BrowserModel: ObservableObject {
     }
 
     private func navigateHistory(to url: URL) {
+        browserHistoryLogger.notice(
+            "navigateHistory url=\(url.absoluteString, privacy: .public) index=\(self.navigation.historyIndex) hotCache=\(self.cachedPage(for: url) != nil)"
+        )
         if let page = InternalPage.page(for: url) {
+            browserHistoryLogger.notice("navigateHistory route=internal")
             showInternalPage(page, disposition: .traversal)
             return
         }
         if let cached = cachedPage(for: url) {
+            browserHistoryLogger.notice("navigateHistory route=hot-cache bytes=\(cached.body.count)")
             BrowsingHistoryStore.shared.record(url)
             displayCachedPage(cached)
             return
         }
         if let entryID = navigation.currentEntryID, let backForwardCache {
+            browserHistoryLogger.notice("navigateHistory route=durable-cache id=\(entryID.uuidString, privacy: .public)")
             Task { [weak self] in
                 let stored = try? await backForwardCache.entry(id: entryID)
                 guard let self, self.navigation.currentEntryID == entryID else { return }
                 if let page = stored?.page {
+                    browserHistoryLogger.notice("durable-cache hit id=\(entryID.uuidString, privacy: .public) bytes=\(page.body.count)")
                     self.navigation.cache(page, for: entryID)
                     self.title = stored?.title ?? page.title ?? self.displayTitle(for: url)
                     self.favicon = stored?.favicon
                     BrowsingHistoryStore.shared.record(url)
                     self.displayCachedPage(page)
                 } else {
+                    browserHistoryLogger.notice("durable-cache miss id=\(entryID.uuidString, privacy: .public); reloading")
                     self.navigateHistoryWithoutCache(to: url)
                 }
             }
@@ -2252,6 +2403,9 @@ final class BrowserModel: ObservableObject {
     }
 
     private func beginDocument(at sourceURL: URL) -> AsyncThrowingStream<Data, any Error>.Continuation {
+        browserHistoryLogger.notice(
+            "beginDocument source=\(sourceURL.absoluteString, privacy: .public) replacing=\(self.activeWebDocumentURL?.absoluteString ?? "nil", privacy: .public) modelIndex=\(self.navigation.historyIndex)"
+        )
         documentContinuation?.finish()
         // Whatever was buffered belongs to the document just abandoned. Only a caller
         // that streams sets `documentContinuation` again; the one-shot pages that render
@@ -2264,11 +2418,18 @@ final class BrowserModel: ObservableObject {
         expandableImageLines.removeAll()
         let document = documentStore.createDocument()
         activeWebDocumentURL = document.url
+        browserHistoryLogger.notice(
+            "page.load start document=\(document.url.absoluteString, privacy: .public) source=\(sourceURL.absoluteString, privacy: .public)"
+        )
         let navigation = page.load(document.url)
         let restoration = pendingScrollRestoration
         Task { @MainActor [weak self] in
             do {
-                for try await event in navigation where event == .finished {
+                for try await event in navigation {
+                    browserHistoryLogger.notice(
+                        "page.load event document=\(document.url.absoluteString, privacy: .public) event=\(String(describing: event), privacy: .public)"
+                    )
+                    guard event == .finished else { continue }
                     if let restoration {
                         await self?.restoreScrollPosition(restoration)
                     }
@@ -2278,6 +2439,9 @@ final class BrowserModel: ObservableObject {
                     break
                 }
             } catch {
+                browserHistoryLogger.error(
+                    "page.load failed document=\(document.url.absoluteString, privacy: .public) error=\(String(describing: error), privacy: .public)"
+                )
                 // A superseding navigation owns both the placeholder and any pending
                 // restoration. Its own beginDocument call will handle the new document.
                 if let restoration,
@@ -2486,6 +2650,9 @@ final class BrowserModel: ObservableObject {
     }
 
     private func displayCachedPage(_ cached: CachedPage) {
+        browserHistoryLogger.notice(
+            "displayCachedPage url=\(cached.url.absoluteString, privacy: .public) bytes=\(cached.body.count) modelIndex=\(self.navigation.historyIndex)"
+        )
         navigationTask?.cancel()
         if pendingScrollRestoration == nil, navigation.currentEntry != nil {
             pendingScrollRestoration = (
@@ -2773,6 +2940,86 @@ final class BrowserModel: ObservableObject {
         } else if currentMIMEType.hasPrefix("image/") {
             showImagePage(data: currentSourceBytes, mimeType: currentMIMEType, url: committedURL, disposition: .reload)
         }
+    }
+
+    /// Renders an adjacent model-history entry into the noninteractive transition
+    /// WebView. This never changes the tab cursor and never initiates a network request.
+    private func renderHistorySwipeDestination(
+        _ cached: CachedPage?,
+        entry: BackForwardEntry
+    ) async throws {
+        let document = documentStore.createDocument()
+        let navigation = historySwipePage.load(document.url)
+        document.continuation.yield(historySwipeDocument(cached, entry: entry))
+        document.continuation.finish()
+        for try await event in navigation where event == .finished { break }
+
+        let collapsed = entry.presentation.collapsedPreformatted
+            .map(String.init)
+            .joined(separator: ",")
+        _ = try? await historySwipePage.callJavaScript(
+            """
+            (() => {
+              const collapsed = new Set([\(collapsed)]);
+              document.querySelectorAll('.pre-block').forEach((block, index) => {
+                if (collapsed.has(index + 1)) { block.open = false; }
+              });
+              window.scrollTo(0, \(entry.presentation.scrollY));
+            })();
+            """
+        )
+    }
+
+    private func historySwipeDocument(_ cached: CachedPage?, entry: BackForwardEntry) -> Data {
+        let renderer = HTMLDocumentStreamRenderer()
+        guard let cached else {
+            var document = renderer.documentStart(
+                themeCSS: themeCSS,
+                baseURL: entry.url,
+                browserGenerated: true
+            )
+            document.append(Data("<p class=\"eyebrow\">History</p><h1>\(HTMLDocumentStreamRenderer.escape(entry.title ?? displayTitle(for: entry.url)))</h1>".utf8))
+            document.append(renderer.documentEnd())
+            return document
+        }
+
+        var document = renderer.documentStart(
+            themeCSS: themeCSS,
+            baseURL: cached.url,
+            browserGenerated: ViewSourceURL.isViewSource(cached.url)
+        )
+        if ViewSourceURL.isViewSource(cached.url) {
+            document.append(Data(Self.sourceViewPrologue.utf8))
+            for line in SourceLineSplitter.lines(of: String(decoding: cached.body, as: UTF8.self)) {
+                document.append(Data(
+                    ("<div class=\"source-line\"><code>"
+                        + HTMLDocumentStreamRenderer.escape(line)
+                        + "</code></div>").utf8
+                ))
+            }
+            document.append(Data("</div>".utf8))
+        } else if cached.mimeType == "text/gemini" {
+            var decoder = IncrementalUTF8Decoder()
+            var parser = IncrementalGemtextParser()
+            let events = parser.receive(decoder.decode(cached.body) + decoder.finish()) + parser.finish()
+            for event in events {
+                document.append(renderer.render(
+                    event,
+                    options: settings.preferences.renderingOptions,
+                    baseURL: cached.url
+                ))
+            }
+        } else if cached.mimeType.hasPrefix("text/") {
+            let text = HTMLDocumentStreamRenderer.escape(String(decoding: cached.body, as: UTF8.self))
+            document.append(Data("<pre><code>\(text)</code></pre>".utf8))
+        } else if cached.mimeType.hasPrefix("image/") {
+            let source = "data:\(HTMLDocumentStreamRenderer.escapeAttribute(cached.mimeType));base64,\(cached.body.base64EncodedString())"
+            document.append(Data("<img alt=\"\" src=\"\(source)\">".utf8))
+        } else {
+            document.append(Data("<p class=\"eyebrow\">History</p><h1>\(HTMLDocumentStreamRenderer.escape(entry.title ?? displayTitle(for: entry.url)))</h1>".utf8))
+        }
+        document.append(renderer.documentEnd())
+        return document
     }
 
     private static func prompt(for challenge: ServerTrustChallenge) -> TrustPrompt {
@@ -3449,45 +3696,257 @@ struct StreamingWebViewPrototype: View {
     let scrollerTopInset: CGFloat
 
     var body: some View {
-        WebView(browser.page)
-            .webViewTextSelection(.enabled)
-            .webViewMagnificationGestures(.enabled)
-            .findNavigator(isPresented: $findNavigatorIsPresented)
-            .background(WebViewScrollerInsetAccessor(topInset: scrollerTopInset))
+        GeometryReader { geometry in
+            let swipe = browser.historySwipePresentation
+            let isBack = swipe?.direction == .back
+            let activeOffset = isBack && swipe?.isReady == true
+                ? max(0, swipe?.offset ?? 0)
+                : 0
+            let stagedOffset: CGFloat = {
+                guard let swipe, swipe.isReady else { return geometry.size.width }
+                return swipe.direction == .forward
+                    ? geometry.size.width + min(0, swipe.offset)
+                    : 0
+            }()
+
+            ZStack(alignment: .topLeading) {
+                WebView(browser.historySwipePage)
+                    .offset(x: stagedOffset)
+                    .opacity(swipe == nil ? 0 : 1)
+                    .shadow(
+                        color: .black.opacity(swipe?.direction == .forward ? 0.28 : 0),
+                        radius: 12,
+                        x: -4
+                    )
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                    .zIndex(swipe?.direction == .forward ? 2 : 0)
+
+                WebView(browser.page)
+                    .webViewTextSelection(.enabled)
+                    .webViewMagnificationGestures(.enabled)
+                    .findNavigator(isPresented: $findNavigatorIsPresented)
+                    .offset(x: activeOffset)
+                    .shadow(
+                        color: .black.opacity(isBack ? 0.28 : 0),
+                        radius: 12,
+                        x: -4
+                    )
+                    .zIndex(isBack ? 2 : 1)
+            }
+            .clipped()
+            .background(WebViewScrollerInsetAccessor(browser: browser, topInset: scrollerTopInset))
+        }
     }
 }
 
 @available(macOS 26.0, *)
 private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
+    let browser: BrowserModel
     let topInset: CGFloat
 
+    @MainActor
     final class Coordinator {
         weak var scrollView: NSScrollView?
+        weak var webView: WKWebView?
+        weak var browser: BrowserModel?
+        var eventMonitor: Any?
+        var discoveryTask: Task<Void, Never>?
+        var horizontalDelta: CGFloat = 0
+        var verticalDelta: CGFloat = 0
+        var lastHorizontalDelta: CGFloat = 0
+        var claimedSwipe = false
+        var navigationTriggered = false
+        var isTrackingGesture = false
+        var gestureEnded = false
+        var gestureCancelled = false
+        var preparationRequestID: UUID?
+        var swipeDirection: BrowserHistorySwipeDirection?
+
+        func installEventMonitorIfNeeded() {
+            guard eventMonitor == nil else { return }
+            eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { @MainActor [weak self] event in
+                self?.handleScrollWheel(event) ?? event
+            }
+        }
+
+        private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
+            guard event.type == .scrollWheel,
+                  event.hasPreciseScrollingDeltas,
+                  let webView,
+                  !webView.isHiddenOrHasHiddenAncestor,
+                  event.window === webView.window,
+                  webView.bounds.contains(webView.convert(event.locationInWindow, from: nil)) else {
+                return event
+            }
+
+            if !event.momentumPhase.isEmpty {
+                // A single physical swipe commonly continues as several momentum events.
+                // Keep consuming that whole stream so it cannot begin a second traversal.
+                if event.momentumPhase.contains(.ended) || event.momentumPhase.contains(.cancelled) {
+                    resetGesture()
+                }
+                return claimedSwipe ? nil : event
+            }
+
+            if event.phase.contains(.began) {
+                resetGesture()
+                isTrackingGesture = true
+            } else if event.phase.contains(.mayBegin), !isTrackingGesture {
+                resetGesture()
+                isTrackingGesture = true
+            } else if !isTrackingGesture {
+                resetGesture()
+                isTrackingGesture = true
+            }
+            horizontalDelta += event.scrollingDeltaX
+            verticalDelta += event.scrollingDeltaY
+            if event.scrollingDeltaX != 0 {
+                lastHorizontalDelta = event.scrollingDeltaX
+            }
+
+            if !claimedSwipe,
+               abs(horizontalDelta) >= 48,
+               abs(horizontalDelta) > abs(verticalDelta) * 1.5 {
+                let direction: BrowserHistorySwipeDirection = horizontalDelta > 0 ? .back : .forward
+                let canNavigate = direction == .back
+                    ? browser?.canGoBack == true
+                    : browser?.canGoForward == true
+                if canNavigate {
+                    beginSwipe(direction: direction, in: webView)
+                }
+            }
+
+            if navigationTriggered {
+                browser?.updateHistorySwipe(offset: horizontalDelta)
+            }
+
+            let ended = event.phase.contains(.ended) || event.phase.contains(.cancelled)
+            if ended {
+                gestureEnded = true
+                gestureCancelled = event.phase.contains(.cancelled) || !shouldCommitSwipe(in: webView)
+                if navigationTriggered {
+                    browser?.finishHistorySwipe(cancelled: gestureCancelled)
+                }
+            }
+            return claimedSwipe ? nil : event
+        }
+
+        private func beginSwipe(direction: BrowserHistorySwipeDirection, in webView: WKWebView) {
+            // Prepare the adjacent model entry without moving the model cursor. The cursor
+            // changes only if the user releases beyond the commit threshold below.
+            claimedSwipe = true
+            swipeDirection = direction
+            let requestID = UUID()
+            preparationRequestID = requestID
+            browserHistoryLogger.notice(
+                "trackpad swipe recognized direction=\(direction == .back ? "back" : "forward", privacy: .public) deltaX=\(self.horizontalDelta) canBack=\(self.browser?.canGoBack ?? false) canForward=\(self.browser?.canGoForward ?? false)"
+            )
+            Task { @MainActor [weak self, weak webView] in
+                guard let self, let webView, let browser = self.browser else { return }
+                let prepared = await browser.prepareHistorySwipe(
+                    direction: direction,
+                    viewportWidth: webView.bounds.width,
+                    offset: self.horizontalDelta
+                )
+                guard self.preparationRequestID == requestID, prepared else { return }
+                self.navigationTriggered = true
+                browser.updateHistorySwipe(offset: self.horizontalDelta)
+                if self.gestureEnded {
+                    browser.finishHistorySwipe(cancelled: self.gestureCancelled)
+                }
+            }
+        }
+
+        private func shouldCommitSwipe(in webView: WKWebView) -> Bool {
+            guard let swipeDirection, webView.bounds.width > 0 else { return false }
+            let progress = swipeDirection.sign * horizontalDelta / webView.bounds.width
+            let releaseVelocity = swipeDirection.sign * lastHorizontalDelta
+            return progress >= 0.22 || releaseVelocity >= 10
+        }
+
+        private func resetGesture() {
+            if claimedSwipe, !navigationTriggered {
+                browser?.cancelHistorySwipePreparation()
+            }
+            horizontalDelta = 0
+            verticalDelta = 0
+            lastHorizontalDelta = 0
+            claimedSwipe = false
+            navigationTriggered = false
+            isTrackingGesture = false
+            gestureEnded = false
+            gestureCancelled = false
+            preparationRequestID = nil
+            swipeDirection = nil
+        }
     }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
+        context.coordinator.browser = browser
+        context.coordinator.installEventMonitorIfNeeded()
         updateScroller(from: view, coordinator: context.coordinator)
         return view
     }
 
     func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.browser = browser
         updateScroller(from: view, coordinator: context.coordinator)
+    }
+
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
+        coordinator.discoveryTask?.cancel()
+        coordinator.discoveryTask = nil
+        if let eventMonitor = coordinator.eventMonitor {
+            NSEvent.removeMonitor(eventMonitor)
+            coordinator.eventMonitor = nil
+        }
     }
 
     private func updateScroller(from view: NSView, coordinator: Coordinator) {
         let inset = max(0, topInset)
-        DispatchQueue.main.async {
-            if coordinator.scrollView == nil {
-                coordinator.scrollView = enclosingScrollView(for: view)
+        coordinator.discoveryTask?.cancel()
+        coordinator.discoveryTask = Task { @MainActor [weak view, weak coordinator] in
+            for _ in 0..<20 {
+                guard !Task.isCancelled, let view, let coordinator else { return }
+                if coordinator.webView == nil {
+                    let webViews = hostedWebViews(for: view)
+                    for webView in webViews {
+                        webView.allowsBackForwardNavigationGestures = false
+                        if let scrollView = firstScrollView(in: webView) {
+                            var insets = scrollView.scrollerInsets
+                            insets.top = inset
+                            scrollView.scrollerInsets = insets
+                        }
+                    }
+                    // The active WebView is the latter Z-stack child; the staging view
+                    // precedes it and is noninteractive even while it is visible.
+                    coordinator.webView = webViews.last
+                    if let webView = coordinator.webView {
+                        coordinator.scrollView = firstScrollView(in: webView)
+                        browserHistoryLogger.notice(
+                            "installed model-owned trackpad history gesture webViews=\(webViews.count)"
+                        )
+                    }
+                }
+                if coordinator.scrollView == nil {
+                    coordinator.scrollView = enclosingScrollView(for: view)
+                }
+                guard let scrollView = coordinator.scrollView else {
+                    try? await Task.sleep(for: .milliseconds(50))
+                    continue
+                }
+                var insets = scrollView.scrollerInsets
+                if insets.top != inset {
+                    insets.top = inset
+                    scrollView.scrollerInsets = insets
+                }
+                if coordinator.webView != nil { return }
+                try? await Task.sleep(for: .milliseconds(50))
             }
-            guard let scrollView = coordinator.scrollView else { return }
-            var insets = scrollView.scrollerInsets
-            guard insets.top != inset else { return }
-            insets.top = inset
-            scrollView.scrollerInsets = insets
         }
     }
 
@@ -3498,6 +3957,20 @@ private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
             ancestor = candidate.superview
         }
         return nil
+    }
+
+    private func hostedWebViews(for view: NSView) -> [WKWebView] {
+        guard !view.isHiddenOrHasHiddenAncestor,
+              let root = view.window?.contentView else { return [] }
+        return visibleWebViews(in: root)
+    }
+
+    private func visibleWebViews(in view: NSView) -> [WKWebView] {
+        if let webView = view as? WKWebView,
+           !webView.isHiddenOrHasHiddenAncestor {
+            return [webView]
+        }
+        return view.subviews.flatMap(visibleWebViews(in:))
     }
 
     private func firstScrollView(in view: NSView) -> NSScrollView? {
@@ -3530,6 +4003,12 @@ private struct BrowserNavigationDecider: WebPage.NavigationDeciding {
     ) async -> WKNavigationActionPolicy {
         guard let url = action.request.url else { return .cancel }
         preferences.allowsContentJavaScript = false
+        if action.navigationType == .backForward {
+            browserHistoryLogger.error(
+                "cancelled unexpected WebKit-owned BackForward destination=\(url.absoluteString, privacy: .public)"
+            )
+            return .cancel
+        }
         if url.scheme == BrowserDocumentSchemeHandler.scheme { return .allow }
         let modifiers = action.modifierFlags
         var linkModifiers: LinkModifierKeys = []
@@ -3609,8 +4088,12 @@ private struct BrowserDocumentSchemeHandler: URLSchemeHandler, Sendable {
             let task = Task {
                 guard let url = request.url,
                       let stream = store.takeDocument(id: url.lastPathComponent) else {
+                    browserHistoryLogger.error(
+                        "scheme reply unavailable url=\(request.url?.absoluteString ?? "nil", privacy: .public)"
+                    )
                     throw URLError(.resourceUnavailable)
                 }
+                browserHistoryLogger.notice("scheme reply start url=\(url.absoluteString, privacy: .public)")
                 continuation.yield(.response(URLResponse(
                     url: url,
                     mimeType: "text/html",
@@ -3621,9 +4104,15 @@ private struct BrowserDocumentSchemeHandler: URLSchemeHandler, Sendable {
                     try Task.checkCancellation()
                     continuation.yield(.data(data))
                 }
+                browserHistoryLogger.notice("scheme reply finish url=\(url.absoluteString, privacy: .public)")
                 continuation.finish()
             }
-            continuation.onTermination = { _ in task.cancel() }
+            continuation.onTermination = { termination in
+                browserHistoryLogger.notice(
+                    "scheme reply terminated url=\(request.url?.absoluteString ?? "nil", privacy: .public) state=\(String(describing: termination), privacy: .public)"
+                )
+                task.cancel()
+            }
         }
     }
 }

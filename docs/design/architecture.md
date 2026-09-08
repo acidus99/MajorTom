@@ -60,7 +60,9 @@ User intent
 
 The transport emits typed progress, server-identity, header, body, completion, cancellation, truncation, and failure events. The decoder retains exact response bytes and explicit completion state. Parsers tolerate arbitrary chunk boundaries and keep incomplete characters and structures until they can be interpreted safely.
 
-The tab owns its committed page, pending destination, history position, active request, progress, scroll state, zoom, and document state. Tabs do not share live navigation state.
+The tab owns its committed page, pending destination, history position, active request, progress, scroll state, zoom, and document state. Tabs do not share live navigation state. Major Tom's tab history is authoritative for toolbar, menu, and trackpad Back/Forward traversal. The presentation bridge disables WebKit's private Back/Forward gesture and translates a qualifying horizontal trackpad gesture into the same tab-controller action; WebKit's retained document list is never consulted because it is neither durable across relaunch nor guaranteed to match the model after cached traversal.
+
+A second, noninteractive WebView renders the adjacent cached model entry during a swipe. Forward moves that staged surface over the active page; Back moves the active surface aside to reveal the staged page underneath. The model cursor commits only when the gesture commits, and the entire momentum stream remains claimed so one physical swipe cannot traverse more than one entry.
 
 ## Trust and persistence
 
