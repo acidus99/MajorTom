@@ -92,6 +92,27 @@ final class NavigationStateTests: XCTestCase {
         XCTAssertEqual(state.historyIndex, -1)
     }
 
+    func testHistoryMenuEntriesAreNearestFirstAndCanTraverseDirectly() {
+        var state = NavigationState()
+        state.commit(one, disposition: .new)
+        state.updateCurrentMetadata(title: "One", favicon: "1️⃣")
+        state.commit(two, disposition: .new)
+        state.updateCurrentMetadata(title: "Two", favicon: "2️⃣")
+        state.commit(three, disposition: .new)
+        state.updateCurrentMetadata(title: "Three", favicon: "3️⃣")
+        _ = state.goBack()
+
+        XCTAssertEqual(state.backHistoryEntries.map(\.url), [one])
+        XCTAssertEqual(state.forwardHistoryEntries.map(\.url), [three])
+        XCTAssertEqual(state.backHistoryEntries.first?.title, "One")
+        XCTAssertEqual(state.forwardHistoryEntries.first?.favicon, "3️⃣")
+
+        // Regression: selecting a history-menu page must preserve the entries between
+        // it and the former cursor as Forward history.
+        XCTAssertEqual(state.go(toHistoryEntryWithID: state.backHistoryEntries[0].id), one)
+        XCTAssertEqual(state.forwardHistoryEntries.map(\.url), [two, three])
+    }
+
     // MARK: - Reading position
 
     func testScrollOffsetsAreKeyedByEntryNotByURL() {

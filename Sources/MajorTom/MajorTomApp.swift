@@ -1602,6 +1602,153 @@ private struct BrowserToolbarSegmentButton: View {
     }
 }
 
+/// Keeps the usual keyboard and accessibility behavior of a navigation segment while
+/// adding Safari-style click-and-hold history selection for the pointer.
+@available(macOS 26.0, *)
+private struct BrowserHistoryToolbarSegmentButton: View {
+    let title: String
+    let systemImage: String
+    let entries: [BackForwardEntry]
+    let action: () -> Void
+    let selectEntry: (BackForwardEntry.ID) -> Void
+    @StateObject private var menuPresenter = HistoryMenuPresenter()
+
+    var body: some View {
+        BrowserToolbarSegmentButton(
+            title: "\(title) (Click and Hold for History)",
+            systemImage: systemImage,
+            isEnabled: !entries.isEmpty,
+            action: action
+        )
+        .background {
+            HistoryMenuAnchorView(
+                entries: entries,
+                presenter: menuPresenter,
+                selectEntry: selectEntry
+            )
+        }
+        // SwiftUI owns recognition of both pointer gestures. Its LongPressGesture is
+        // driven by the framework's control machinery and does not need a run-loop
+        // timer or a mouse-movement event to wake it.
+        .overlay {
+            if !entries.isEmpty {
+                Color.clear
+                    .frame(width: 30, height: 30)
+                    .contentShape(Circle())
+                    .gesture(
+                        LongPressGesture(minimumDuration: 0.35, maximumDistance: 8)
+                            .exclusively(before: TapGesture())
+                            .onEnded { result in
+                                switch result {
+                                case .first:
+                                    menuPresenter.present()
+                                case .second:
+                                    action()
+                                }
+                            }
+                    )
+                    .accessibilityHidden(true)
+            }
+        }
+    }
+}
+
+@available(macOS 26.0, *)
+private final class HistoryMenuPresenter: ObservableObject {
+    var presentation: (() -> Void)?
+
+    func present() {
+        presentation?()
+    }
+}
+
+@available(macOS 26.0, *)
+private struct HistoryMenuAnchorView: NSViewRepresentable {
+    let entries: [BackForwardEntry]
+    let presenter: HistoryMenuPresenter
+    let selectEntry: (BackForwardEntry.ID) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selectEntry: selectEntry)
+    }
+
+    func makeNSView(context: Context) -> HistoryMenuAnchorNSView {
+        let view = HistoryMenuAnchorNSView()
+        view.coordinator = context.coordinator
+        view.entries = entries
+        presenter.presentation = { [weak view] in view?.showHistoryMenu() }
+        return view
+    }
+
+    func updateNSView(_ view: HistoryMenuAnchorNSView, context: Context) {
+        context.coordinator.selectEntry = selectEntry
+        view.entries = entries
+        presenter.presentation = { [weak view] in view?.showHistoryMenu() }
+    }
+
+    final class Coordinator: NSObject {
+        var selectEntry: (BackForwardEntry.ID) -> Void
+
+        init(selectEntry: @escaping (BackForwardEntry.ID) -> Void) {
+            self.selectEntry = selectEntry
+        }
+
+        @objc func selectHistoryEntry(_ sender: NSMenuItem) {
+            guard let id = sender.representedObject as? UUID else { return }
+            selectEntry(id)
+        }
+    }
+}
+
+@available(macOS 26.0, *)
+private final class HistoryMenuAnchorNSView: NSView {
+    weak var coordinator: HistoryMenuAnchorView.Coordinator?
+    var entries: [BackForwardEntry] = []
+
+    override var acceptsFirstResponder: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    func showHistoryMenu() {
+        guard !entries.isEmpty, let coordinator else { return }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for entry in entries {
+            let title = entry.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let item = NSMenuItem(
+                title: title?.isEmpty == false ? title! : entry.url.absoluteString,
+                action: #selector(HistoryMenuAnchorView.Coordinator.selectHistoryEntry(_:)),
+                keyEquivalent: ""
+            )
+            item.target = coordinator
+            item.representedObject = entry.id
+            item.toolTip = entry.url.absoluteString
+            if let favicon = entry.favicon, !favicon.isEmpty {
+                item.image = faviconImage(favicon)
+            }
+            menu.addItem(item)
+        }
+        // Anchor to the control itself, so the menu always opens immediately beneath
+        // the button instead of following the exact pixel where the press began.
+        let menuAnchor = NSPoint(x: bounds.minX, y: bounds.minY - 4)
+        menu.popUp(positioning: nil, at: menuAnchor, in: self)
+    }
+
+    private func faviconImage(_ favicon: String) -> NSImage {
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        (favicon as NSString).draw(
+            in: NSRect(origin: .zero, size: size),
+            withAttributes: [.font: NSFont.systemFont(ofSize: 14)]
+        )
+        image.unlockFocus()
+        return image
+    }
+}
+
 @available(macOS 26.0, *)
 private struct SafariToolbarSegmentButtonStyle: ButtonStyle {
     let isHovered: Bool
@@ -1766,22 +1913,24 @@ private struct BrowserTabView: View {
                 // it. This avoids the wide spacing and broad sampling region produced by
                 // unioning two complete glass buttons.
                 HStack(spacing: 0) {
-                        BrowserToolbarSegmentButton(
+                        BrowserHistoryToolbarSegmentButton(
                             title: "Back",
                             systemImage: "chevron.left",
-                            isEnabled: browser.canGoBack,
-                            action: browser.goBack
+                            entries: browser.backHistoryEntries,
+                            action: browser.goBack,
+                            selectEntry: browser.go(toHistoryEntryWithID:)
                         )
                         .overlay(alignment: .trailing) {
                             Divider()
                                 .padding(.vertical, 7)
                                 .allowsHitTesting(false)
                         }
-                        BrowserToolbarSegmentButton(
+                        BrowserHistoryToolbarSegmentButton(
                             title: "Forward",
                             systemImage: "chevron.right",
-                            isEnabled: browser.canGoForward,
-                            action: browser.goForward
+                            entries: browser.forwardHistoryEntries,
+                            action: browser.goForward,
+                            selectEntry: browser.go(toHistoryEntryWithID:)
                         )
                 }
                 .padding(.horizontal, 3)

@@ -574,6 +574,11 @@ final class BrowserModel: ObservableObject {
     /// until WebKit has laid it out and the offset has been applied.
     @Published private(set) var isRestoringHistoryScroll = false
 
+    /// Snapshots used to build the native click-and-hold history menus. The navigation
+    /// state remains the source of truth; these are deliberately ordered nearest first.
+    var backHistoryEntries: [BackForwardEntry] { navigation.backHistoryEntries }
+    var forwardHistoryEntries: [BackForwardEntry] { navigation.forwardHistoryEntries }
+
     let page: WebPage
 
     /// Set by the owning window session. A tab cannot create tabs or windows itself.
@@ -1055,21 +1060,20 @@ final class BrowserModel: ObservableObject {
     }
 
     func goBack() {
-        guard navigation.canGoBack else { return }
-        backForwardDebounceTask?.cancel()
-        persistCurrentBackForwardEntry()
-        prepareScrollRestoration(for: navigation.historyIndex - 1)
-        guard let url = navigation.goBack() else { return }
-        updateNavigationAvailability()
-        navigateHistory(to: url)
+        guard let entry = navigation.backHistoryEntries.first else { return }
+        go(toHistoryEntryWithID: entry.id)
     }
 
     func goForward() {
-        guard navigation.canGoForward else { return }
+        guard let entry = navigation.forwardHistoryEntries.first else { return }
+        go(toHistoryEntryWithID: entry.id)
+    }
+
+    func go(toHistoryEntryWithID id: BackForwardEntry.ID) {
         backForwardDebounceTask?.cancel()
         persistCurrentBackForwardEntry()
-        prepareScrollRestoration(for: navigation.historyIndex + 1)
-        guard let url = navigation.goForward() else { return }
+        guard let url = navigation.go(toHistoryEntryWithID: id) else { return }
+        prepareScrollRestoration(for: navigation.historyIndex)
         updateNavigationAvailability()
         navigateHistory(to: url)
     }

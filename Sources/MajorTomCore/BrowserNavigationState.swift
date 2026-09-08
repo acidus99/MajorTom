@@ -299,6 +299,18 @@ public struct NavigationState: Equatable, Sendable {
         historyIndex >= 0 && historyIndex + 1 < history.count
     }
 
+    /// Entries behind the cursor, nearest first, for a Back history menu.
+    public var backHistoryEntries: [BackForwardEntry] {
+        guard canGoBack else { return [] }
+        return Array(entries[..<historyIndex].reversed())
+    }
+
+    /// Entries ahead of the cursor, nearest first, for a Forward history menu.
+    public var forwardHistoryEntries: [BackForwardEntry] {
+        guard canGoForward else { return [] }
+        return Array(entries[(historyIndex + 1)...])
+    }
+
     public var isEmpty: Bool { history.isEmpty }
 
     // MARK: - Moving
@@ -341,6 +353,18 @@ public struct NavigationState: Equatable, Sendable {
         guard canGoForward else { return nil }
         historyIndex += 1
         return entries[historyIndex].url
+    }
+
+    /// Moves directly to a history entry, preserving the complete Back/Forward list.
+    ///
+    /// This is used by the native history menus; unlike a new navigation, it must not
+    /// discard the entries between the former and selected cursor positions.
+    public mutating func go(toHistoryEntryWithID id: BackForwardEntry.ID) -> URL? {
+        guard let index = entries.firstIndex(where: { $0.id == id }), index != historyIndex else {
+            return nil
+        }
+        historyIndex = index
+        return entries[index].url
     }
 
     // MARK: - Reading position
