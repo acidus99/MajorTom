@@ -154,9 +154,6 @@ final class SessionRestorationStore {
 
     func clear() {
         try? sessionRepository?.clear()
-        // Old builds wrote sessions and URL-keyed page bodies into MajorTom.sqlite.
-        // They are no longer read, but Clear Browsing Data must still erase them.
-        try? SharedMajorTomDatabase.shared?.clearLegacyBrowserCache()
         defaults.removeObject(forKey: key)
         defaults.removeObject(forKey: applicationKey)
     }

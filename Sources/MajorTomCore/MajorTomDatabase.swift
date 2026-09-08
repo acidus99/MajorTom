@@ -86,17 +86,6 @@ public final class MajorTomDatabase: @unchecked Sendable {
         }
     }
 
-    /// Removes browser snapshots left in this database by the superseded cache design.
-    /// New Back/Forward data is owned by `BackForwardCacheDatabase`.
-    public func clearLegacyBrowserCache() throws {
-        try write { database in
-            try database.execute(sql: "DELETE FROM page_cache")
-            try database.execute(sql: "DELETE FROM page_cache_fts")
-            try database.execute(sql: "DELETE FROM browser_windows")
-            try database.execute(sql: "DELETE FROM browser_session")
-        }
-    }
-
     private static var migrator: DatabaseMigrator {
         var migrator = DatabaseMigrator()
         migrator.registerMigration("v1-foundation") { database in
@@ -141,80 +130,6 @@ public final class MajorTomDatabase: @unchecked Sendable {
                 table.column("favicon_emoji", .text)
                 table.column("favicon_fetched_at", .datetime)
             }
-            try database.create(
-                index: "bookmarks_folder_position",
-                on: "bookmarks",
-                columns: ["folder_id", "position"]
-            )
-            try database.create(table: "bookmark_sync_folders") { table in
-                table.column("id", .text).primaryKey()
-                table.column("payload", .blob).notNull()
-                table.column("modified_at", .datetime).notNull().indexed()
-            }
-            try database.create(table: "bookmark_sync_bookmarks") { table in
-                table.column("id", .text).primaryKey()
-                table.column("payload", .blob).notNull()
-                table.column("modified_at", .datetime).notNull().indexed()
-            }
-        }
-        migrator.registerMigration("v4-sessions-cache-and-search") { database in
-            try database.create(table: "browser_windows") { table in
-                table.column("id", .text).primaryKey()
-                table.column("position", .integer).notNull().unique()
-                table.column("frame_x", .double)
-                table.column("frame_y", .double)
-                table.column("frame_width", .double)
-                table.column("frame_height", .double)
-                table.column("selected_tab_index", .integer).notNull()
-            }
-            try database.create(table: "browser_tabs") { table in
-                table.column("id", .text).primaryKey()
-                table.column("window_id", .text).notNull()
-                    .references("browser_windows", onDelete: .cascade)
-                table.column("position", .integer).notNull()
-                table.column("history_index", .integer).notNull()
-                table.column("zoom", .double).notNull()
-                table.column("title", .text)
-                table.column("document_title", .text)
-                table.uniqueKey(["window_id", "position"])
-            }
-            try database.create(table: "browser_tab_history") { table in
-                table.column("tab_id", .text).notNull()
-                    .references("browser_tabs", onDelete: .cascade)
-                table.column("position", .integer).notNull()
-                table.column("url", .text).notNull()
-                table.column("scroll_offset", .double).notNull().defaults(to: 0)
-                table.primaryKey(["tab_id", "position"])
-            }
-            try database.create(table: "browser_session") { table in
-                table.column("singleton", .integer).primaryKey()
-                    .check { $0 == 1 }
-                table.column("key_window_index", .integer).notNull()
-                table.column("updated_at", .datetime).notNull()
-            }
-            try database.create(table: "page_cache") { table in
-                table.column("url", .text).primaryKey()
-                table.column("mime_type", .text).notNull()
-                table.column("body", .blob).notNull()
-                table.column("body_size", .integer).notNull()
-                    .check { $0 >= 0 }
-                table.column("completion", .text).notNull()
-                table.column("received_at", .datetime).notNull().indexed()
-                table.column("last_accessed_at", .datetime).notNull().indexed()
-                table.column("title", .text)
-                table.column("document_title", .text)
-                table.column("response_status", .integer)
-                table.column("response_meta", .text)
-                table.column("client_certificate_id", .text)
-            }
-            try database.execute(sql: """
-                CREATE VIRTUAL TABLE page_cache_fts USING fts5(
-                    url UNINDEXED,
-                    title,
-                    content,
-                    tokenize = 'unicode61'
-                )
-                """)
         }
         migrator.registerMigration("v5-security-and-sync-metadata") { database in
             try database.create(table: "trusted_server_identities") { table in
@@ -223,11 +138,6 @@ public final class MajorTomDatabase: @unchecked Sendable {
                 table.column("payload", .blob).notNull()
                 table.column("updated_at", .datetime).notNull()
                 table.primaryKey(["endpoint_host", "endpoint_port"])
-            }
-            try database.create(table: "server_trust_sync") { table in
-                table.column("id", .text).primaryKey()
-                table.column("payload", .blob).notNull()
-                table.column("modified_at", .datetime).notNull().indexed()
             }
             try database.create(table: "client_certificate_sync_descriptors") { table in
                 table.column("id", .text).primaryKey()
@@ -343,10 +253,12 @@ public final class MajorTomDatabase: @unchecked Sendable {
             try database.alter(table: "client_certificate_local_flags") { table in
                 table.add(column: "account_identity_hash", .text)
             }
-            // Retained only as a v1 migration source. The column lets the compatibility
-            // repository continue to read old rows without participating in v2 sync.
-            try database.alter(table: "server_trust_sync") { table in
-                table.add(column: "account_identity_hash", .text)
+            // A development build may have applied v5 before this cleanup landed.
+            // Preserve that upgrade path; fresh databases never create this old table.
+            if try database.tableExists("server_trust_sync") {
+                try database.alter(table: "server_trust_sync") { table in
+                    table.add(column: "account_identity_hash", .text)
+                }
             }
             try database.create(
                 index: "client_certificates_account",
@@ -358,6 +270,33 @@ public final class MajorTomDatabase: @unchecked Sendable {
                 on: "client_certificate_associations",
                 columns: ["account_identity_hash"]
             )
+        }
+        migrator.registerMigration("v8-remove-unused-local-storage") { database in
+            // No released Major Tom build ever used MajorTom.sqlite. These tables were
+            // introduced during development and superseded before release by BFCache
+            // and the record-level CloudKit outbox.
+            for table in [
+                "page_cache_fts",
+                "page_cache",
+                "browser_tab_history",
+                "browser_tabs",
+                "browser_windows",
+                "browser_session",
+                "bookmark_sync_folders",
+                "bookmark_sync_bookmarks",
+                "server_trust_sync"
+            ] where try database.tableExists(table) {
+                try database.execute(sql: "DROP TABLE \(table)")
+            }
+            // Order keys became authoritative in v6. These ordinal copies were only a
+            // migration aid, so remove both their index and the redundant values.
+            try database.execute(sql: "DROP INDEX IF EXISTS bookmarks_folder_position")
+            if try database.columns(in: "bookmark_folders").contains(where: { $0.name == "position" }) {
+                try database.execute(sql: "ALTER TABLE bookmark_folders DROP COLUMN position")
+            }
+            if try database.columns(in: "bookmarks").contains(where: { $0.name == "position" }) {
+                try database.execute(sql: "ALTER TABLE bookmarks DROP COLUMN position")
+            }
         }
         return migrator
     }

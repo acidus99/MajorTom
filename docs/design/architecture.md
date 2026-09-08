@@ -180,9 +180,8 @@ closed like the Back/Forward database.
 Stored Gemini responses replay header, body, and completion events through the same consumer
 used by live transport responses. This is a narrow compatibility boundary, not a universal
 protocol-neutral streaming framework. The policy can remain a no-op for future protocols
-until their own reuse rules are justified. The older `page_cache` table is inert and is not
-used by either cache. Omnibar indexing and purposeful offline browsing remain separate future
-systems.
+until their own reuse rules are justified. Omnibar indexing and purposeful offline browsing
+remain separate future systems.
 
 ## Presentation boundary
 

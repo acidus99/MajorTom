@@ -400,8 +400,8 @@ Then:
 CREATE INDEX bookmarks_folder_order ON bookmarks (folder_id, order_key);
 ```
 
-Leave the `position` columns in place for this migration — dropping them is a separate,
-later migration once the new ordering is proven. Stop reading them.
+The `v8-remove-unused-local-storage` migration drops the old `position` columns and their
+index after the order-key cutover. Repositories read and write only `order_key`.
 
 ### 5.3 Renamed tables
 
@@ -421,11 +421,13 @@ for certificate descriptors and scopes.
 DROP TABLE bookmark_sync_folders;
 DROP TABLE bookmark_sync_bookmarks;
 DROP TABLE server_trust_sync;
+ALTER TABLE bookmark_folders DROP COLUMN position;
+ALTER TABLE bookmarks DROP COLUMN position;
 ```
 
-Do not ship these drops with the cutover. A user can skip releases, causing GRDB migrations to
-run back-to-back before account migration starts. Keep the small legacy tables until a future
-runtime cleanup can prove every locally known account is ready and no recovery path needs them.
+These tables were retained during the refactor so an intermediate development build could not
+lose a recovery path. They are removed by the `v8-remove-unused-local-storage` migration:
+no GitHub release contained `MajorTom.sqlite`, so no downloaded build can require them.
 
 ### 5.5 Unchanged
 

@@ -31,7 +31,6 @@ public struct BookmarkRepository: Sendable {
     private struct FolderRow: Equatable {
         let id: UUID
         let name: String
-        let position: Int
         let orderKey: String
     }
 
@@ -41,7 +40,6 @@ public struct BookmarkRepository: Sendable {
         let title: String
         let url: URL
         let addedAt: Date
-        let position: Int
         let orderKey: String
         let favicon: BookmarkFaviconSnapshot?
 
@@ -51,7 +49,6 @@ public struct BookmarkRepository: Sendable {
                 && lhs.title == rhs.title
                 && lhs.url == rhs.url
                 && abs(lhs.addedAt.timeIntervalSince(rhs.addedAt)) < 0.001
-                && lhs.position == rhs.position
                 && lhs.orderKey == rhs.orderKey
                 && lhs.favicon?.emoji == rhs.favicon?.emoji
                 && datesEqual(lhs.favicon?.fetchedAt, rhs.favicon?.fetchedAt)
@@ -224,15 +221,14 @@ public struct BookmarkRepository: Sendable {
             try bookmarkRows(in: db, account: account).map { ($0.id, $0) })
         let folderKeys = OrderKey.initial(count: collection.folders.count)
         let newFolders = collection.folders.enumerated().map {
-            FolderRow(id: $0.element.id, name: $0.element.name, position: $0.offset,
-                      orderKey: folderKeys[$0.offset])
+            FolderRow(id: $0.element.id, name: $0.element.name, orderKey: folderKeys[$0.offset])
         }
         let newBookmarks = collection.folders.flatMap { folder -> [BookmarkRow] in
             let keys = OrderKey.initial(count: folder.bookmarks.count)
             return folder.bookmarks.enumerated().map {
                 BookmarkRow(id: $0.element.id, folderID: folder.id, title: $0.element.title,
                             url: $0.element.url, addedAt: $0.element.addedAt,
-                            position: $0.offset, orderKey: keys[$0.offset],
+                            orderKey: keys[$0.offset],
                             favicon: $0.element.favicon)
             }
         }
@@ -248,13 +244,13 @@ public struct BookmarkRepository: Sendable {
         for row in newFolders where oldFolders[row.id] != row {
             try db.execute(
                 sql: """
-                    INSERT INTO bookmark_folders (id, name, position, order_key, account_identity_hash)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO bookmark_folders (id, name, order_key, account_identity_hash)
+                    VALUES (?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET name = excluded.name,
-                        position = excluded.position, order_key = excluded.order_key,
+                        order_key = excluded.order_key,
                         account_identity_hash = excluded.account_identity_hash
                     """,
-                arguments: [row.id.uuidString, row.name, row.position, row.orderKey, account]
+                arguments: [row.id.uuidString, row.name, row.orderKey, account]
             )
             try enqueue(.save, type: folderRecordType, id: row.id, account: account,
                         cloud: cloud, enabled: enqueueChanges, in: db)
@@ -265,20 +261,20 @@ public struct BookmarkRepository: Sendable {
             try db.execute(
                 sql: """
                     INSERT INTO bookmarks
-                        (id, folder_id, title, url, added_at, position, order_key,
+                        (id, folder_id, title, url, added_at, order_key,
                          account_identity_hash, pending_folder_id,
                          favicon_state, favicon_emoji, favicon_fetched_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET folder_id = excluded.folder_id,
                         title = excluded.title, url = excluded.url, added_at = excluded.added_at,
-                        position = excluded.position, order_key = excluded.order_key,
+                        order_key = excluded.order_key,
                         account_identity_hash = excluded.account_identity_hash,
                         pending_folder_id = NULL, favicon_state = excluded.favicon_state,
                         favicon_emoji = excluded.favicon_emoji,
                         favicon_fetched_at = excluded.favicon_fetched_at
                     """,
                 arguments: [row.id.uuidString, row.folderID.uuidString, row.title,
-                            row.url.absoluteString, row.addedAt, row.position, row.orderKey,
+                            row.url.absoluteString, row.addedAt, row.orderKey,
                             account, state, row.favicon?.emoji, row.favicon?.fetchedAt]
             )
             try enqueue(.save, type: bookmarkRecordType, id: row.id, account: account,
@@ -305,20 +301,18 @@ public struct BookmarkRepository: Sendable {
 
     private static func folderRows(in db: Database, account: String?) throws -> [FolderRow] {
         try Row.fetchAll(db, sql: """
-            SELECT id, name, position, order_key FROM bookmark_folders
+            SELECT id, name, order_key FROM bookmark_folders
             WHERE account_identity_hash IS ?
             """, arguments: [account]).compactMap { row in
             guard let id = UUID(uuidString: row["id"]) else { return nil }
-            let position: Int = row["position"]
             let key: String? = row["order_key"]
-            return FolderRow(id: id, name: row["name"], position: position,
-                             orderKey: key ?? fallbackOrderKey(position))
+            return FolderRow(id: id, name: row["name"], orderKey: key ?? "")
         }
     }
 
     private static func bookmarkRows(in db: Database, account: String?) throws -> [BookmarkRow] {
         try Row.fetchAll(db, sql: """
-            SELECT id, folder_id, title, url, added_at, position, order_key,
+            SELECT id, folder_id, title, url, added_at, order_key,
                    favicon_state, favicon_emoji, favicon_fetched_at
             FROM bookmarks WHERE account_identity_hash IS ?
             """, arguments: [account]).compactMap { row in
@@ -327,19 +321,13 @@ public struct BookmarkRepository: Sendable {
                   let url = URL(string: row["url"]) else { return nil }
             let state: Int? = row["favicon_state"]
             let fetchedAt: Date? = row["favicon_fetched_at"]
-            let position: Int = row["position"]
             let key: String? = row["order_key"]
             let favicon = state.flatMap { value in fetchedAt.map {
                 BookmarkFaviconSnapshot(emoji: value == 1 ? row["favicon_emoji"] : nil,
                                         fetchedAt: $0)
             } }
             return BookmarkRow(id: id, folderID: folderID, title: row["title"], url: url,
-                               addedAt: row["added_at"], position: position,
-                               orderKey: key ?? fallbackOrderKey(position), favicon: favicon)
+                               addedAt: row["added_at"], orderKey: key ?? "", favicon: favicon)
         }
-    }
-
-    private static func fallbackOrderKey(_ position: Int) -> String {
-        OrderKey.initial(count: max(1, position + 1))[position]
     }
 }

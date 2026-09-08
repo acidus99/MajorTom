@@ -33,79 +33,24 @@ final class MajorTomDatabaseTests: XCTestCase {
         XCTAssertTrue(try database.read { try $0.tableExists("gemini_input_drafts") })
         XCTAssertTrue(try database.read { try $0.tableExists("bookmark_folders") })
         XCTAssertTrue(try database.read { try $0.tableExists("bookmarks") })
-        XCTAssertTrue(try database.read { try $0.tableExists("bookmark_sync_folders") })
-        XCTAssertTrue(try database.read { try $0.tableExists("bookmark_sync_bookmarks") })
-        XCTAssertTrue(try database.read { try $0.tableExists("browser_windows") })
-        XCTAssertTrue(try database.read { try $0.tableExists("browser_tabs") })
-        XCTAssertTrue(try database.read { try $0.tableExists("browser_tab_history") })
-        XCTAssertTrue(try database.read { try $0.tableExists("browser_session") })
-        XCTAssertTrue(try database.read { try $0.tableExists("page_cache") })
-        XCTAssertTrue(try database.read { try $0.tableExists("page_cache_fts") })
         XCTAssertTrue(try database.read { try $0.tableExists("trusted_server_identities") })
-        XCTAssertTrue(try database.read { try $0.tableExists("server_trust_sync") })
         XCTAssertTrue(try database.read { try $0.tableExists("client_certificates") })
         XCTAssertTrue(try database.read { try $0.tableExists("client_certificate_associations") })
         XCTAssertTrue(try database.read { try $0.tableExists("client_certificate_local_flags") })
         XCTAssertTrue(try database.read { try $0.tableExists("cloud_sync_state") })
         XCTAssertTrue(try database.read { try $0.tableExists("cloud_pending_changes") })
         XCTAssertTrue(try database.read { try $0.tableExists("cloud_record_state") })
-        try database.validate()
-    }
-
-    func testLegacyBrowserCacheClearRemovesOldSessionAndPageRows() throws {
-        let database = try MajorTomDatabase(inMemory: ())
-        try database.write { db in
-            try db.execute(
-                sql: "INSERT INTO browser_session (singleton, key_window_index, updated_at) VALUES (1, 0, ?)",
-                arguments: [Date()]
-            )
-            try db.execute(
-                sql: """
-                    INSERT INTO page_cache (
-                        url, mime_type, body, body_size, completion,
-                        received_at, last_accessed_at
-                    ) VALUES ('gemini://example.com/', 'text/gemini', ?, 4, 'complete', ?, ?)
-                    """,
-                arguments: [Data("test".utf8), Date(), Date()]
-            )
-        }
-
-        try database.clearLegacyBrowserCache()
-
-        XCTAssertEqual(try database.read {
-            try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM browser_session")
-        }, 0)
-        XCTAssertEqual(try database.read {
-            try Int.fetchOne($0, sql: "SELECT COUNT(*) FROM page_cache")
-        }, 0)
-    }
-
-    func testCloudMigrationAddsTransitionalBookmarkColumns() throws {
-        let database = try MajorTomDatabase(inMemory: ())
-        try database.write { db in
-            try db.execute(
-                sql: "INSERT INTO bookmark_folders (id, name, position) VALUES ('folder', 'Folder', 0)"
-            )
-            try db.execute(
-                sql: """
-                    INSERT INTO bookmarks (id, folder_id, title, url, added_at, position)
-                    VALUES ('first', 'folder', 'First', 'gemini://one', ?, 0),
-                           ('second', 'folder', 'Second', 'gemini://two', ?, 1)
-                    """,
-                arguments: [Date(), Date()]
-            )
-        }
-
-        let keys: [String?] = try database.read { db in
-            try Optional<String>.fetchAll(db, sql: "SELECT order_key FROM bookmarks ORDER BY position")
-        }
-
-        // New databases migrate before these rows are inserted. The nullable columns keep
-        // pre-refactor repository writes valid until the bookmark cutover stage.
-        XCTAssertEqual(keys, [nil, nil])
-        XCTAssertTrue(try database.read { db in
-            try db.columns(in: "bookmarks").contains { $0.name == "order_key" }
+        XCTAssertFalse(try database.read { try $0.tableExists("page_cache") })
+        XCTAssertFalse(try database.read { try $0.tableExists("browser_session") })
+        XCTAssertFalse(try database.read { try $0.tableExists("bookmark_sync_folders") })
+        XCTAssertFalse(try database.read { try $0.tableExists("server_trust_sync") })
+        XCTAssertFalse(try database.read {
+            try $0.columns(in: "bookmark_folders").contains { $0.name == "position" }
         })
+        XCTAssertFalse(try database.read {
+            try $0.columns(in: "bookmarks").contains { $0.name == "position" }
+        })
+        try database.validate()
     }
 
     func testDurableDatabaseReopensWithCommittedData() throws {
