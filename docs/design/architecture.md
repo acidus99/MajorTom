@@ -124,7 +124,7 @@ remote metadata deletion never deletes Keychain material.
 | User-approved server trust | SQLite endpoint row | Local only |
 | Open-tab summaries for other Macs | Live window model plus small UserDefaults display cache | One replaceable CloudKit record per device; URL, title, and favicon only |
 | Global browsing history | SQLite URL row | Local only, one-year retention |
-| Window/tab session, Back/Forward entries, response snapshots, cursor, zoom, reading state | Standalone `MajorTomBackForward.db` rows | Local only |
+| Window/tab session, Back/Forward entries, response snapshots, cursor, zoom, reading state | Standalone `BFCache.db` rows | Local only |
 | Cancelled Gemini input draft | SQLite prompt-URL row | Local only, fourteen-day expiry |
 | Reusable Gemini image and favicon responses | Standalone `ContentCache.db` rows | Local only; a bookmark carries its last favicon observation separately |
 | Downloads and explicitly saved pages | User-selected filesystem location | Outside app sync |
@@ -141,7 +141,7 @@ edit, and a stale send completion cannot remove a newer outbox generation. Local
 cache/history/session clearing remains physical local deletion because those data never sync.
 
 Session restoration and exact Back/Forward snapshots live in the standalone
-`MajorTomBackForward.db` database. Its normalized `browser_windows`, `browser_tabs`, and
+`BFCache.db` database. Its normalized `browser_windows`, `browser_tabs`, and
 `browser_tab_history` rows preserve window and tab order, each tab's cursor, and one row per
 visit. A visit carries its URL, one title, favicon, response status and meta, exact source
 bytes, completion state, and versioned JSON presentation state. The presentation state keeps

@@ -448,7 +448,11 @@ final class NativeTabCoordinator {
 
     private struct RegisteredTab {
         weak var window: NSWindow?
-        weak var browser: BrowserModel?
+        // Keep the model alive until the window-close observer removes this registration.
+        // SwiftUI can tear down a WindowGroup scene while application termination is
+        // still waiting for the async persistence flush; a weak reference then makes
+        // persistSession() save an empty session and leaves only orphaned history rows.
+        let browser: BrowserModel
         let cloudID: UUID
     }
 
@@ -729,7 +733,7 @@ final class NativeTabCoordinator {
     }
 
     func persistSession() {
-        let liveTabs = registeredTabs.filter { $0.value.window != nil && $0.value.browser != nil }
+        let liveTabs = registeredTabs.filter { $0.value.window != nil }
         registeredTabs = liveTabs
 
         let registeredWindows = liveTabs.values.compactMap(\.window)
@@ -914,7 +918,7 @@ final class NativeTabCoordinator {
             $0 !== selectedWindow
         }
         for window in otherWindows {
-            registeredTabs[ObjectIdentifier(window)]?.browser?.stop()
+            registeredTabs[ObjectIdentifier(window)]?.browser.stop()
             window.performClose(nil)
         }
         selectedWindow.makeKeyAndOrderFront(nil)
@@ -986,8 +990,8 @@ final class NativeTabCoordinator {
 
     private func publishCloudTabs() {
         let tabs = registeredTabs.values.compactMap { registration -> CloudTabSnapshot? in
-            guard let browser = registration.browser,
-                  let committedURL = browser.committedURL,
+            let browser = registration.browser
+            guard let committedURL = browser.committedURL,
                   let url = CloudTabURL.normalized(committedURL)
             else { return nil }
             return CloudTabSnapshot(

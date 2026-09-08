@@ -19,7 +19,7 @@ final class BackForwardCacheDatabaseTests: XCTestCase {
         let manager = StubFileManager(applicationSupport: base)
         let url = try BackForwardCacheDatabase.defaultFileURL(fileManager: manager)
 
-        XCTAssertEqual(BackForwardCacheDatabase.filename, "MajorTomBackForward.db")
+        XCTAssertEqual(BackForwardCacheDatabase.filename, "BFCache.db")
         XCTAssertEqual(url.lastPathComponent, BackForwardCacheDatabase.filename)
         XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, "Major Tom")
     }

@@ -34,7 +34,7 @@ tab's Back/Forward structure.
 
 Back/Forward data lives only in its own SQLite file:
 
-`~/Library/Application Support/Major Tom/MajorTomBackForward.db`
+`~/Library/Application Support/Major Tom/BFCache.db`
 
 It does not use `MajorTom.sqlite`. The standalone database owns the normalized application
 session, windows, tabs, and history entries.
@@ -76,7 +76,7 @@ UUID, an ordered list of entry UUIDs, and a cursor into that list.
 - Repeated visits to one URL are distinct and may retain different bytes and reading state.
 
 The active tab keeps a bounded in-memory hot set. A traversal that misses that set reads the
-exact entry lazily from `MajorTomBackForward.db`. Startup loads response bytes only for
+exact entry lazily from `BFCache.db`. Startup loads response bytes only for
 the current entry in each restored tab.
 
 ## Persistence and presentation

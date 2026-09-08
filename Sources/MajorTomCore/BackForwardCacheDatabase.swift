@@ -3,7 +3,7 @@ import GRDB
 
 /// The standalone SQLite file that owns window, tab, and Back/Forward snapshots.
 public final class BackForwardCacheDatabase: @unchecked Sendable {
-    public static let filename = "MajorTomBackForward.db"
+    public static let filename = "BFCache.db"
 
     private let writer: any DatabaseWriter
     private let fileURL: URL?
