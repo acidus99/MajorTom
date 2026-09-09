@@ -196,6 +196,10 @@ struct MajorTomApp: App {
                 Button("Capsule Root") { NotificationCenter.default.post(name: .majorTomRoot, object: nil) }
                     .keyboardShortcut(.upArrow, modifiers: [.option, .shift])
                 Divider()
+                Button("Show All History") {
+                    NotificationCenter.default.post(name: .majorTomShowHistory, object: nil)
+                }
+                .keyboardShortcut("y", modifiers: .command)
                 Button("iCloud Tabs…") { openWindow(id: "icloud-tabs") }
             }
         }
@@ -1792,6 +1796,7 @@ private struct BrowserTabView: View {
     @ObservedObject private var clientCertificates = ClientCertificateStore.shared
     @FocusState private var locationIsFocused: Bool
     @State private var showsFind = false
+    @State private var historySearchFocusRequest = 0
     @State private var contextMenuMonitor: Any?
     @State private var addBookmarkTarget: AddBookmarkTarget?
 
@@ -1835,6 +1840,14 @@ private struct BrowserTabView: View {
                         browser.openInNewTab?(url, false)
                     }
                         .padding(.top, chromeHeight)
+                case .history:
+                    HistoryManagerView(
+                        searchFocusRequest: historySearchFocusRequest,
+                        open: openHistoryEntry,
+                        openInNewTab: { browser.openInNewTab?($0, true) },
+                        openInNewWindow: { browser.openInNewWindow?($0) }
+                    )
+                    .padding(.top, chromeHeight)
                 }
             } else {
                 ZStack {
@@ -2057,13 +2070,22 @@ private struct BrowserTabView: View {
         .onCommand(.majorTomShowClientCertificates, when: { isCommandTarget }) {
             browser.showInternalPage(.clientCertificates)
         }
+        .onCommand(.majorTomShowHistory, when: { isCommandTarget }) {
+            browser.openInNewTab?(InternalPage.history.url, false)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomOpenBookmark)) { notification in
             guard isCommandTarget, let url = notification.object as? URL else { return }
             openBookmark(url, inNewTab: false)
         }
         .onCommand(.majorTomSavePage, when: { isCommandTarget }) { Task { await browser.savePage() } }
         .onCommand(.majorTomPrint, when: { isCommandTarget }) { browser.printPage() }
-        .onCommand(.majorTomFind, when: { isCommandTarget }) { showsFind = true }
+        .onCommand(.majorTomFind, when: { isCommandTarget }) {
+            if browser.internalPage == .history {
+                historySearchFocusRequest += 1
+            } else {
+                showsFind = true
+            }
+        }
         .onCommand(.majorTomZoomIn, when: { isCommandTarget }) { browser.zoomIn() }
         .onCommand(.majorTomZoomOut, when: { isCommandTarget }) { browser.zoomOut() }
         .onCommand(.majorTomActualSize, when: { isCommandTarget }) { browser.actualSize() }
@@ -2136,6 +2158,11 @@ private struct BrowserTabView: View {
             browser.openInNewTab?(url, true)
             return
         }
+        browser.locationText = url.absoluteString
+        browser.submitLocation()
+    }
+
+    private func openHistoryEntry(_ url: URL) {
         browser.locationText = url.absoluteString
         browser.submitLocation()
     }
@@ -2713,6 +2740,7 @@ extension Notification.Name {
     static let majorTomAddBookmark = Notification.Name("MajorTomAddBookmark")
     static let majorTomShowBookmarks = Notification.Name("MajorTomShowBookmarks")
     static let majorTomShowClientCertificates = Notification.Name("MajorTomShowClientCertificates")
+    static let majorTomShowHistory = Notification.Name("MajorTomShowHistory")
     static let majorTomOpenBookmark = Notification.Name("MajorTomOpenBookmark")
     static let majorTomSavePage = Notification.Name("MajorTomSavePage")
     static let majorTomPrint = Notification.Name("MajorTomPrint")

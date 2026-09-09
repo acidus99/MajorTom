@@ -3,12 +3,16 @@ import GRDB
 
 public struct BrowsingHistoryEntry: Codable, Equatable, Identifiable, Sendable {
     public var id: String { url.absoluteString }
+    public var urlString: String { url.absoluteString }
     public let url: URL
+    public let title: String
     public let visitedAt: Date
     public let visitCount: Int
 
-    public init(url: URL, visitedAt: Date, visitCount: Int) {
+    public init(url: URL, title: String? = nil, visitedAt: Date, visitCount: Int) {
         self.url = url
+        self.title = title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+            ?? url.absoluteString
         self.visitedAt = visitedAt
         self.visitCount = visitCount
     }
@@ -27,9 +31,9 @@ public struct BrowsingHistoryRepository: Sendable {
         self.database = database
     }
 
-    public func record(_ url: URL, at date: Date = Date()) throws {
+    public func record(_ url: URL, title: String? = nil, at date: Date = Date()) throws {
         try database.write { db in
-            try Self.upsert(url: url, visitedAt: date, visitCount: 1, in: db)
+            try Self.upsert(url: url, title: title, visitedAt: date, visitCount: 1, in: db)
             try Self.prune(before: date.addingTimeInterval(-Self.retention), in: db)
         }
     }
@@ -39,7 +43,7 @@ public struct BrowsingHistoryRepository: Sendable {
             try Row.fetchAll(
                 db,
                 sql: """
-                    SELECT url, visited_at, visit_count
+                    SELECT url, title, visited_at, visit_count
                     FROM history_entries
                     ORDER BY visited_at DESC, url ASC
                     """
@@ -86,21 +90,43 @@ public struct BrowsingHistoryRepository: Sendable {
         }
     }
 
+    public func remove(urls: Set<URL>) throws {
+        guard !urls.isEmpty else { return }
+        try database.write { db in
+            for url in urls {
+                try db.execute(
+                    sql: "DELETE FROM history_entries WHERE url = ?",
+                    arguments: [url.absoluteString]
+                )
+            }
+        }
+    }
+
     private static func upsert(
         url: URL,
+        title: String? = nil,
         visitedAt: Date,
         visitCount: Int,
         in db: Database
     ) throws {
         try db.execute(
             sql: """
-                INSERT INTO history_entries (url, visited_at, visit_count)
-                VALUES (?, ?, ?)
+                INSERT INTO history_entries (url, title, visited_at, visit_count)
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(url) DO UPDATE SET
                     visited_at = MAX(history_entries.visited_at, excluded.visited_at),
-                    visit_count = history_entries.visit_count + excluded.visit_count
+                    visit_count = history_entries.visit_count + excluded.visit_count,
+                    title = CASE
+                        WHEN excluded.title = '' THEN history_entries.title
+                        ELSE excluded.title
+                    END
                 """,
-            arguments: [url.absoluteString, visitedAt, visitCount]
+            arguments: [
+                url.absoluteString,
+                title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+                visitedAt,
+                visitCount
+            ]
         )
     }
 
@@ -115,8 +141,13 @@ public struct BrowsingHistoryRepository: Sendable {
         guard let url = URL(string: row["url"]) else { return nil }
         return BrowsingHistoryEntry(
             url: url,
+            title: row["title"],
             visitedAt: row["visited_at"],
             visitCount: row["visit_count"]
         )
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }

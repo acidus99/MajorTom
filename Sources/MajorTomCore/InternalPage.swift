@@ -8,6 +8,7 @@ import Foundation
 public enum InternalPage: String, CaseIterable, Equatable, Sendable {
     case bookmarks
     case clientCertificates = "client-certs"
+    case history
 
     public static let scheme = "about"
 
@@ -21,6 +22,7 @@ public enum InternalPage: String, CaseIterable, Equatable, Sendable {
         switch self {
         case .bookmarks: "Bookmarks"
         case .clientCertificates: "Client Certificates"
+        case .history: "History"
         }
     }
 

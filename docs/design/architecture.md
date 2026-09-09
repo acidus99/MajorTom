@@ -78,11 +78,15 @@ stores remain authoritative until the migration for their particular data class 
 and been verified, so installing an intermediate build never performs a partial user-data move.
 
 Global history and Gemini input drafts are the first domain records behind this boundary.
-`history_entries` upserts by canonical URL and stores last-visited time plus a visit count;
-it is pruned to one year. `gemini_input_drafts` keys unsubmitted text by prompt URL and stores
+`history_entries` upserts by canonical URL and stores the most recently observed title,
+last-visited time and a visit count; it is pruned to one year. The native `about:history`
+table observes this repository-backed global list directly; sorting and filtering are
+presentation concerns, while deletion remains a repository transaction. Only completed,
+displayable new navigations and reloads reach the recorder. `gemini_input_drafts` keys
+unsubmitted text by prompt URL and stores
 an explicit fourteen-day expiration. Both tables are local-only. A one-time transactional
 import folds the former append-only UserDefaults history blob into URL rows before removing
-that legacy local value. Each navigation or draft edit changes only its row rather than
+that legacy local value. Each recorded navigation or draft edit changes only its row rather than
 rewriting an encoded collection.
 
 Bookmarks use normalized `bookmark_folders` and `bookmarks` tables. A collection mutation is

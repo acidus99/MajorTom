@@ -30,6 +30,9 @@ final class MajorTomDatabaseTests: XCTestCase {
 
         XCTAssertTrue(tableExists)
         XCTAssertTrue(try database.read { try $0.tableExists("history_entries") })
+        XCTAssertTrue(try database.read {
+            try $0.columns(in: "history_entries").contains { $0.name == "title" }
+        })
         XCTAssertTrue(try database.read { try $0.tableExists("gemini_input_drafts") })
         XCTAssertTrue(try database.read { try $0.tableExists("bookmark_folders") })
         XCTAssertTrue(try database.read { try $0.tableExists("bookmarks") })

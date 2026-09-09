@@ -202,6 +202,7 @@ private struct LegacyBrowsingHistoryRecord: Codable {
     var id: UUID
     var url: URL
     var visitedAt: Date
+    var title: String?
 }
 
 @MainActor
@@ -228,31 +229,62 @@ final class BrowsingHistoryStore: ObservableObject {
         } else if let data = defaults.data(forKey: key),
                   let stored = try? JSONDecoder().decode([LegacyBrowsingHistoryRecord].self, from: data) {
             records = stored.map {
-                BrowsingHistoryEntry(url: $0.url, visitedAt: $0.visitedAt, visitCount: 1)
+                BrowsingHistoryEntry(
+                    url: $0.url,
+                    title: $0.title,
+                    visitedAt: $0.visitedAt,
+                    visitCount: 1
+                )
             }
         }
     }
 
-    func record(_ url: URL) {
+    func record(_ url: URL, title: String? = nil) {
         let now = Date()
         if let repository {
-            guard (try? repository.record(url, at: now)) != nil else { return }
-            let count = records.first(where: { $0.url == url })?.visitCount ?? 0
+            guard (try? repository.record(url, title: title, at: now)) != nil else { return }
+            let existing = records.first(where: { $0.url == url })
             records.removeAll {
                 $0.url == url
                     || $0.visitedAt < now.addingTimeInterval(-BrowsingHistoryRepository.retention)
             }
             records.insert(
-                BrowsingHistoryEntry(url: url, visitedAt: now, visitCount: count + 1),
+                BrowsingHistoryEntry(
+                    url: url,
+                    title: title ?? existing?.title,
+                    visitedAt: now,
+                    visitCount: (existing?.visitCount ?? 0) + 1
+                ),
                 at: 0
             )
             return
         }
 
-        let count = records.first(where: { $0.url == url })?.visitCount ?? 0
+        let existing = records.first(where: { $0.url == url })
         records.removeAll { $0.url == url }
-        records.insert(BrowsingHistoryEntry(url: url, visitedAt: now, visitCount: count + 1), at: 0)
+        records.insert(
+            BrowsingHistoryEntry(
+                url: url,
+                title: title ?? existing?.title,
+                visitedAt: now,
+                visitCount: (existing?.visitCount ?? 0) + 1
+            ),
+            at: 0
+        )
         persistLegacyFallback()
+    }
+
+    func remove(_ urls: Set<URL>) {
+        guard !urls.isEmpty else { return }
+        if let repository {
+            do {
+                try repository.remove(urls: urls)
+            } catch {
+                return
+            }
+        }
+        records.removeAll { urls.contains($0.url) }
+        if repository == nil { persistLegacyFallback() }
     }
 
     func clear() {
@@ -263,7 +295,12 @@ final class BrowsingHistoryStore: ObservableObject {
 
     private func persistLegacyFallback() {
         let legacy = records.map {
-            LegacyBrowsingHistoryRecord(id: UUID(), url: $0.url, visitedAt: $0.visitedAt)
+            LegacyBrowsingHistoryRecord(
+                id: UUID(),
+                url: $0.url,
+                visitedAt: $0.visitedAt,
+                title: $0.title
+            )
         }
         guard let data = try? JSONEncoder().encode(legacy) else { return }
         defaults.set(data, forKey: key)

@@ -16,8 +16,6 @@ Functionality:
 
 
 * Titan Support
-* Unified history
-
 * Import From Browser 
 	Looks like it detects installed apps (Safari shows Firefox)
 	Goes to a model where you check what you want to import (History, Bookmarks)

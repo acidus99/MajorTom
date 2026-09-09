@@ -895,8 +895,12 @@ final class BrowserModel: ObservableObject {
         }
         if let committedURL, ViewSourceURL.isViewSource(committedURL) {
             if let cached = cachedPage(for: committedURL) {
-                BrowsingHistoryStore.shared.record(committedURL)
                 displayCachedPage(cached)
+                recordSuccessfulVisit(
+                    committedURL,
+                    title: cached.title ?? cached.documentTitle,
+                    disposition: .reload
+                )
                 return
             }
             // No cached bytes, e.g. a session restored after the cache was cleared:
@@ -1038,6 +1042,7 @@ final class BrowserModel: ObservableObject {
             title: title,
             documentTitle: documentTitle
         ))
+        recordSuccessfulVisit(url, title: documentTitle ?? title, disposition: disposition)
         statusText = "Local file • \(data.count) bytes"
     }
 
@@ -1496,6 +1501,7 @@ final class BrowserModel: ObservableObject {
         canSavePage = !bytes.isEmpty
         canShowSource = false
         title = heading
+        recordSuccessfulVisit(sourceURL, title: heading, disposition: disposition)
         statusText = "Page source"
         isLoading = false
         navigationTask = nil
@@ -1834,7 +1840,6 @@ final class BrowserModel: ObservableObject {
         }
         if let cached = cachedPage(for: url) {
             browserHistoryLogger.notice("navigateHistory route=hot-cache bytes=\(cached.body.count)")
-            BrowsingHistoryStore.shared.record(url)
             displayCachedPage(cached)
             return
         }
@@ -1848,7 +1853,6 @@ final class BrowserModel: ObservableObject {
                     self.navigation.cache(page, for: entryID)
                     self.title = stored?.title ?? page.title ?? self.displayTitle(for: url)
                     self.favicon = stored?.favicon
-                    BrowsingHistoryStore.shared.record(url)
                     self.displayCachedPage(page)
                 } else {
                     browserHistoryLogger.notice("durable-cache miss id=\(entryID.uuidString, privacy: .public); reloading")
@@ -2162,6 +2166,7 @@ final class BrowserModel: ObservableObject {
 
                 case .completed:
                     guard let header = responseHeader, header.isSuccess else { return }
+                    var displayedSuccessfulContent = false
                     if !responseIsCached {
                         let response = ContentResponse(
                             url: target.url,
@@ -2194,6 +2199,7 @@ final class BrowserModel: ObservableObject {
                         return
                     }
                     if mimeType == "text/gemini" {
+                        displayedSuccessfulContent = true
                         let tail = utf8Decoder.finish()
                         let finalEvents = gemtextParser.receive(tail) + gemtextParser.finish()
                         for parsedEvent in finalEvents {
@@ -2201,10 +2207,12 @@ final class BrowserModel: ObservableObject {
                         }
                         finishCurrentDocument()
                     } else if mimeType.hasPrefix("text/") {
+                        displayedSuccessfulContent = true
                         yieldToDocument(Data(HTMLDocumentStreamRenderer.escape(utf8Decoder.finish()).utf8))
                         yieldToDocument(Data("</code></pre>".utf8))
                         finishCurrentDocument()
                     } else if mimeType.hasPrefix("image/") {
+                        displayedSuccessfulContent = true
                         showImagePage(data: sourceBytes, mimeType: mimeType, url: target.url, disposition: disposition)
                     } else {
                         showGeneratedPage(
@@ -2232,6 +2240,13 @@ final class BrowserModel: ObservableObject {
                         responseMeta: header.meta,
                         clientCertificateID: sentClientCertificate?.id
                     ))
+                    if displayedSuccessfulContent {
+                        recordSuccessfulVisit(
+                            target.url,
+                            title: documentTitle ?? title,
+                            disposition: disposition
+                        )
+                    }
                     statusText = responseIsCached
                         ? "Cached • \(sourceBytes.count) bytes"
                         : "Loaded \(sourceBytes.count) bytes"
@@ -2387,6 +2402,7 @@ final class BrowserModel: ObservableObject {
             url: url,
             disposition: disposition
         )
+        recordSuccessfulVisit(url, title: title, disposition: disposition)
         statusText = "Inline image • \(formattedByteCount(decoded.data.count))"
     }
 
@@ -2673,8 +2689,16 @@ final class BrowserModel: ObservableObject {
             isRestoringHistoryScroll = false
         }
         navigation.commit(url, disposition: NavigationState.Disposition(disposition))
-        BrowsingHistoryStore.shared.record(url)
         updateNavigationAvailability()
+    }
+
+    private func recordSuccessfulVisit(
+        _ url: URL,
+        title: String?,
+        disposition: HistoryDisposition
+    ) {
+        guard disposition != .traversal, InternalPage.page(for: url) == nil else { return }
+        BrowsingHistoryStore.shared.record(url, title: title)
     }
 
     private func updateNavigationAvailability() {

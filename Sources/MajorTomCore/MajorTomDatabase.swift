@@ -298,6 +298,11 @@ public final class MajorTomDatabase: @unchecked Sendable {
                 try database.execute(sql: "ALTER TABLE bookmarks DROP COLUMN position")
             }
         }
+        migrator.registerMigration("v9-history-titles") { database in
+            try database.alter(table: "history_entries") { table in
+                table.add(column: "title", .text).notNull().defaults(to: "")
+            }
+        }
         return migrator
     }
 }

@@ -63,11 +63,20 @@ received. This cache remains on one Mac and does not synchronize.
 ## History and unfinished input
 
 Browsing history is one local list with one entry per URL, independent of the Back and
-Forward list in any tab. A successful navigation, reload, or Back/Forward traversal updates
-that URL's last-visited time and visit count, moving it to the top of the global list. A
-submitted Gemini input response is an ordinary URL with a query and follows the same history
-and caching rules as every other navigation. Global history remains on one Mac and retains
-at most one year of visits.
+Forward list in any tab. A successful new navigation or reload updates that URL's most recent
+title, last-visited time and visit count, moving it to the top of the global list. Back and
+Forward traversal does not update global history. Redirect responses and browser-generated
+error pages are excluded; a successful redirected navigation records only its final
+destination. A submitted Gemini input response is an ordinary URL with a query and follows
+the same history and caching rules as every other navigation. Global history remains on one
+Mac and retains at most one year of visits.
+
+History > Show All History (Command-Y) opens `about:history` in a new selected tab. The
+native history view has sortable Title, Last Visited and URL columns and initially sorts by
+Last Visited, newest first. Search filters titles and URLs without grouping results by date.
+Double-click or Return opens the selected entry in the current tab. The table supports native
+multiple selection and deletion, and its context menu can open selected entries in new tabs
+or windows, copy their links, or delete them.
 
 Text typed into a Gemini input prompt but cancelled or dismissed is an unfinished local draft,
 not history. It survives quitting and is offered again when the same prompt URL returns. The

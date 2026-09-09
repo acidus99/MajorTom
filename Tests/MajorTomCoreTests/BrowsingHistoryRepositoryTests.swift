@@ -10,14 +10,37 @@ final class BrowsingHistoryRepositoryTests: XCTestCase {
         let second = URL(string: "gemini://example.com/second")!
         let start = Date(timeIntervalSince1970: 1_000_000)
 
-        try repository.record(first, at: start)
-        try repository.record(second, at: start.addingTimeInterval(10))
-        try repository.record(first, at: start.addingTimeInterval(20))
+        try repository.record(first, title: "First title", at: start)
+        try repository.record(second, title: "Second title", at: start.addingTimeInterval(10))
+        try repository.record(first, title: "Updated title", at: start.addingTimeInterval(20))
 
         let entries = try repository.entries()
         XCTAssertEqual(entries.map(\.url), [first, second])
         XCTAssertEqual(entries.map(\.visitCount), [2, 1])
+        XCTAssertEqual(entries.map(\.title), ["Updated title", "Second title"])
         XCTAssertEqual(entries.first?.visitedAt, start.addingTimeInterval(20))
+    }
+
+    func testRecordWithoutATitlePreservesTheLastObservedTitle() throws {
+        let repository = BrowsingHistoryRepository(database: try MajorTomDatabase(inMemory: ()))
+        let url = URL(string: "gemini://example.com/page")!
+
+        try repository.record(url, title: "A Page", at: Date(timeIntervalSince1970: 1))
+        try repository.record(url, at: Date(timeIntervalSince1970: 2))
+
+        XCTAssertEqual(try repository.entries().first?.title, "A Page")
+    }
+
+    func testRemoveDeletesOnlySelectedURLs() throws {
+        let repository = BrowsingHistoryRepository(database: try MajorTomDatabase(inMemory: ()))
+        let kept = URL(string: "gemini://example.com/kept")!
+        let removed = URL(string: "gemini://example.com/removed")!
+        try repository.record(kept)
+        try repository.record(removed)
+
+        try repository.remove(urls: [removed])
+
+        XCTAssertEqual(try repository.entries().map(\.url), [kept])
     }
 
     func testRecordingPrunesEntriesOlderThanOneYear() throws {

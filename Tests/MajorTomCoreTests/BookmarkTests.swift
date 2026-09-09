@@ -313,6 +313,14 @@ final class InternalPageTests: XCTestCase {
         XCTAssertEqual(page, .bookmarks)
     }
 
+    func testAddressBarRecognisesTheHistoryPage() throws {
+        let result = try AddressInputInterpreter().interpret("about:history")
+        guard case .internalPage(let page) = result else {
+            return XCTFail("expected an internal page, got \(result)")
+        }
+        XCTAssertEqual(page, .history)
+    }
+
     func testAnUnknownAboutAddressIsStillTreatedAsASearch() throws {
         let result = try AddressInputInterpreter().interpret("about:config")
         guard case .gemini(let target) = result else {
