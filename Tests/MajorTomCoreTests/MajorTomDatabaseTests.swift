@@ -84,6 +84,77 @@ final class MajorTomDatabaseTests: XCTestCase {
         try reopened.validate()
     }
 
+    func testV10RepairsDatabaseThatRecordedV8BeforePositionCleanup() throws {
+        // Pins the development-upgrade bug where v8 was already recorded while the
+        // obsolete NOT NULL position columns remained, blocking order-key-only inserts.
+        let fileURL = directory.appendingPathComponent(MajorTomDatabase.filename)
+        let oldDatabase = try DatabaseQueue(path: fileURL.path)
+        try oldDatabase.write { db in
+            try db.execute(sql: "CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
+            for identifier in [
+                "v1-foundation", "v2-history-and-input-drafts", "v3-bookmarks",
+                "v4-sessions-cache-and-search", "v5-security-and-sync-metadata",
+                "v6-cloud-sync-refactor", "v7-cloud-certificate-metadata",
+                "v8-remove-unused-local-storage", "v9-history-titles",
+            ] {
+                try db.execute(
+                    sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)",
+                    arguments: [identifier]
+                )
+            }
+            try db.execute(sql: """
+                CREATE TABLE bookmark_folders (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    order_key TEXT,
+                    account_identity_hash TEXT
+                )
+                """)
+            try db.execute(sql: """
+                CREATE TABLE bookmarks (
+                    id TEXT PRIMARY KEY,
+                    folder_id TEXT NOT NULL REFERENCES bookmark_folders(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    added_at DATETIME NOT NULL,
+                    position INTEGER NOT NULL,
+                    order_key TEXT,
+                    account_identity_hash TEXT,
+                    pending_folder_id TEXT,
+                    favicon_state INTEGER,
+                    favicon_emoji TEXT,
+                    favicon_fetched_at DATETIME
+                )
+                """)
+            try db.execute(
+                sql: "INSERT INTO bookmark_folders (id, name, position, order_key) VALUES (?, ?, ?, ?)",
+                arguments: ["folder", "Favorites", 0, "a"]
+            )
+            try db.execute(
+                sql: """
+                    INSERT INTO bookmarks
+                        (id, folder_id, title, url, added_at, position, order_key)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                arguments: ["bookmark", "folder", "Title", "gemini://example/", Date(), 0, "a"]
+            )
+        }
+
+        let repaired = try MajorTomDatabase(fileURL: fileURL)
+
+        XCTAssertFalse(try repaired.read {
+            try $0.columns(in: "bookmark_folders").contains { $0.name == "position" }
+        })
+        XCTAssertFalse(try repaired.read {
+            try $0.columns(in: "bookmarks").contains { $0.name == "position" }
+        })
+        XCTAssertEqual(try repaired.read {
+            try String.fetchOne($0, sql: "SELECT title FROM bookmarks WHERE id = 'bookmark'")
+        }, "Title")
+        try repaired.validate()
+    }
+
     func testThrowingWriteRollsBackTransaction() throws {
         enum Expected: Error { case failure }
         let database = try MajorTomDatabase(inMemory: ())

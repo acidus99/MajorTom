@@ -53,6 +53,10 @@ struct BrowserSettingsView: View {
                 LabeledContent("Synced data") {
                     Label(cloud.status.label, systemImage: "icloud")
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.trailing)
+                        .lineLimit(2)
+                        .frame(width: 360, alignment: .trailing)
+                        .frame(minHeight: 34)
                 }
                 HStack {
                     Button("Sync Now") {

@@ -1,6 +1,12 @@
 import Combine
 import Foundation
 import MajorTomCore
+import OSLog
+
+private let bookmarkSyncLogger = Logger(
+    subsystem: "dev.gemi.major-tom",
+    category: "BookmarkSync"
+)
 
 /// The application's bookmarks, published for SwiftUI.
 ///
@@ -19,6 +25,9 @@ final class BookmarksModel: ObservableObject {
     private let database: MajorTomDatabase?
     private let legacyFileURL: URL?
     private var syncState: SyncedBookmarks?
+    private var cachedFaviconObservations: [CapsuleEndpoint: BookmarkFaviconSnapshot] = [:]
+    private var faviconRefreshTask: Task<Void, Never>?
+    private var faviconAttachmentInFlight = false
     private var cloudObserver: AnyCancellable?
     private var accountObserver: AnyCancellable?
 
@@ -72,15 +81,27 @@ final class BookmarksModel: ObservableObject {
     }
 
     func refreshFavicons() {
-        Task { [weak self] in
+        guard faviconRefreshTask == nil else { return }
+        faviconRefreshTask = Task { [weak self] in
+            defer { self?.faviconRefreshTask = nil }
             let responses = (try? await SharedContentCache.shared?.freshResponses(ofType: .favicon)) ?? []
             var known: [CapsuleEndpoint: String] = [:]
+            var observations: [CapsuleEndpoint: BookmarkFaviconSnapshot] = [:]
             for response in responses {
                 guard let endpoint = CapsuleEndpoint(url: response.url),
                       let emoji = GeminiFavicon.parse(response: response) else { continue }
                 known[endpoint] = emoji
+                observations[endpoint] = BookmarkFaviconSnapshot(
+                    emoji: emoji, fetchedAt: response.receivedAt
+                )
             }
-            self?.favicons = known
+            guard let self else { return }
+            self.favicons = known
+            self.cachedFaviconObservations = observations
+            bookmarkSyncLogger.info(
+                "favicon cache loaded responses=\(responses.count) endpoints=\(known.count)"
+            )
+            await self.attachCachedFaviconObservationsIfNeeded()
         }
     }
 
@@ -122,6 +143,9 @@ final class BookmarksModel: ObservableObject {
             CapsuleEndpoint(url: $0.url) == endpoint
                 && ($0.favicon == nil || $0.favicon?.emoji != emoji)
         }) else { return }
+        bookmarkSyncLogger.info(
+            "bookmark favicon observation queued hasEmoji=\(emoji != nil)"
+        )
         mutate { $0.updateFavicon(for: endpoint, to: snapshot) }
     }
 
@@ -229,6 +253,7 @@ final class BookmarksModel: ObservableObject {
 
         syncState = SyncedBookmarks(collection: localCollection, modifiedAt: Date())
         ICloudSyncStore.shared.configure(bookmarks: syncState)
+        await attachCachedFaviconObservationsIfNeeded()
     }
 
     /// Every change goes through the store, which applies it and returns the result, so no
@@ -273,6 +298,10 @@ final class BookmarksModel: ObservableObject {
         // applying each batch, so absence is an authoritative server deletion.
         let merged = incoming
         let mergedCollection = incoming.collection
+        let faviconCount = mergedCollection.allBookmarks.filter { $0.favicon != nil }.count
+        bookmarkSyncLogger.info(
+            "cloud bookmarks received folders=\(mergedCollection.folders.count) bookmarks=\(mergedCollection.allBookmarks.count) faviconObservations=\(faviconCount)"
+        )
         if let store {
             _ = try? await store.replace(with: mergedCollection)
         }
@@ -281,6 +310,34 @@ final class BookmarksModel: ObservableObject {
         persistSyncState()
         if syncState != merged, let syncState {
             ICloudSyncStore.shared.updateBookmarks(syncState)
+        }
+        await attachCachedFaviconObservationsIfNeeded()
+    }
+
+    private func attachCachedFaviconObservationsIfNeeded() async {
+        guard !faviconAttachmentInFlight else { return }
+        let missing = cachedFaviconObservations.filter { endpoint, snapshot in
+            collection.allBookmarks.contains {
+                CapsuleEndpoint(url: $0.url) == endpoint
+                    && ($0.favicon == nil || $0.favicon?.emoji != snapshot.emoji)
+            }
+        }
+        bookmarkSyncLogger.info(
+            "favicon reconciliation bookmarks=\(self.collection.allBookmarks.count) updates=\(missing.count)"
+        )
+        guard !missing.isEmpty else { return }
+        faviconAttachmentInFlight = true
+        defer { faviconAttachmentInFlight = false }
+        do {
+            try await mutateAndWait { collection in
+                for (endpoint, snapshot) in missing {
+                    collection.updateFavicon(for: endpoint, to: snapshot)
+                }
+            }
+        } catch {
+            bookmarkSyncLogger.error(
+                "favicon reconciliation failed description=\(error.localizedDescription, privacy: .public)"
+            )
         }
     }
 

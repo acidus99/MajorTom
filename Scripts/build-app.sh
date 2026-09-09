@@ -103,33 +103,50 @@ plist="$contents/Info.plist"
 signing_identity="${MAJOR_TOM_CODESIGN_IDENTITY:--}"
 entitlements_path="${MAJOR_TOM_ENTITLEMENTS_PATH:-$project_root/Entitlements/MajorTom.development.entitlements}"
 provisioning_profile="${MAJOR_TOM_PROVISIONING_PROFILE:-}"
+signing_is_configured=false
+if [[ "$signing_identity" != "-" || -n "$provisioning_profile" ]]; then
+    signing_is_configured=true
+fi
 if [[ "$signing_identity" != "-" ]] \
     && ! security find-identity -v -p codesigning | grep -Fq -- "$signing_identity"; then
-    if [[ "$configuration" == "release" ]]; then
-        echo "Configured code-signing identity is not valid in this keychain: $signing_identity" >&2
+    echo "Configured code-signing identity is not valid in this keychain: $signing_identity" >&2
+    exit 2
+fi
+if [[ "$signing_is_configured" == true && "$signing_identity" == "-" ]]; then
+    echo "A provisioning profile requires an Apple-issued signing identity." >&2
+    exit 2
+fi
+if [[ "$signing_is_configured" == true && ! -f "$provisioning_profile" ]]; then
+    echo "Provisioning profile not found: ${provisioning_profile:-<not configured>}" >&2
+    exit 2
+fi
+if [[ "$signing_is_configured" == true ]]; then
+    profile_plist="$(mktemp)"
+    if ! security cms -D -i "$provisioning_profile" > "$profile_plist" 2>/dev/null \
+        && ! openssl cms -verify -inform DER -in "$provisioning_profile" \
+            -noverify -nosigs -out "$profile_plist" 2>/dev/null; then
+        rm -f "$profile_plist"
+        echo "Could not decode provisioning profile: $provisioning_profile" >&2
         exit 2
     fi
-    echo "Note: Configured development signing identity is unavailable; using an ad-hoc signature." >&2
-    signing_identity="-"
-fi
-if [[ "$signing_identity" != "-" && -n "$provisioning_profile" && -f "$provisioning_profile" ]]; then
-    profile_plist="$(mktemp)"
-    if security cms -D -i "$provisioning_profile" > "$profile_plist" 2>/dev/null; then
-        requested_aps="$(/usr/libexec/PlistBuddy -c 'Print :aps-environment' "$entitlements_path" 2>/dev/null || true)"
-        profile_aps="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:aps-environment' "$profile_plist" 2>/dev/null || true)"
-        [[ -n "$profile_aps" ]] \
-            || profile_aps="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.aps-environment' "$profile_plist" 2>/dev/null || true)"
-        if [[ -n "$requested_aps" && "$profile_aps" != "$requested_aps" ]]; then
-            rm -f "$profile_plist"
-            if [[ "$configuration" == "release" ]]; then
-                echo "Provisioning profile does not authorize the requested $requested_aps APNs environment." >&2
-                exit 2
-            fi
-            echo "Note: Provisioning profile does not authorize the requested $requested_aps APNs environment; using an ad-hoc signature." >&2
-            signing_identity="-"
-        fi
-    fi
+    requested_aps="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.aps-environment' "$entitlements_path" 2>/dev/null || true)"
+    profile_aps="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.aps-environment' "$profile_plist" 2>/dev/null || true)"
+    profile_container="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.icloud-container-identifiers:0' "$profile_plist" 2>/dev/null || true)"
+    profile_kvstore="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.ubiquity-kvstore-identifier' "$profile_plist" 2>/dev/null || true)"
     rm -f "$profile_plist"
+    if [[ "$profile_aps" != "$requested_aps" ]]; then
+        echo "Provisioning profile does not authorize the requested $requested_aps APNs environment." >&2
+        exit 2
+    fi
+    if [[ "$profile_container" != "iCloud.dev.gemi.major-tom" ]]; then
+        echo "Provisioning profile does not authorize iCloud.dev.gemi.major-tom." >&2
+        exit 2
+    fi
+    if [[ "$profile_kvstore" != "7PDU8G67DD.dev.gemi.major-tom" \
+        && "$profile_kvstore" != "7PDU8G67DD.*" ]]; then
+        echo "Provisioning profile does not authorize Major Tom's iCloud Key-Value Store." >&2
+        exit 2
+    fi
 fi
 if [[ "$signing_identity" == "-" ]]; then
     # Restricted iCloud entitlements require an Apple-issued signing identity.
@@ -143,10 +160,6 @@ else
         exit 2
     fi
     if [[ -n "$provisioning_profile" ]]; then
-        if [[ ! -f "$provisioning_profile" ]]; then
-            echo "Provisioning profile not found: $provisioning_profile" >&2
-            exit 2
-        fi
         cp "$provisioning_profile" "$contents/embedded.provisionprofile"
     else
         echo "Note: CloudKit requires a provisioning profile authorizing iCloud.dev.gemi.major-tom." >&2
@@ -154,6 +167,18 @@ else
     fi
     codesign --force --sign "$signing_identity" \
         --entitlements "$entitlements_path" "$app"
+    signed_entitlements="$(mktemp)"
+    codesign -d --entitlements :- "$app" > "$signed_entitlements" 2>/dev/null
+    signed_container="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.icloud-container-identifiers:0' "$signed_entitlements" 2>/dev/null || true)"
+    signed_aps="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.aps-environment' "$signed_entitlements" 2>/dev/null || true)"
+    signed_kvstore="$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.ubiquity-kvstore-identifier' "$signed_entitlements" 2>/dev/null || true)"
+    rm -f "$signed_entitlements"
+    if [[ "$signed_container" != "iCloud.dev.gemi.major-tom" \
+        || "$signed_aps" != "$requested_aps" \
+        || "$signed_kvstore" != "7PDU8G67DD.dev.gemi.major-tom" ]]; then
+        echo "Signed app is missing a required Major Tom iCloud entitlement." >&2
+        exit 2
+    fi
 fi
 
 echo "$app"

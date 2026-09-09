@@ -34,11 +34,12 @@ MAJOR_TOM_PROVISIONING_PROFILE="/absolute/path/to/Major Tom Development.provisio
 Scripts/build-app.sh
 ```
 
-For debug builds, the packaging script validates that the configured signing identity is
-available and that an embedded profile authorizes the requested APNs environment. If either
-check fails, it falls back to an ad-hoc signature so the resulting application remains
-launchable, and prints that iCloud sync is unavailable. Release builds fail instead of
-silently changing their signing mode.
+For debug builds with no signing configuration, the packaging script creates an ad-hoc-signed,
+launchable app without iCloud sync. Once either development-signing variable is configured, the
+script requires both a valid signing identity and a profile authorizing the requested APNs,
+CloudKit container, and iCloud Key-Value Store entitlements. It also verifies those entitlements
+on the final signed app. A setup error fails the build instead of silently producing a build
+without iCloud sync. Release builds have the same requirement.
 
 For a reusable local development-signing setup, create `private/env/build-local.env` with those same two variables. The `private/env/` directory is ignored by Git; the release setup below shows how to create it from scratch.
 
@@ -57,6 +58,18 @@ The development and release provisioning profiles must include CloudKit, remote 
 iCloud Key-Value Store, and iCloud Keychain. The checked-in entitlements use development and
 production APNs environments respectively. Deploy the development CloudKit schema to production
 before distributing a production build.
+
+To trace synchronization on a development Mac without exposing tab URLs, titles, account IDs, or
+certificate contents, stream Major Tom's structured CloudKit and bookmark diagnostics:
+
+```bash
+log stream --level debug --style compact \
+  --predicate 'subsystem == "dev.gemi.major-tom" AND (category == "ICloudSync" OR category == "BookmarkSync")'
+```
+
+The log includes lifecycle and status transitions, record-type counts, opaque record IDs, favicon
+observation counts, visible remote-device/tab counts, and complete CloudKit error codes and server
+descriptions. Use `log show --last 15m` with the same predicate to collect a recent trace.
 
 The live transport test is opt-in:
 

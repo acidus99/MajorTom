@@ -156,6 +156,23 @@ public struct BookmarkRepository: Sendable {
         }
     }
 
+    /// The persisted fractional keys are required when applying a partial CloudKit batch.
+    /// Reconstructing them from visible indices would mix a different key alphabet with
+    /// incoming keys and could reorder untouched siblings.
+    public func folderOrderKeys() throws -> [UUID: String] {
+        try database.read { db in
+            Dictionary(uniqueKeysWithValues: try Self.folderRows(in: db, account: accountIdentityHash)
+                .map { ($0.id, $0.orderKey) })
+        }
+    }
+
+    public func bookmarkOrderKeys() throws -> [UUID: String] {
+        try database.read { db in
+            Dictionary(uniqueKeysWithValues: try Self.bookmarkRows(in: db, account: accountIdentityHash)
+                .map { ($0.id, $0.orderKey) })
+        }
+    }
+
     public func pendingFolderIDs() throws -> [UUID: UUID] {
         try database.read { db in
             try Row.fetchAll(

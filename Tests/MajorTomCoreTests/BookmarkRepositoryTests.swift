@@ -52,6 +52,26 @@ final class BookmarkRepositoryTests: XCTestCase {
         XCTAssertEqual(after - before, 1)
     }
 
+    func testPersistedOrderKeysPreserveVisibleOrderForPartialCloudBatch() throws {
+        // Prevents partial CloudKit batches from mixing fabricated numeric positions with
+        // the repository's fractional keys and reordering untouched bookmarks.
+        let database = try MajorTomDatabase(inMemory: ())
+        let repository = BookmarkRepository(database: database)
+        var collection = BookmarkCollection()
+        let first = collection.add(title: "First", url: URL(string: "gemini://first.example/")!)
+        let second = collection.add(title: "Second", url: URL(string: "gemini://second.example/")!)
+        let third = collection.add(title: "Third", url: URL(string: "gemini://third.example/")!)
+
+        try repository.replace(with: collection)
+
+        let keys = try repository.bookmarkOrderKeys()
+        XCTAssertEqual(
+            [first.id, second.id, third.id].sorted { keys[$0]! < keys[$1]! },
+            [first.id, second.id, third.id]
+        )
+        XCTAssertTrue(keys.values.allSatisfy { !$0.allSatisfy(\.isNumber) })
+    }
+
     func testLegacyImportIsIdempotent() throws {
         let database = try MajorTomDatabase(inMemory: ())
         let repository = BookmarkRepository(database: database)

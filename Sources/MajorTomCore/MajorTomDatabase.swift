@@ -303,6 +303,18 @@ public final class MajorTomDatabase: @unchecked Sendable {
                 table.add(column: "title", .text).notNull().defaults(to: "")
             }
         }
+        migrator.registerMigration("v10-repair-bookmark-order-columns") { database in
+            // Some development databases recorded v8 before its position-column cleanup
+            // was added. Migration identifiers are immutable, so repair those databases
+            // under a new identifier instead of changing v8 again.
+            try database.execute(sql: "DROP INDEX IF EXISTS bookmarks_folder_position")
+            if try database.columns(in: "bookmark_folders").contains(where: { $0.name == "position" }) {
+                try database.execute(sql: "ALTER TABLE bookmark_folders DROP COLUMN position")
+            }
+            if try database.columns(in: "bookmarks").contains(where: { $0.name == "position" }) {
+                try database.execute(sql: "ALTER TABLE bookmarks DROP COLUMN position")
+            }
+        }
         return migrator
     }
 }

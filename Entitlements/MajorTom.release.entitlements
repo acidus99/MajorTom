@@ -6,7 +6,7 @@
 	<string>7PDU8G67DD.dev.gemi.major-tom</string>
 	<key>com.apple.developer.team-identifier</key>
 	<string>7PDU8G67DD</string>
-	<key>aps-environment</key>
+	<key>com.apple.developer.aps-environment</key>
 	<string>production</string>
 	<key>com.apple.developer.ubiquity-kvstore-identifier</key>
 	<string>7PDU8G67DD.dev.gemi.major-tom</string>

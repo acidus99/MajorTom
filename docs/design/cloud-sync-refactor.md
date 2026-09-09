@@ -209,6 +209,10 @@ explicit exceptional maintenance path, not the normal move implementation.
 **Sorting is always `ORDER BY order_key, id`.** The `id` tiebreak makes the order total even
 if two devices produce an identical key.
 
+When applying a partial CloudKit batch, seed the merge from the fractional keys persisted in
+SQLite. Never reconstruct untouched keys from visible integer indices: numeric placeholders
+and fractional keys do not share an ordering alphabet.
+
 **Required tests** (`OrderKeyTests.swift`):
 - `between(nil, nil, …)` is non-empty and contains only `a`–`z`.
 - For a large table of pairs, `lower < result < upper` under plain string comparison.
@@ -560,6 +564,9 @@ Unhandled future cases must be a no-op with a log line, never a crash.
   retained, persist its system fields and payload, and retry the still-current generation.
 - `.unknownItem` on a delete — the record is already gone. Treat as success and remove the
   outbox row.
+- `.unknownItem` when saving this device's `MTDeviceTabs` record — discard its stale cached
+  system fields and retry the current snapshot as a new record. This is safe because that
+  ephemeral record is owned only by this device.
 - `.zoneNotFound` — create automatically only when local state says the zone was never
   established. A previously active missing zone follows §7.6.
 - Anything in the engine's auto-retry list (`networkFailure`, `requestRateLimited`,
@@ -986,7 +993,7 @@ Add to `Entitlements/MajorTom.development.entitlements` and
 `Entitlements/MajorTom.release.entitlements`:
 
 ```xml
-<key>aps-environment</key>
+<key>com.apple.developer.aps-environment</key>
 <string>development</string>   <!-- "production" in the release file -->
 ```
 

@@ -3,7 +3,13 @@ import Combine
 import CryptoKit
 import Foundation
 import MajorTomCore
+import OSLog
 import Security
+
+private let cloudSyncLogger = Logger(
+    subsystem: "dev.gemi.major-tom",
+    category: "ICloudSync"
+)
 
 enum ICloudSyncStatus: Equatable {
     case preparing
@@ -32,8 +38,23 @@ enum ICloudSyncStatus: Equatable {
 final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncEngineDelegate {
     static let shared = ICloudSyncStore()
 
-    @Published private(set) var status: ICloudSyncStatus = .preparing
-    @Published private(set) var remoteTabDevices: [CloudTabDeviceSnapshot] = []
+    @Published private(set) var status: ICloudSyncStatus = .preparing {
+        didSet {
+            guard status != oldValue else { return }
+            cloudSyncLogger.notice(
+                "status changed from=\(oldValue.label, privacy: .public) to=\(self.status.label, privacy: .public)"
+            )
+        }
+    }
+    @Published private(set) var remoteTabDevices: [CloudTabDeviceSnapshot] = [] {
+        didSet {
+            guard remoteTabDevices != oldValue else { return }
+            let tabCount = remoteTabDevices.reduce(0) { $0 + $1.tabs.count }
+            cloudSyncLogger.info(
+                "visible remote tabs changed devices=\(self.remoteTabDevices.count) tabs=\(tabCount)"
+            )
+        }
+    }
 
     let receivedPreferences = PassthroughSubject<SyncedBrowserPreferences, Never>()
     let receivedAccountPreferences = PassthroughSubject<SyncedBrowserPreferences, Never>()
@@ -47,6 +68,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     private static let cloudModelMajor = 3
     private static let deviceIDKey = "icloud-device-id-v1"
     private static let cachedTabsKey = "icloud-tabs-cache-v2"
+    private static let orderAndTabsRepairKey = "cloud-full-refetch-order-and-tabs-v1"
     private static let manifestRecordName = "data-model-manifest"
     private let zoneID = CKRecordZone.ID(zoneName: "MajorTomUserDataV2")
     private let legacyZoneID = CKRecordZone.ID(zoneName: "MajorTomUserData")
@@ -59,6 +81,8 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     private var activeAccount: String?
     private var attemptedGenerations: [String: Int64] = [:]
     private var writesBlocked = false
+    private var manualSyncInFlight = false
+    private var lastSendFailureWasHandled = false
     private var localPreferences: SyncedBrowserPreferences?
     private var localClientCertificates: ClientCertificateSyncState?
     private var localBookmarks: SyncedBookmarks?
@@ -96,6 +120,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             ))
         }
         super.init()
+        cloudSyncLogger.notice(
+            "store initialized entitled=\(self.container != nil) deviceID=\(self.localDeviceID.uuidString, privacy: .public)"
+        )
         activeAccount = try? repository?.activeAccountIdentityHash()
 
         if let data = defaults.data(forKey: Self.cachedTabsKey),
@@ -152,33 +179,63 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
 
     func updateTabs(_ tabs: [CloudTabSnapshot]) {
         let normalized = CloudTabURL.deduplicated(tabs)
-        guard localTabs?.tabs != normalized else { return }
+        guard localTabs?.tabs != normalized else {
+            cloudSyncLogger.debug("tab publish skipped unchanged input=\(tabs.count) normalized=\(normalized.count)")
+            return
+        }
+        cloudSyncLogger.info("tab publish queued input=\(tabs.count) normalized=\(normalized.count)")
         localTabs = CloudTabDeviceSnapshot(
             deviceID: localDeviceID,
             deviceName: localDeviceName,
             updatedAt: Date(),
             tabs: normalized
         )
-        guard let account = activeAccount, let repository else { return }
-        try? repository.enqueue(CloudPendingChange(
-            accountIdentityHash: account,
-            recordType: "MTDeviceTabs",
-            recordName: localDeviceID.uuidString.lowercased(),
-            operation: .save
-        ))
-        requestSend()
+        guard let account = activeAccount, let repository else {
+            cloudSyncLogger.debug("tab publish deferred because sync account is not ready")
+            return
+        }
+        do {
+            try repository.enqueue(CloudPendingChange(
+                accountIdentityHash: account,
+                recordType: "MTDeviceTabs",
+                recordName: localDeviceID.uuidString.lowercased(),
+                operation: .save
+            ))
+            requestSend()
+        } catch {
+            Self.log(error, operation: "queueing Cloud Tabs")
+            status = .failed(Self.description(for: error))
+        }
     }
 
     func refresh() {
         guard let engine, !writesBlocked else { return }
+        guard !manualSyncInFlight else {
+            cloudSyncLogger.debug("manual full sync skipped because one is already running")
+            return
+        }
+        manualSyncInFlight = true
+        lastSendFailureWasHandled = false
+        cloudSyncLogger.notice("manual full sync requested")
         status = .syncing
-        Task { [weak self] in
+        // Account-change handling can reach refresh() from a CKSyncEngine delegate callback.
+        // A detached task prevents CloudKit operations from inheriting that callback context.
+        Task.detached { [weak self] in
             do {
                 try await engine.fetchChanges()
                 try await engine.sendChanges()
             } catch {
-                await MainActor.run { self?.status = .failed(Self.description(for: error)) }
+                Self.log(error, operation: "manual full sync")
+                await MainActor.run {
+                    guard let self else { return }
+                    if self.lastSendFailureWasHandled {
+                        self.status = .syncing
+                    } else {
+                        self.status = .failed(Self.description(for: error))
+                    }
+                }
             }
+            await MainActor.run { self?.manualSyncInFlight = false }
         }
     }
 
@@ -200,8 +257,10 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
 
     private func bootstrap() async {
         guard let container else { return }
+        cloudSyncLogger.notice("bootstrap started")
         do {
             let accountStatus = try await container.accountStatus()
+            cloudSyncLogger.info("account status=\(accountStatus.rawValue)")
             guard accountStatus == .available else {
                 status = .unavailable(Self.unsavedWarning(Self.accountStatusDescription(accountStatus)))
                 return
@@ -209,6 +268,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             let userID = try await container.userRecordID()
             try await activateAccount(Self.identityHash(for: userID))
         } catch {
+            Self.log(error, operation: "bootstrap")
             status = .failed(Self.description(for: error))
         }
     }
@@ -255,16 +315,39 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         }
         activeAccount = account
         try repository.saveActiveAccountIdentityHash(account)
+        if let localTabs {
+            try repository.enqueue(CloudPendingChange(
+                accountIdentityHash: account,
+                recordType: "MTDeviceTabs",
+                recordName: localTabs.deviceID.uuidString.lowercased(),
+                operation: .save
+            ))
+            cloudSyncLogger.info(
+                "queued current tabs after account activation tabs=\(localTabs.tabs.count)"
+            )
+        }
         activeAccountChanged.send(account)
         if priorActive != nil, priorActive != account {
             publishAccountDataset(account)
         }
         publishAccountPreferences(account, isSwitch: priorActive != nil && priorActive != account)
 
+        let requiresFullRefetch = !defaults.bool(forKey: Self.orderAndTabsRepairKey)
         let restored = try repository.state(for: account).engineState.flatMap {
             try? decoder.decode(CKSyncEngine.State.Serialization.self, from: $0)
         }
-        configureEngine(for: account, serializedState: restored, createZone: false)
+        configureEngine(
+            for: account,
+            serializedState: requiresFullRefetch ? nil : restored,
+            createZone: false
+        )
+        if requiresFullRefetch {
+            defaults.set(true, forKey: Self.orderAndTabsRepairKey)
+            cloudSyncLogger.notice("scheduled one-time full refetch for order and Cloud Tabs repair")
+        }
+        cloudSyncLogger.notice(
+            "account activated restoredEngineState=\(restored != nil && !requiresFullRefetch)"
+        )
         status = .syncing
         refresh()
     }
@@ -287,6 +370,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         }
         value.state.hasPendingUntrackedChanges = true
         engine = value
+        cloudSyncLogger.notice(
+            "engine configured restoredState=\(serializedState != nil) createZone=\(createZone) automatic=true"
+        )
     }
 
     private func importV1Once(account: String) async throws {
@@ -348,8 +434,8 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         let types = ["MTPreferences", "MTClientCertificates", "MTClientCertificateDescriptor",
                      "MTClientCertificateAssociation", "MTBookmarkFolder", "MTBookmark"]
         var records: [CKRecord] = []
-        do {
-            for type in types {
+        for type in types {
+            do {
                 var page = try await database.records(
                     matching: CKQuery(recordType: type, predicate: NSPredicate(value: true)),
                     inZoneWith: legacyZoneID,
@@ -362,9 +448,19 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
                     guard let cursor = page.queryCursor else { break }
                     page = try await database.records(continuingMatchFrom: cursor, desiredKeys: ["payload"])
                 }
+            } catch let error as CKError {
+                switch error.code {
+                case .zoneNotFound:
+                    return []
+                case .unknownItem, .serverRejectedRequest:
+                    // A user's legacy schema may predate any one of these optional types.
+                    // CloudKit reports an absent record type as serverRejectedRequest in
+                    // development, so probe the remaining types instead of aborting migration.
+                    continue
+                default:
+                    throw error
+                }
             }
-        } catch let error as CKError where error.code == .zoneNotFound {
-            return []
         }
         return records
     }
@@ -438,8 +534,15 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         do {
             try BookmarkRepository(database: localDatabase, accountIdentityHash: account)
                 .replace(with: value.collection)
+            let faviconCount = value.collection.allBookmarks.filter { $0.favicon != nil }.count
+            cloudSyncLogger.info(
+                "local bookmarks persisted folders=\(value.collection.folders.count) bookmarks=\(value.collection.allBookmarks.count) faviconObservations=\(faviconCount)"
+            )
             requestSend()
-        } catch { status = .failed(Self.description(for: error)) }
+        } catch {
+            Self.log(error, operation: "persisting local bookmarks")
+            status = .failed(Self.description(for: error))
+        }
     }
 
     private func persistCertificatesIfReady() {
@@ -461,8 +564,10 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
 
     private func requestSend() {
         guard let engine, !writesBlocked else { return }
+        // CKSyncEngine observes this flag and schedules a send because automaticallySync is
+        // enabled. Do not call sendChanges() here: persistence can run from a delegate callback,
+        // and awaiting an engine operation from that callback is a CloudKit client fatal error.
         engine.state.hasPendingUntrackedChanges = true
-        Task { try? await engine.sendChanges() }
     }
 
     // MARK: CKSyncEngineDelegate
@@ -498,7 +603,17 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             attemptedGenerations[change.recordName] = change.generation
         }
         syncEngine.state.hasPendingUntrackedChanges = changes.count >= 200
-        guard !saves.isEmpty || !deletes.isEmpty else { return nil }
+        guard !saves.isEmpty || !deletes.isEmpty else {
+            cloudSyncLogger.debug("outgoing batch empty pendingRows=\(changes.count)")
+            return nil
+        }
+        let types = Dictionary(grouping: saves, by: \.recordType)
+            .map { "\($0.key):\($0.value.count)" }
+            .sorted()
+            .joined(separator: ",")
+        cloudSyncLogger.info(
+            "outgoing batch saves=\(saves.count) deletes=\(deletes.count) types=\(types, privacy: .public)"
+        )
         return CKSyncEngine.RecordZoneChangeBatch(
             recordsToSave: saves,
             recordIDsToDelete: deletes,
@@ -515,6 +630,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             }
             switch event {
             case .stateUpdate(let update):
+                cloudSyncLogger.debug("engine state update")
                 guard let account = activeAccount else { return }
                 try repository?.saveEngineState(try encoder.encode(update.stateSerialization), for: account)
             case .accountChange(let change):
@@ -534,6 +650,10 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
                     if hash != activeAccount { try await activateAccount(hash) }
                 }
             case .fetchedRecordZoneChanges(let changes):
+                let modificationTypes = Self.recordTypeSummary(changes.modifications.map(\.record))
+                cloudSyncLogger.info(
+                    "received record changes saves=\(changes.modifications.count) deletes=\(changes.deletions.count) types=\(modificationTypes, privacy: .public)"
+                )
                 try applyFetched(changes)
             case .fetchedDatabaseChanges(let changes):
                 if changes.deletions.contains(where: { $0.zoneID == zoneID }) {
@@ -547,6 +667,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
                     }
                 }
             case .sentRecordZoneChanges(let sent):
+                cloudSyncLogger.info(
+                    "send completed saves=\(sent.savedRecords.count) deletes=\(sent.deletedRecordIDs.count) failedSaves=\(sent.failedRecordSaves.count) failedDeletes=\(sent.failedRecordDeletes.count)"
+                )
                 try handleSent(sent)
             case .sentDatabaseChanges(let sent):
                 if sent.savedZones.contains(where: { $0.zoneID == zoneID }), let account = activeAccount {
@@ -555,22 +678,29 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
                     if let state { try repository?.save(state) }
                 }
             case .willFetchChanges:
+                cloudSyncLogger.debug("will fetch changes")
                 status = .syncing
             case .didFetchChanges:
+                cloudSyncLogger.debug("did fetch changes")
                 if let account = activeAccount {
                     var state = try repository?.state(for: account)
                     state?.lastFetchedAt = Date()
                     state?.updatedAt = Date()
                     if let state { try repository?.save(state) }
+                    let hasPending = try repository?.hasPendingChanges(for: account) ?? false
+                    status = hasPending ? .syncing : .upToDate(Date())
                 }
-                status = .upToDate(Date())
-            case .willFetchRecordZoneChanges, .didFetchRecordZoneChanges,
-                 .willSendChanges, .didSendChanges:
+            case .willSendChanges:
+                cloudSyncLogger.debug("will send changes")
+            case .didSendChanges:
+                cloudSyncLogger.debug("did send changes")
+            case .willFetchRecordZoneChanges, .didFetchRecordZoneChanges:
                 break
             @unknown default:
                 break
             }
         } catch {
+            Self.log(error, operation: "handling engine event")
             status = .failed(Self.description(for: error))
         }
     }
@@ -682,15 +812,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         guard !folders.isEmpty else { return }
         let favoriteID = folders[0].id
         var pendingFolders = try repository.pendingFolderIDs()
-        var folderOrder = Dictionary(uniqueKeysWithValues: folders.enumerated().map {
-            ($0.element.id, String(format: "%08d", $0.offset))
-        })
-        var bookmarkOrder: [UUID: String] = [:]
-        for folder in folders {
-            for (index, bookmark) in folder.bookmarks.enumerated() {
-                bookmarkOrder[bookmark.id] = String(format: "%08d", index)
-            }
-        }
+        var folderOrder = try repository.folderOrderKeys()
+        var bookmarkOrder = try repository.bookmarkOrderKeys()
+        var faviconCorrections = Set<UUID>()
         for record in changes.modifications.map(\.record) where record.recordID.zoneID == zoneID {
             guard !pendingDeletes.contains(record.recordID.recordName) else { continue }
             if record.recordType == BookmarkRepository.folderRecordType,
@@ -725,6 +849,10 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         where record.recordType == BookmarkRepository.bookmarkRecordType {
             guard !pendingDeletes.contains(record.recordID.recordName) else { continue }
             guard let payload: CloudBookmarkPayload = decodeRecord(record) else { continue }
+            let localFavicon = folders.lazy.flatMap(\.bookmarks)
+                .first(where: { $0.id == payload.id })?.favicon
+            let favicon = Self.newerFavicon(localFavicon, payload.favicon)
+            if favicon != payload.favicon { faviconCorrections.insert(payload.id) }
             for index in folders.indices { folders[index].bookmarks.removeAll { $0.id == payload.id } }
             let destination = folders.firstIndex { $0.id == payload.folderID }
             if destination == nil { pendingFolders[payload.id] = payload.folderID }
@@ -732,7 +860,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             bookmarkOrder[payload.id] = payload.orderKey
             folders[destination ?? 0].bookmarks.append(Bookmark(
                 id: payload.id, title: payload.title, url: payload.url,
-                addedAt: payload.addedAt, favicon: payload.favicon
+                addedAt: payload.addedAt, favicon: favicon
             ))
         }
         for deletion in changes.deletions where deletion.recordType == BookmarkRepository.bookmarkRecordType {
@@ -752,8 +880,27 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         let collection = BookmarkCollection(folders: folders)
         try repository.replaceFromCloud(with: collection)
         try repository.savePendingFolderIDs(pendingFolders)
+        for id in faviconCorrections {
+            try self.repository?.enqueue(CloudPendingChange(
+                accountIdentityHash: account,
+                recordType: BookmarkRepository.bookmarkRecordType,
+                recordName: id.uuidString,
+                operation: .save
+            ))
+        }
+        if !faviconCorrections.isEmpty {
+            cloudSyncLogger.info(
+                "preserved newer local favicon observations corrections=\(faviconCorrections.count)"
+            )
+            requestSend()
+        }
         let value = SyncedBookmarks(collection: collection, modifiedAt: Date())
         localBookmarks = value
+        let faviconCount = collection.allBookmarks.filter { $0.favicon != nil }.count
+        let emojiCount = collection.allBookmarks.filter { $0.favicon?.emoji != nil }.count
+        cloudSyncLogger.info(
+            "bookmarks applied folders=\(collection.folders.count) bookmarks=\(collection.allBookmarks.count) faviconObservations=\(faviconCount) faviconEmoji=\(emojiCount)"
+        )
         receivedBookmarks.send(value)
     }
 
@@ -811,6 +958,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         }
         let values = Array(devices.values)
         remoteTabDevices = values.visibleCloudTabDevices(excluding: localDeviceID)
+        cloudSyncLogger.info(
+            "tab records applied decodedDevices=\(values.count) visibleDevices=\(self.remoteTabDevices.count)"
+        )
         if let data = try? encoder.encode(values) { defaults.set(data, forKey: Self.cachedTabsKey) }
     }
 
@@ -822,6 +972,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
 
     private func handleSent(_ sent: CKSyncEngine.Event.SentRecordZoneChanges) throws {
         guard let account = activeAccount, let repository else { return }
+        var surfacedError: CKError?
         for record in sent.savedRecords {
             if let generation = attemptedGenerations[record.recordID.recordName] {
                 try repository.acknowledge(recordName: record.recordID.recordName,
@@ -835,22 +986,57 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
                                            generation: generation, for: account)
             }
         }
-        for (id, error) in sent.failedRecordDeletes where error.code == .unknownItem {
-            if let generation = attemptedGenerations[id.recordName] {
-                try repository.acknowledge(recordName: id.recordName,
-                                           generation: generation, for: account)
+        for (id, error) in sent.failedRecordDeletes {
+            cloudSyncLogger.error(
+                "record delete failed id=\(id.recordName, privacy: .public) code=\(error.code.rawValue) description=\(error.localizedDescription, privacy: .public)"
+            )
+            if error.code == .unknownItem,
+               let generation = attemptedGenerations[id.recordName] {
+                try repository.acknowledge(
+                    recordName: id.recordName, generation: generation, for: account
+                )
+            } else {
+                surfacedError = surfacedError ?? error
             }
         }
-        for failure in sent.failedRecordSaves where failure.error.code == .serverRecordChanged {
-            if let server = failure.error.userInfo[CKRecordChangedErrorServerRecordKey] as? CKRecord {
+        for failure in sent.failedRecordSaves {
+            let record = failure.record
+            let error = failure.error
+            cloudSyncLogger.error(
+                "record save failed type=\(record.recordType, privacy: .public) id=\(record.recordID.recordName, privacy: .public) code=\(error.code.rawValue) description=\(error.localizedDescription, privacy: .public)"
+            )
+            if error.code == .serverRecordChanged,
+               let server = error.userInfo[CKRecordChangedErrorServerRecordKey] as? CKRecord {
                 try saveRecordMetadata(server, account: account)
+            } else if error.code == .unknownItem, record.recordType == "MTDeviceTabs",
+                      var state = try repository.recordState(
+                        recordName: record.recordID.recordName, for: account
+                      ) {
+                // Cloud Tabs are owned solely by this device and are self-replacing. If
+                // CloudKit no longer has the record represented by cached system fields,
+                // discard only those fields so the still-pending snapshot retries as new.
+                state.systemFields = nil
+                try repository.saveRecordState(state)
+                cloudSyncLogger.notice(
+                    "cleared stale Cloud Tabs system fields id=\(record.recordID.recordName, privacy: .public)"
+                )
+            } else if error.code != .serverRecordChanged {
+                surfacedError = surfacedError ?? error
             }
         }
         var state = try repository.state(for: account)
-        state.lastSentAt = Date()
+        let hadFailures = !sent.failedRecordSaves.isEmpty || !sent.failedRecordDeletes.isEmpty
+        lastSendFailureWasHandled = hadFailures && surfacedError == nil
+        let hasPending = try repository.hasPendingChanges(for: account)
+        if !hasPending { state.lastSentAt = Date() }
         state.updatedAt = Date()
         try repository.save(state)
         syncPendingFlag()
+        if let surfacedError {
+            status = .failed(Self.description(for: surfacedError))
+        } else {
+            status = hasPending ? .syncing : .upToDate(Date())
+        }
     }
 
     private func saveRecordMetadata(_ record: CKRecord, account: String) throws {
@@ -928,7 +1114,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
               let identifiers = SecTaskCopyValueForEntitlement(
                 task, "com.apple.developer.icloud-container-identifiers" as CFString, nil
               ) as? [String],
-              SecTaskCopyValueForEntitlement(task, "aps-environment" as CFString, nil) != nil,
+              SecTaskCopyValueForEntitlement(
+                task, "com.apple.developer.aps-environment" as CFString, nil
+              ) != nil,
               SecTaskCopyValueForEntitlement(
                 task, "com.apple.developer.ubiquity-kvstore-identifier" as CFString, nil
               ) != nil else { return false }
@@ -944,6 +1132,41 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             "This build is not provisioned for Major Tom iCloud sync"
         )
         default: return error.localizedDescription
+        }
+    }
+
+    private static func recordTypeSummary(_ records: [CKRecord]) -> String {
+        Dictionary(grouping: records, by: \.recordType)
+            .map { "\($0.key):\($0.value.count)" }
+            .sorted()
+            .joined(separator: ",")
+    }
+
+    private static func newerFavicon(
+        _ local: BookmarkFaviconSnapshot?,
+        _ remote: BookmarkFaviconSnapshot?
+    ) -> BookmarkFaviconSnapshot? {
+        switch (local, remote) {
+        case (.none, .none): nil
+        case (.some(let value), .none): value
+        case (.none, .some(let value)): value
+        case (.some(let local), .some(let remote)):
+            local.fetchedAt > remote.fetchedAt ? local : remote
+        }
+    }
+
+    nonisolated private static func log(_ error: Error, operation: String) {
+        let value = error as NSError
+        cloudSyncLogger.error(
+            "\(operation, privacy: .public) failed domain=\(value.domain, privacy: .public) code=\(value.code) description=\(value.localizedDescription, privacy: .public)"
+        )
+        guard let partial = value.userInfo[CKPartialErrorsByItemIDKey]
+                as? [AnyHashable: Error] else { return }
+        for (item, nestedError) in partial {
+            let nested = nestedError as NSError
+            cloudSyncLogger.error(
+                "partial failure item=\(String(describing: item), privacy: .public) domain=\(nested.domain, privacy: .public) code=\(nested.code) description=\(nested.localizedDescription, privacy: .public)"
+            )
         }
     }
 }
