@@ -44,7 +44,14 @@ struct MajorTomApp: App {
                 }
             }
 
-            CommandGroup(after: .newItem) {
+            CommandGroup(replacing: .newItem) {
+                Button("New Window") {
+                    if #available(macOS 26.0, *) {
+                        NativeTabCoordinator.shared.openWindow(url: nil)
+                    }
+                }
+                .keyboardShortcut("n", modifiers: .command)
+
                 Button("New Tab") {
                     NotificationCenter.default.post(name: .majorTomNewTab, object: nil)
                 }
@@ -974,20 +981,37 @@ final class NativeTabCoordinator {
     func openWindow(url: URL?, from source: NSWindow? = nil) {
         let source = source ?? NSApplication.shared.keyWindow
         let window = makeBrowserWindow(url: url, matching: source)
-        if let source {
+        let cascadedTopLeft = source.map { source in
             // Preserve the source window's dimensions but cascade the new window enough
             // to make the separate-window result visually obvious.
-            window.setFrameTopLeftPoint(NSPoint(
+            NSPoint(
                 x: source.frame.minX + 22,
                 y: source.frame.maxY - 22
-            ))
+            )
         }
         // This is an explicit request for a separate window (Shift-click or
         // "Open Link in New Window"), so it must not be automatically absorbed into
         // the current tab group when first shown. Once it is onscreen, restore the
         // preferred mode so tabs can still be dragged into or out of this window.
+        // AppKit applies its initial placement while ordering a manually-created
+        // NSWindow, overwriting a frame set before this call. Keep it transparent
+        // through that placement, then apply the cascade and reveal it at its final
+        // position so the user never sees it jump.
+        window.alphaValue = 0
         window.tabbingMode = .disallowed
         window.makeKeyAndOrderFront(nil)
+        if let cascadedTopLeft {
+            // Hosting the SwiftUI root schedules one final window-attachment pass
+            // which reapplies the source frame. Stay invisible until that pass has
+            // completed, then place and reveal the window at the cascade destination.
+            DispatchQueue.main.async { [weak window] in
+                guard let window else { return }
+                window.setFrameTopLeftPoint(cascadedTopLeft)
+                window.alphaValue = 1
+            }
+        } else {
+            window.alphaValue = 1
+        }
         window.tabbingMode = .preferred
     }
 
