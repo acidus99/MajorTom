@@ -83,11 +83,13 @@ not history. It survives quitting and is offered again when the same prompt URL 
 draft is deleted when the response is successfully formed for submission, when the user
 empties it, or after fourteen days. Drafts never synchronize to another Mac.
 
-Window restoration is separate from global history. Major Tom restores each window's frame,
-tab order and selection, and each tab's Back/Forward list, cursor, zoom, titles, and per-entry
-scroll position. Every visit can retain its URL, title, favicon, exact response status, meta
-and bytes, plus expanded image-link URLs and collapsed preformatted sections. Back and Forward
-reconstruct that exact visit with current rendering preferences and restore its reading state.
+Window restoration is separate from global history. When a saved session exists, Major Tom
+shows that restored session directly rather than briefly opening the homepage first. Major Tom
+restores each window's frame, tab order and selection, and each tab's Back/Forward list, cursor,
+zoom, titles, and per-entry scroll position. Every visit can retain its URL, title, favicon,
+exact response status, meta and bytes, plus expanded image-link URLs and collapsed preformatted
+sections. Back and Forward reconstruct that exact visit with current rendering preferences and
+restore its reading state.
 When saved response bytes are unavailable, Major Tom reloads the entry without changing the
 tab's Back/Forward structure. Client-certificate-authenticated response bodies are not retained.
 

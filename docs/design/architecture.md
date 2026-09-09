@@ -36,6 +36,16 @@ Add Tab action are used only to locate the relevant views; Major Tom invokes no 
 selectors. A permanent nonactivating panel supplies the overview's top-right icon-only
 Hide Tab Overview button and is ordered in or out as overview visibility changes.
 
+### Native window restoration
+
+The browser `WindowGroup` suppresses its automatic launch presentation. At application
+launch, the native tab coordinator loads the saved session, constructs every `NSWindow`
+without ordering it onscreen, applies saved frames and native tab groups, and then presents
+the completed window set with the saved key window in front. When no usable session exists,
+the coordinator creates one ordinary new window. This keeps SwiftUI's default centered scene
+from appearing before the saved layout and retains the `WindowGroup` for scene commands and
+later system-driven window creation.
+
 ### Native navigation controls
 
 SwiftUI composes the navigation bar and its connected functional groups. Standalone

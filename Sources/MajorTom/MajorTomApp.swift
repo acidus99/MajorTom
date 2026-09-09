@@ -33,6 +33,10 @@ struct MajorTomApp: App {
             BrowserWindowDestination()
         }
         .defaultSize(width: 1_100, height: 760)
+        // The native coordinator creates either the exact saved session or one new
+        // window. Letting WindowGroup present its default scene first visibly drew a
+        // centered bootstrap window before restoration could apply the saved frames.
+        .defaultLaunchBehavior(.suppressed)
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("About Major Tom") {
@@ -260,7 +264,6 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         }
         DispatchQueue.main.async {
             NSApplication.shared.activate()
-            NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil)
             FileMenuCustomization.install()
             MenuBarIconCustomization.install()
             NativeTabMenuCustomization.install()
@@ -288,6 +291,12 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         ) { notification in
             guard let url = notification.object as? URL else { return }
             MainActor.assumeIsolated { NativeTabCoordinator.shared.openCloudTab(url) }
+        }
+
+        if #available(macOS 26.0, *) {
+            MainActor.assumeIsolated {
+                NativeTabCoordinator.shared.restoreSessionOrOpenInitialWindow()
+            }
         }
     }
 
@@ -469,7 +478,6 @@ final class NativeTabCoordinator {
     /// title-bar chrome along with the tab, so every peer needs the same tab-bar policy.
     private var tabOverviewControls: [ObjectIdentifier: PermanentTabOverviewControl] = [:]
     private var registeredTabs: [ObjectIdentifier: RegisteredTab] = [:]
-    private var hasAttemptedSessionRestore = false
     private var tabDragMonitor: Any?
     private weak var tabDragCandidateWindow: NSWindow?
     private var tabDragStartPoint: NSPoint?
@@ -568,13 +576,6 @@ final class NativeTabCoordinator {
         )
         installCloseObserver(for: window)
         publishCloudTabsIfNeeded()
-
-        guard !hasAttemptedSessionRestore else { return }
-        hasAttemptedSessionRestore = true
-        DispatchQueue.main.async { [weak self, weak window] in
-            guard let self, let window else { return }
-            self.restorePendingSession(from: window)
-        }
     }
 
     /// Makes a one-tab window a native drop destination while another native tab is
@@ -791,11 +792,22 @@ final class NativeTabCoordinator {
         persistSession()
     }
 
-    private func restorePendingSession(from rootWindow: NSWindow) {
-        guard let session = NativeTabRestorationState.takePendingApplicationState(),
-              !session.windows.isEmpty else { return }
+    func restoreSessionOrOpenInitialWindow() {
+        guard let session = SessionRestorationStore.shared.loadApplication(),
+              let first = session.windows.first,
+              let firstTab = first.tabs.first else {
+            openWindow(url: nil)
+            return
+        }
 
-        let first = session.windows[0]
+        // Construct every saved window hidden. They are ordered only after their
+        // frames, tabs, and selected-tab state have been restored, so no intermediate
+        // default placement can reach the display.
+        let rootWindow = makeBrowserWindow(
+            url: nil,
+            matching: nil,
+            restoredState: firstTab
+        )
         applySavedFrame(first.frame, to: rootWindow)
         let firstSelectedWindow = restoreTabs(in: first, around: rootWindow)
 
@@ -808,14 +820,16 @@ final class NativeTabCoordinator {
             )
             applySavedFrame(savedWindow.frame, to: window)
             let selectedWindow = restoreTabs(in: savedWindow, around: window)
-            // Explicitly keep each restored group separate while it is first ordered;
-            // afterward it remains fully compatible with native tab dragging.
-            selectedWindow.tabbingMode = .disallowed
-            selectedWindow.orderFront(nil)
-            selectedWindow.tabbingMode = .preferred
             restoredSelections.append(selectedWindow)
         }
 
+        // Explicitly keep restored groups separate while they are first ordered;
+        // afterward they remain fully compatible with native tab dragging.
+        for selectedWindow in restoredSelections {
+            selectedWindow.tabbingMode = .disallowed
+            selectedWindow.orderFront(nil)
+            selectedWindow.tabbingMode = .preferred
+        }
         let keyIndex = min(max(session.keyWindowIndex, 0), restoredSelections.count - 1)
         restoredSelections[keyIndex].makeKeyAndOrderFront(nil)
         for selectedWindow in restoredSelections {
@@ -1376,8 +1390,7 @@ private struct BrowserWindowView: View {
     ) {
         _browser = StateObject(wrappedValue: BrowserModel(
             restoredState: NativeTabRestorationState.next(
-                destinationID: destinationID,
-                initialURL: initialURL
+                destinationID: destinationID
             ),
             initialURL: initialURL
         ))
@@ -1494,29 +1507,16 @@ private struct BrowserWindowView: View {
 
 @MainActor
 private enum NativeTabRestorationState {
-    private static var consumedInitialTab = false
-    private static var pendingApplicationState: RestoredApplicationState?
     private static var queuedTabs: [UUID: RestoredTabState] = [:]
 
-    static func next(destinationID: UUID, initialURL: URL?) -> RestoredTabState? {
-        if let queued = queuedTabs.removeValue(forKey: destinationID) { return queued }
-        guard initialURL == nil, !consumedInitialTab else { return nil }
-        consumedInitialTab = true
-        guard let restored = SessionRestorationStore.shared.loadApplication(),
-              let firstWindow = restored.windows.first,
-              !firstWindow.tabs.isEmpty else { return nil }
-        pendingApplicationState = restored
-        return firstWindow.tabs[0]
+    static func next(destinationID: UUID) -> RestoredTabState? {
+        queuedTabs.removeValue(forKey: destinationID)
     }
 
     static func enqueue(_ state: RestoredTabState, for destinationID: UUID) {
         queuedTabs[destinationID] = state
     }
 
-    static func takePendingApplicationState() -> RestoredApplicationState? {
-        defer { pendingApplicationState = nil }
-        return pendingApplicationState
-    }
 }
 
 @available(macOS 26.0, *)
