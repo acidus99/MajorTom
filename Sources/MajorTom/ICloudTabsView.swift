@@ -1,3 +1,4 @@
+import AppKit
 import MajorTomCore
 import SwiftUI
 
@@ -18,13 +19,19 @@ struct ICloudTabsView: View {
                         Section {
                             ForEach(device.tabs) { tab in
                                 Button {
-                                    NotificationCenter.default.post(
-                                        name: .majorTomOpenICloudTab,
-                                        object: tab.url
-                                    )
+                                    openInNewTab(tab.url)
                                 } label: {
                                     HStack(alignment: .top, spacing: 8) {
-                                        if let favicon = tab.favicon { Text(favicon) }
+                                        Group {
+                                            if let favicon = tab.favicon {
+                                                Text(favicon)
+                                            } else {
+                                                Image(systemName: "info.circle")
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+                                        .frame(width: 20, height: 20)
+                                        .accessibilityHidden(true)
                                         VStack(alignment: .leading, spacing: 3) {
                                             Text(tab.title).lineLimit(1)
                                             Text(tab.url.absoluteString)
@@ -37,6 +44,18 @@ struct ICloudTabsView: View {
                                     .contentShape(Rectangle())
                                 }
                                 .buttonStyle(.plain)
+                                .contextMenu {
+                                    Button("Open in New Tab", systemImage: BrowserMenuIcon.newTab) {
+                                        openInNewTab(tab.url)
+                                    }
+                                    Button("Open in New Window", systemImage: BrowserMenuIcon.newWindow) {
+                                        NativeTabCoordinator.shared.openWindow(url: tab.url)
+                                    }
+                                    Divider()
+                                    Button("Copy URL", systemImage: BrowserMenuIcon.copyLink) {
+                                        copyURL(tab.url)
+                                    }
+                                }
                             }
                         } header: {
                             HStack {
@@ -84,6 +103,15 @@ struct ICloudTabsView: View {
         default:
             "Open tabs on another Mac signed in to the same iCloud account will appear here."
         }
+    }
+
+    private func openInNewTab(_ url: URL) {
+        NotificationCenter.default.post(name: .majorTomOpenICloudTab, object: url)
+    }
+
+    private func copyURL(_ url: URL) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.absoluteString, forType: .string)
     }
 
     private var statusSymbol: String {

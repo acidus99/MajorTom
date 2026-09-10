@@ -123,7 +123,9 @@ Keychain material; private key bytes are never copied into the app database or C
 
 Cloud Tabs are an unordered, deduplicated set of URL, title, and optional favicon values per Mac.
 All committed URL schemes are eligible except `about:` and `data:`. Cloud Tabs never include
-Back/Forward state or browsing history.
+Back/Forward state or browsing history. A remote tab can be opened in a new tab or new window,
+or its URL can be copied from its context menu. Rows reserve a leading icon position and use the
+page favicon when available or the standard information symbol otherwise.
 
 ## Native quality and accessibility
 
