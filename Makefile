@@ -16,7 +16,7 @@ dev:
 	Scripts/build-app.sh
 
 test:
-	swift test --disable-index-store
+	Scripts/run-tests.sh
 
 videos: $(APP_VIDEO_RESOURCES)
 

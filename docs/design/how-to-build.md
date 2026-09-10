@@ -3,15 +3,26 @@
 Major Tom is a Swift package targeting macOS 26. You need macOS 26 and Xcode 26 (or its matching Swift toolchain).
 
 All development commands use SwiftPM's standard `.build` directory, so tests,
-direct executable builds, and application packaging reuse one build cache.
+direct executable builds, and application packaging reuse one build cache. The one
+exception is a checkout on a network volume, where `make test` builds outside the share
+instead: a `.build` written over SMB embeds the mount's absolute paths and fails for
+whichever machine did not write it.
 
 ## Development
 
 Run the test suite from the repository root:
 
 ```bash
-swift test
+make test
 ```
+
+Use `make test` rather than `swift test`. XCTest is part of Xcode and absent from the
+Command Line Tools, and `swift test` exits 0 when a test target fails to compile — so
+with `xcode-select` pointed at the CLT the suite reports success while executing no
+tests at all. `Scripts/run-tests.sh` gates the compile on `swift build --build-tests`,
+whose exit code is honest, and falls back to any installed Xcode (located by bundle
+identifier) when the selected toolchain has no XCTest. Set `DEVELOPER_DIR` to choose a
+specific one.
 
 Run the development executable directly:
 

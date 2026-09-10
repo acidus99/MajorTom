@@ -14,7 +14,11 @@ architectural decision.
 
 ## Commands
 
-- `make test` — full test suite. Equivalent to `swift test --disable-index-store`.
+- `make test` — full test suite, via `Scripts/run-tests.sh`. Prefer it over calling
+  `swift test` directly: a plain `swift test` exits 0 when a test target fails to
+  *compile*, so a broken suite reports success while running nothing. The script gates
+  the compile separately, resolves a toolchain that actually has XCTest, and keeps the
+  scratch directory off a network checkout.
 - `make dev` — tests plus an ad-hoc-signed bundle at `Build/Development/Major Tom.app`.
 - `swift run MajorTom` — run the development executable without packaging.
 - Always pass `--disable-index-store` when invoking `swift build` or `swift test`
