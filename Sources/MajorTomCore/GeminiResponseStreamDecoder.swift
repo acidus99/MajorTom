@@ -6,7 +6,14 @@ public struct GeminiResponseStreamDecoder: Sendable {
         case body(Data)
     }
 
-    public static let maximumHeaderByteCount = 1_024
+    /// A response header is `<STATUS><SPACE><META><CR><LF>` and `META` may itself be
+    /// 1024 bytes, so the whole line runs to 2 + 1 + 1024 + 2 bytes.
+    ///
+    /// Capping the line at `META`'s own limit instead rejected conforming responses:
+    /// the effective ceiling was 1019 bytes of `META`, and a server sending a longer
+    /// prompt, error explanation or redirect target failed with a protocol error.
+    public static let maximumMetaByteCount = 1_024
+    public static let maximumHeaderByteCount = maximumMetaByteCount + 5
 
     private var headerBuffer = Data()
     private var parsedHeader: GeminiResponseHeader?
