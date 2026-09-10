@@ -6,9 +6,14 @@ import os
 import SwiftUI
 import WebKit
 
-private let browserHistoryLogger = Logger(
+/// Navigation, document loading, and Back/Forward traversal.
+///
+/// The category was "BackForwardGesture", which named one caller rather than the
+/// messages: filtering the log by it returned every document load and custom-scheme
+/// reply in the browser, and no gesture at all.
+private let browserNavigationLogger = Logger(
     subsystem: "dev.gemi.major-tom",
-    category: "BackForwardGesture"
+    category: "Navigation"
 )
 
 fileprivate enum BrowserHistorySwipeDirection {
@@ -1105,7 +1110,7 @@ final class BrowserModel: ObservableObject {
     }
 
     func goBack() {
-        browserHistoryLogger.notice(
+        browserNavigationLogger.notice(
             "goBack requested modelIndex=\(self.navigation.historyIndex) canBack=\(self.navigation.canGoBack) current=\(self.committedURL?.absoluteString ?? "nil", privacy: .public)"
         )
         guard let entry = navigation.backHistoryEntries.first else { return }
@@ -1113,7 +1118,7 @@ final class BrowserModel: ObservableObject {
     }
 
     func goForward() {
-        browserHistoryLogger.notice(
+        browserNavigationLogger.notice(
             "goForward requested modelIndex=\(self.navigation.historyIndex) canForward=\(self.navigation.canGoForward) current=\(self.committedURL?.absoluteString ?? "nil", privacy: .public)"
         )
         guard let entry = navigation.forwardHistoryEntries.first else { return }
@@ -1121,16 +1126,16 @@ final class BrowserModel: ObservableObject {
     }
 
     func go(toHistoryEntryWithID id: BackForwardEntry.ID) {
-        browserHistoryLogger.notice(
+        browserNavigationLogger.notice(
             "model traversal begin targetID=\(id.uuidString, privacy: .public) fromIndex=\(self.navigation.historyIndex)"
         )
         backForwardDebounceTask?.cancel()
         persistCurrentBackForwardEntry()
         guard let url = navigation.go(toHistoryEntryWithID: id) else {
-            browserHistoryLogger.error("model traversal rejected targetID=\(id.uuidString, privacy: .public)")
+            browserNavigationLogger.error("model traversal rejected targetID=\(id.uuidString, privacy: .public)")
             return
         }
-        browserHistoryLogger.notice(
+        browserNavigationLogger.notice(
             "model cursor moved index=\(self.navigation.historyIndex) url=\(url.absoluteString, privacy: .public)"
         )
         prepareScrollRestoration(for: navigation.historyIndex)
@@ -1176,7 +1181,7 @@ final class BrowserModel: ObservableObject {
         do {
             try await renderHistorySwipeDestination(cached, entry: destination)
         } catch {
-            browserHistoryLogger.error(
+            browserNavigationLogger.error(
                 "history swipe staging failed targetID=\(destination.id.uuidString, privacy: .public) error=\(String(describing: error), privacy: .public)"
             )
             pendingHistorySwipe = nil
@@ -1189,7 +1194,7 @@ final class BrowserModel: ObservableObject {
         presentation.isReady = true
         presentation.offset = direction.sign * min(abs(offset), viewportWidth)
         historySwipePresentation = presentation
-        browserHistoryLogger.notice(
+        browserNavigationLogger.notice(
             "history swipe staging ready targetID=\(destination.id.uuidString, privacy: .public) cached=\(cached != nil)"
         )
         return true
@@ -1830,32 +1835,32 @@ final class BrowserModel: ObservableObject {
     }
 
     private func navigateHistory(to url: URL) {
-        browserHistoryLogger.notice(
+        browserNavigationLogger.notice(
             "navigateHistory url=\(url.absoluteString, privacy: .public) index=\(self.navigation.historyIndex) hotCache=\(self.cachedPage(for: url) != nil)"
         )
         if let page = InternalPage.page(for: url) {
-            browserHistoryLogger.notice("navigateHistory route=internal")
+            browserNavigationLogger.notice("navigateHistory route=internal")
             showInternalPage(page, disposition: .traversal)
             return
         }
         if let cached = cachedPage(for: url) {
-            browserHistoryLogger.notice("navigateHistory route=hot-cache bytes=\(cached.body.count)")
+            browserNavigationLogger.notice("navigateHistory route=hot-cache bytes=\(cached.body.count)")
             displayCachedPage(cached)
             return
         }
         if let entryID = navigation.currentEntryID, let backForwardCache {
-            browserHistoryLogger.notice("navigateHistory route=durable-cache id=\(entryID.uuidString, privacy: .public)")
+            browserNavigationLogger.notice("navigateHistory route=durable-cache id=\(entryID.uuidString, privacy: .public)")
             Task { [weak self] in
                 let stored = try? await backForwardCache.entry(id: entryID)
                 guard let self, self.navigation.currentEntryID == entryID else { return }
                 if let page = stored?.page {
-                    browserHistoryLogger.notice("durable-cache hit id=\(entryID.uuidString, privacy: .public) bytes=\(page.body.count)")
+                    browserNavigationLogger.notice("durable-cache hit id=\(entryID.uuidString, privacy: .public) bytes=\(page.body.count)")
                     self.navigation.cache(page, for: entryID)
                     self.title = stored?.title ?? page.title ?? self.displayTitle(for: url)
                     self.favicon = stored?.favicon
                     self.displayCachedPage(page)
                 } else {
-                    browserHistoryLogger.notice("durable-cache miss id=\(entryID.uuidString, privacy: .public); reloading")
+                    browserNavigationLogger.notice("durable-cache miss id=\(entryID.uuidString, privacy: .public); reloading")
                     self.navigateHistoryWithoutCache(to: url)
                 }
             }
@@ -2426,7 +2431,7 @@ final class BrowserModel: ObservableObject {
     }
 
     private func beginDocument(at sourceURL: URL) -> AsyncThrowingStream<Data, any Error>.Continuation {
-        browserHistoryLogger.notice(
+        browserNavigationLogger.notice(
             "beginDocument source=\(sourceURL.absoluteString, privacy: .public) replacing=\(self.activeWebDocumentURL?.absoluteString ?? "nil", privacy: .public) modelIndex=\(self.navigation.historyIndex)"
         )
         documentContinuation?.finish()
@@ -2441,7 +2446,7 @@ final class BrowserModel: ObservableObject {
         expandableImageLines.removeAll()
         let document = documentStore.createDocument()
         activeWebDocumentURL = document.url
-        browserHistoryLogger.notice(
+        browserNavigationLogger.notice(
             "page.load start document=\(document.url.absoluteString, privacy: .public) source=\(sourceURL.absoluteString, privacy: .public)"
         )
         let navigation = page.load(document.url)
@@ -2449,7 +2454,7 @@ final class BrowserModel: ObservableObject {
         Task { @MainActor [weak self] in
             do {
                 for try await event in navigation {
-                    browserHistoryLogger.notice(
+                    browserNavigationLogger.notice(
                         "page.load event document=\(document.url.absoluteString, privacy: .public) event=\(String(describing: event), privacy: .public)"
                     )
                     guard event == .finished else { continue }
@@ -2462,7 +2467,7 @@ final class BrowserModel: ObservableObject {
                     break
                 }
             } catch {
-                browserHistoryLogger.error(
+                browserNavigationLogger.error(
                     "page.load failed document=\(document.url.absoluteString, privacy: .public) error=\(String(describing: error), privacy: .public)"
                 )
                 // A superseding navigation owns both the placeholder and any pending
@@ -2707,7 +2712,7 @@ final class BrowserModel: ObservableObject {
     }
 
     private func displayCachedPage(_ cached: CachedPage) {
-        browserHistoryLogger.notice(
+        browserNavigationLogger.notice(
             "displayCachedPage url=\(cached.url.absoluteString, privacy: .public) bytes=\(cached.body.count) modelIndex=\(self.navigation.historyIndex)"
         )
         navigationTask?.cancel()
@@ -3940,7 +3945,7 @@ private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
             swipeDirection = direction
             let requestID = UUID()
             preparationRequestID = requestID
-            browserHistoryLogger.notice(
+            browserNavigationLogger.notice(
                 "trackpad swipe recognized direction=\(direction == .back ? "back" : "forward", privacy: .public) deltaX=\(self.horizontalDelta) canBack=\(self.browser?.canGoBack ?? false) canForward=\(self.browser?.canGoForward ?? false)"
             )
             Task { @MainActor [weak self, weak webView] in
@@ -4028,7 +4033,7 @@ private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
                     coordinator.webView = webViews.last
                     if let webView = coordinator.webView {
                         coordinator.scrollView = firstScrollView(in: webView)
-                        browserHistoryLogger.notice(
+                        browserNavigationLogger.notice(
                             "installed model-owned trackpad history gesture webViews=\(webViews.count)"
                         )
                     }
@@ -4105,7 +4110,7 @@ private struct BrowserNavigationDecider: WebPage.NavigationDeciding {
         guard let url = action.request.url else { return .cancel }
         preferences.allowsContentJavaScript = false
         if action.navigationType == .backForward {
-            browserHistoryLogger.error(
+            browserNavigationLogger.error(
                 "cancelled unexpected WebKit-owned BackForward destination=\(url.absoluteString, privacy: .public)"
             )
             return .cancel
@@ -4189,12 +4194,12 @@ private struct BrowserDocumentSchemeHandler: URLSchemeHandler, Sendable {
             let task = Task {
                 guard let url = request.url,
                       let stream = store.takeDocument(id: url.lastPathComponent) else {
-                    browserHistoryLogger.error(
+                    browserNavigationLogger.error(
                         "scheme reply unavailable url=\(request.url?.absoluteString ?? "nil", privacy: .public)"
                     )
                     throw URLError(.resourceUnavailable)
                 }
-                browserHistoryLogger.notice("scheme reply start url=\(url.absoluteString, privacy: .public)")
+                browserNavigationLogger.notice("scheme reply start url=\(url.absoluteString, privacy: .public)")
                 continuation.yield(.response(URLResponse(
                     url: url,
                     mimeType: "text/html",
@@ -4205,11 +4210,11 @@ private struct BrowserDocumentSchemeHandler: URLSchemeHandler, Sendable {
                     try Task.checkCancellation()
                     continuation.yield(.data(data))
                 }
-                browserHistoryLogger.notice("scheme reply finish url=\(url.absoluteString, privacy: .public)")
+                browserNavigationLogger.notice("scheme reply finish url=\(url.absoluteString, privacy: .public)")
                 continuation.finish()
             }
             continuation.onTermination = { termination in
-                browserHistoryLogger.notice(
+                browserNavigationLogger.notice(
                     "scheme reply terminated url=\(request.url?.absoluteString ?? "nil", privacy: .public) state=\(String(describing: termination), privacy: .public)"
                 )
                 task.cancel()
