@@ -2,7 +2,13 @@ import AppKit
 import Combine
 import MajorTomAppKitSupport
 import MajorTomCore
+import OSLog
 import SwiftUI
+
+private let windowRestorationLogger = Logger(
+    subsystem: "dev.gemi.major-tom",
+    category: "WindowRestoration"
+)
 
 private struct BrowserWindowDestination: Codable, Hashable {
     let id: UUID
@@ -516,6 +522,10 @@ final class NativeTabCoordinator {
         // content-theme color, losing the Liquid Glass continuation seen on the first
         // tab.
         window.styleMask.insert(.fullSizeContentView)
+        // Browser windows are manually constructed, so WindowGroup.defaultSize and a
+        // SwiftUI view's fitting size cannot enforce this native resizing boundary.
+        // The reference minimum is a 1304 × 1420 Retina-pixel window: 652 × 710 points.
+        window.minSize = NativeWindowGeometry.minimumFrameSize
         window.titlebarAppearsTransparent = true
         window.tabbingIdentifier = Self.tabbingIdentifier
         window.tabbingMode = .preferred
@@ -770,8 +780,12 @@ final class NativeTabCoordinator {
             guard !states.isEmpty else { continue }
             let selectedWindow = candidate.tabGroup?.selectedWindow ?? candidate
             let selectedIndex = states.firstIndex { $0.window === selectedWindow } ?? 0
+            let persistedFrame = resolvedFrame(
+                selectedWindow.frame,
+                operation: "persist"
+            )?.frame
             windows.append(RestoredBrowserWindowState(
-                frame: selectedWindow.frame,
+                frame: persistedFrame,
                 tabs: states.map(\.state),
                 selectedIndex: selectedIndex
             ))
@@ -874,8 +888,37 @@ final class NativeTabCoordinator {
     }
 
     private func applySavedFrame(_ frame: CGRect?, to window: NSWindow) {
-        guard let frame, frame.width > 0, frame.height > 0 else { return }
-        window.setFrame(frame, display: false)
+        guard let resolution = resolvedFrame(frame, operation: "restore") else { return }
+        window.setFrame(resolution.frame, display: false)
+    }
+
+    private func applyDefaultFrame(to window: NSWindow) {
+        guard let resolution = resolvedFrame(nil, operation: "initial") else { return }
+        window.setFrame(resolution.frame, display: false)
+    }
+
+    private func resolvedFrame(
+        _ frame: CGRect?,
+        operation: String
+    ) -> NativeWindowFrameResolution? {
+        let resolution = NativeWindowGeometry.resolve(
+            savedFrame: frame,
+            visibleFrames: NSScreen.screens.map(\.visibleFrame)
+        )
+        guard let resolution else {
+            windowRestorationLogger.error(
+                "\(operation, privacy: .public) skipped because no usable display was available"
+            )
+            return nil
+        }
+        let source = frame.map(String.init(describing:)) ?? "none"
+        let adjustments = resolution.adjustments.map(\.rawValue).joined(separator: ",")
+        let resolved = String(describing: resolution.frame)
+        let adjustmentDescription = adjustments.isEmpty ? "none" : adjustments
+        windowRestorationLogger.info(
+            "\(operation, privacy: .public) saved=\(source, privacy: .public) resolved=\(resolved, privacy: .public) adjustments=\(adjustmentDescription, privacy: .public)"
+        )
+        return resolution
     }
 
     private func installCloseObserver(for window: NSWindow) {
@@ -1010,7 +1053,15 @@ final class NativeTabCoordinator {
                 window.alphaValue = 1
             }
         } else {
-            window.alphaValue = 1
+            // With no source window, installing NSHostingController can replace the
+            // requested size with SwiftUI's tiny fitting size. AppKit also performs a
+            // final placement pass when the manually-created window is first ordered.
+            // Correct both effects while hidden, then reveal the finished window.
+            DispatchQueue.main.async { [weak self, weak window] in
+                guard let self, let window else { return }
+                self.applyDefaultFrame(to: window)
+                window.alphaValue = 1
+            }
         }
         window.tabbingMode = .preferred
     }
@@ -1078,7 +1129,10 @@ final class NativeTabCoordinator {
             // hidden tab windows start with the exact dimensions of their parent.
             window.setFrame(source.frame, display: false)
         } else {
-            window.center()
+            // Reassert a frame-sized default after attaching SwiftUI. `minSize`
+            // prevents subsequent user or fitting-size resizing below the reference
+            // minimum, while this preserves the established 1100 × 760 launch size.
+            applyDefaultFrame(to: window)
         }
 
         let controller = NSWindowController(window: window)

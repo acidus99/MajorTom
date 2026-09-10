@@ -44,7 +44,11 @@ without ordering it onscreen, applies saved frames and native tab groups, and th
 the completed window set with the saved key window in front. When no usable session exists,
 the coordinator creates one ordinary new window. This keeps SwiftUI's default centered scene
 from appearing before the saved layout and retains the `WindowGroup` for scene commands and
-later system-driven window creation.
+later system-driven window creation. Browser-window sizing is enforced at the `NSWindow`
+boundary because attaching a SwiftUI hosting controller can replace a manually constructed
+window's requested frame with its fitting size. Saved and newly created frames are normalized
+against the visible frames of the currently connected displays before presentation and
+persistence.
 
 ### Native navigation controls
 
