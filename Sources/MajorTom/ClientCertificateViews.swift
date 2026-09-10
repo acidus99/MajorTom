@@ -13,6 +13,7 @@ struct ClientCertificatesManagerView: View {
     @State private var selectedID: UUID?
     @State private var showsCreation = false
     @State private var showsImport = false
+    @State private var certificatePendingRemoval: ClientCertificateDescriptor?
     @State private var certificatePendingDeletion: ClientCertificateDescriptor?
     @State private var certificatePendingExport: ClientCertificateDescriptor?
     @State private var associationSortOrder = [
@@ -83,7 +84,24 @@ struct ClientCertificatesManagerView: View {
             }
         }
         .alert(
-            "Delete Client Certificate?",
+            "Remove Client Certificate from Major Tom?",
+            isPresented: Binding(
+                get: { certificatePendingRemoval != nil },
+                set: { if !$0 { certificatePendingRemoval = nil } }
+            ),
+            presenting: certificatePendingRemoval
+        ) { certificate in
+            Button("Cancel", role: .cancel) { certificatePendingRemoval = nil }
+            Button("Remove from Major Tom", role: .destructive) {
+                certificatePendingRemoval = nil
+                store.removeFromMajorTom(certificate)
+                selectedID = store.certificates.first?.id
+            }
+        } message: { certificate in
+            Text("Removing “\(certificate.commonName)” removes it from Major Tom, deletes all saved capsule associations, and synchronizes that removal to your other Macs. Its certificate and private key remain untouched in Keychain.")
+        }
+        .alert(
+            "Delete Client Identity Permanently?",
             isPresented: Binding(
                 get: { certificatePendingDeletion != nil },
                 set: { if !$0 { certificatePendingDeletion = nil } }
@@ -91,11 +109,11 @@ struct ClientCertificatesManagerView: View {
             presenting: certificatePendingDeletion
         ) { certificate in
             Button("Cancel", role: .cancel) { certificatePendingDeletion = nil }
-            Button("Delete", role: .destructive) {
+            Button("Delete Identity", role: .destructive) {
                 certificatePendingDeletion = nil
                 Task {
                     do {
-                        try await store.delete(certificate)
+                        try await store.deleteIdentity(certificate)
                         selectedID = store.certificates.first?.id
                     } catch {
                         store.lastError = error.localizedDescription
@@ -103,7 +121,7 @@ struct ClientCertificatesManagerView: View {
                 }
             }
         } message: { certificate in
-            Text("Deleting “\(certificate.commonName)” removes its private key, all saved capsule associations, and synchronized copies on your other Macs. You may permanently lose access to accounts registered with it.")
+            Text("Deleting “\(certificate.commonName)” permanently removes its certificate and private key from Keychain, deletes all saved capsule associations, and synchronizes that removal to your other Macs. If it is stored in iCloud Keychain, the identity can also be removed from your other devices. You may permanently lose access to accounts registered with it.")
         }
         .alert(
             "Export Client Identity?",
@@ -166,6 +184,14 @@ struct ClientCertificatesManagerView: View {
                         }
                     }
                     .tag(certificate.id)
+                    .contextMenu {
+                        Button("Remove from Major Tom…") {
+                            certificatePendingRemoval = certificate
+                        }
+                        Button("Delete Identity Permanently…", role: .destructive) {
+                            certificatePendingDeletion = certificate
+                        }
+                    }
                 }
             }
             .listStyle(.sidebar)
@@ -204,9 +230,14 @@ struct ClientCertificatesManagerView: View {
                             certificatePendingExport = certificate
                         }
                         .disabled(store.availability[certificate.id] == false)
-                        Button("Delete…", role: .destructive) {
+                        Button("Remove from Major Tom…") {
+                            certificatePendingRemoval = certificate
+                        }
+                        .help("Remove the certificate and its approvals from Major Tom but keep its Keychain identity")
+                        Button("Delete Identity…", role: .destructive) {
                             certificatePendingDeletion = certificate
                         }
+                        .help("Permanently delete the certificate and private key from Keychain")
                     }
 
                     GroupBox("Approved Capsule Scopes") {

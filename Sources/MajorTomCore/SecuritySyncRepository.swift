@@ -5,7 +5,7 @@ public struct CloudClientCertificateDescriptorPayload: CloudSyncPayload, Equatab
     public static let payloadSchemaVersion = 1
     public static let knownPayloadKeys: Set<String> = [
         "id", "commonName", "emailAddress", "userID", "domain", "organization", "country",
-        "notBefore", "notAfter", "certificateSHA256", "publicKeySHA256"
+        "notBefore", "notAfter", "certificateSHA256", "publicKeySHA256", "keychainIdentifiers"
     ]
     public var id: UUID
     public var commonName: String
@@ -18,6 +18,7 @@ public struct CloudClientCertificateDescriptorPayload: CloudSyncPayload, Equatab
     public var notAfter: Date
     public var certificateSHA256: String
     public var publicKeySHA256: String
+    public var keychainIdentifiers: [UUID]
 
     public init(_ descriptor: ClientCertificateDescriptor) {
         id = descriptor.id
@@ -31,13 +32,37 @@ public struct CloudClientCertificateDescriptorPayload: CloudSyncPayload, Equatab
         notAfter = descriptor.notAfter
         certificateSHA256 = descriptor.certificateSHA256
         publicKeySHA256 = descriptor.publicKeySHA256
+        keychainIdentifiers = descriptor.keychainIdentifiers
     }
 
     public var descriptor: ClientCertificateDescriptor {
         ClientCertificateDescriptor(id: id, commonName: commonName, emailAddress: emailAddress,
             userID: userID, domain: domain, organization: organization, country: country,
             notBefore: notBefore, notAfter: notAfter, certificateSHA256: certificateSHA256,
-            publicKeySHA256: publicKeySHA256)
+            publicKeySHA256: publicKeySHA256, keychainIdentifiers: keychainIdentifiers)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, commonName, emailAddress, userID, domain, organization, country
+        case notBefore, notAfter, certificateSHA256, publicKeySHA256, keychainIdentifiers
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        commonName = try values.decode(String.self, forKey: .commonName)
+        emailAddress = try values.decode(String.self, forKey: .emailAddress)
+        userID = try values.decode(String.self, forKey: .userID)
+        domain = try values.decode(String.self, forKey: .domain)
+        organization = try values.decode(String.self, forKey: .organization)
+        country = try values.decode(String.self, forKey: .country)
+        notBefore = try values.decode(Date.self, forKey: .notBefore)
+        notAfter = try values.decode(Date.self, forKey: .notAfter)
+        certificateSHA256 = try values.decode(String.self, forKey: .certificateSHA256)
+        publicKeySHA256 = try values.decode(String.self, forKey: .publicKeySHA256)
+        keychainIdentifiers = try values.decodeIfPresent(
+            [UUID].self, forKey: .keychainIdentifiers
+        ) ?? [id]
     }
 }
 
@@ -160,6 +185,34 @@ public struct ClientCertificateSyncRepository: Sendable {
     public func associationPayload(id: UUID) throws -> CloudClientCertificateAssociationPayload? {
         let loaded = try load().state.associations.first { $0.id == id && $0.deletedAt == nil }
         return loaded.map { CloudClientCertificateAssociationPayload($0.association) }
+    }
+
+    /// Reasserts an explicit deletion for every UUID that has represented an identity.
+    /// The aliases may no longer have local metadata rows, so ordinary state diffing
+    /// cannot discover these record deletes on its own.
+    public func enqueueExplicitDeletion(
+        descriptorIDs: Set<UUID>,
+        associationIDs: Set<UUID>
+    ) throws {
+        guard let accountIdentityHash else { return }
+        try database.write { db in
+            for id in descriptorIDs {
+                try cloud.enqueue(CloudPendingChange(
+                    accountIdentityHash: accountIdentityHash,
+                    recordType: "MTClientCertificateDescriptor",
+                    recordName: id.uuidString,
+                    operation: .delete
+                ), in: db)
+            }
+            for id in associationIDs {
+                try cloud.enqueue(CloudPendingChange(
+                    accountIdentityHash: accountIdentityHash,
+                    recordType: "MTClientCertificateAssociation",
+                    recordName: id.uuidString,
+                    operation: .delete
+                ), in: db)
+            }
+        }
     }
 
     public func importLegacy(

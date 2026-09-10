@@ -17,6 +17,10 @@ public struct ClientCertificateDescriptor: Codable, Equatable, Identifiable, Sen
     public var notAfter: Date
     public var certificateSHA256: String
     public var publicKeySHA256: String
+    /// UUIDs under which this certificate's private key may exist in Keychain.
+    /// Duplicate CloudKit records are collapsed to one descriptor while these aliases
+    /// retain the non-secret lookup information needed by every Mac.
+    public var keychainIdentifiers: [UUID]
     public var synchronizesWithICloud: Bool
 
     public init(
@@ -31,6 +35,7 @@ public struct ClientCertificateDescriptor: Codable, Equatable, Identifiable, Sen
         notAfter: Date,
         certificateSHA256: String,
         publicKeySHA256: String,
+        keychainIdentifiers: [UUID]? = nil,
         synchronizesWithICloud: Bool = true
     ) {
         self.id = id
@@ -44,11 +49,61 @@ public struct ClientCertificateDescriptor: Codable, Equatable, Identifiable, Sen
         self.notAfter = notAfter
         self.certificateSHA256 = certificateSHA256.lowercased()
         self.publicKeySHA256 = publicKeySHA256.lowercased()
+        self.keychainIdentifiers = Array(Set((keychainIdentifiers ?? []) + [id])).sorted {
+            $0.uuidString < $1.uuidString
+        }
         self.synchronizesWithICloud = synchronizesWithICloud
     }
 
     public func isValid(at date: Date = Date()) -> Bool {
         notBefore <= date && date <= notAfter
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, commonName, emailAddress, userID, domain, organization, country
+        case notBefore, notAfter, certificateSHA256, publicKeySHA256
+        case keychainIdentifiers, synchronizesWithICloud
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let id = try values.decode(UUID.self, forKey: .id)
+        self.init(
+            id: id,
+            commonName: try values.decode(String.self, forKey: .commonName),
+            emailAddress: try values.decode(String.self, forKey: .emailAddress),
+            userID: try values.decode(String.self, forKey: .userID),
+            domain: try values.decode(String.self, forKey: .domain),
+            organization: try values.decode(String.self, forKey: .organization),
+            country: try values.decode(String.self, forKey: .country),
+            notBefore: try values.decode(Date.self, forKey: .notBefore),
+            notAfter: try values.decode(Date.self, forKey: .notAfter),
+            certificateSHA256: try values.decode(String.self, forKey: .certificateSHA256),
+            publicKeySHA256: try values.decode(String.self, forKey: .publicKeySHA256),
+            keychainIdentifiers: try values.decodeIfPresent(
+                [UUID].self, forKey: .keychainIdentifiers
+            ),
+            synchronizesWithICloud: try values.decodeIfPresent(
+                Bool.self, forKey: .synchronizesWithICloud
+            ) ?? true
+        )
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(id, forKey: .id)
+        try values.encode(commonName, forKey: .commonName)
+        try values.encode(emailAddress, forKey: .emailAddress)
+        try values.encode(userID, forKey: .userID)
+        try values.encode(domain, forKey: .domain)
+        try values.encode(organization, forKey: .organization)
+        try values.encode(country, forKey: .country)
+        try values.encode(notBefore, forKey: .notBefore)
+        try values.encode(notAfter, forKey: .notAfter)
+        try values.encode(certificateSHA256, forKey: .certificateSHA256)
+        try values.encode(publicKeySHA256, forKey: .publicKeySHA256)
+        try values.encode(keychainIdentifiers, forKey: .keychainIdentifiers)
+        try values.encode(synchronizesWithICloud, forKey: .synchronizesWithICloud)
     }
 }
 
@@ -442,6 +497,7 @@ public struct SyncedClientCertificateDescriptor: Codable, Equatable, Identifiabl
     public var notAfter: Date
     public var certificateSHA256: String
     public var publicKeySHA256: String
+    public var keychainIdentifiers: [UUID]?
     public var modifiedAt: Date
     public var deletedAt: Date?
 
@@ -461,6 +517,7 @@ public struct SyncedClientCertificateDescriptor: Codable, Equatable, Identifiabl
         notAfter = descriptor.notAfter
         certificateSHA256 = descriptor.certificateSHA256
         publicKeySHA256 = descriptor.publicKeySHA256
+        keychainIdentifiers = descriptor.keychainIdentifiers
         self.modifiedAt = modifiedAt
         self.deletedAt = deletedAt
     }
@@ -478,6 +535,7 @@ public struct SyncedClientCertificateDescriptor: Codable, Equatable, Identifiabl
             notAfter: notAfter,
             certificateSHA256: certificateSHA256,
             publicKeySHA256: publicKeySHA256,
+            keychainIdentifiers: keychainIdentifiers,
             // This only expresses the intended backing store. Actual per-Mac
             // availability remains in ClientCertificateStore.availability.
             synchronizesWithICloud: true
@@ -576,6 +634,60 @@ public struct ClientCertificateSyncState: Codable, Equatable, Sendable {
         )
     }
 
+    /// Collapses metadata records that describe the same cryptographic certificate.
+    ///
+    /// Older builds keyed CloudKit records only by a locally generated UUID. Importing
+    /// the same identity on two Macs could therefore create two records for identical
+    /// certificate bytes. Choose the lexicographically first UUID on every Mac, move
+    /// every approval to it, and tombstone redundant records through `reconciled`.
+    public func canonicalizingDuplicateCertificates(at date: Date) -> Self {
+        let active = certificates.filter { $0.deletedAt == nil }
+        let groups = Dictionary(grouping: active) {
+            $0.certificateSHA256.lowercased()
+        }
+        let duplicateGroups = groups.values.filter {
+            !$0[0].certificateSHA256.isEmpty && $0.count > 1
+        }
+        guard !duplicateGroups.isEmpty else { return self }
+
+        var canonicalIDByID: [UUID: UUID] = [:]
+        var keychainIdentifiersByCanonicalID: [UUID: [UUID]] = [:]
+        for group in duplicateGroups {
+            let canonicalID = group.map(\.id).min {
+                $0.uuidString < $1.uuidString
+            }!
+            for record in group { canonicalIDByID[record.id] = canonicalID }
+            keychainIdentifiersByCanonicalID[canonicalID] = Array(Set(group.flatMap {
+                $0.descriptor.keychainIdentifiers + [$0.id]
+            })).sorted { $0.uuidString < $1.uuidString }
+        }
+
+        let currentCertificates = active.compactMap { record -> ClientCertificateDescriptor? in
+            guard canonicalIDByID[record.id].map({ $0 == record.id }) ?? true else { return nil }
+            var descriptor = record.descriptor
+            if let keychainIdentifiers = keychainIdentifiersByCanonicalID[record.id] {
+                descriptor.keychainIdentifiers = keychainIdentifiers
+            }
+            return descriptor
+        }
+        let remappedAssociations = activeAssociations.map { association -> ClientCertificateAssociation in
+            var result = association
+            result.certificateID = canonicalIDByID[association.certificateID]
+                ?? association.certificateID
+            return result
+        }
+        let currentAssociations = Dictionary(grouping: remappedAssociations) {
+            AssociationScopeKey($0)
+        }.values.compactMap { group in
+            group.min { $0.id.uuidString < $1.id.uuidString }
+        }
+        return reconciled(
+            certificates: currentCertificates,
+            associations: currentAssociations,
+            at: date
+        )
+    }
+
     public func activeCertificates(
         preservingLocalStorageFrom local: [ClientCertificateDescriptor]
     ) -> [ClientCertificateDescriptor] {
@@ -609,6 +721,22 @@ public struct ClientCertificateSyncState: Codable, Equatable, Sendable {
             result[record.id] = record
         }
         return result.values.sorted { $0.id.uuidString < $1.id.uuidString }
+    }
+}
+
+private struct AssociationScopeKey: Hashable {
+    var certificateID: UUID
+    var host: String
+    var port: UInt16
+    var scope: String
+    var pathPrefix: String
+
+    init(_ association: ClientCertificateAssociation) {
+        certificateID = association.certificateID
+        host = association.endpoint.host
+        port = association.endpoint.port
+        scope = association.scope.rawValue
+        pathPrefix = association.scope == .entireCapsule ? "/" : association.pathPrefix
     }
 }
 

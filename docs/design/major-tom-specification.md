@@ -117,9 +117,11 @@ switching accounts never uploads one account's rows to another.
 
 Deleting synchronized user intent physically deletes its CloudKit record and wins over a
 concurrent edit. Clearing local browsing data removes history, session restoration, and cached
-pages only from this Mac. Removing a client identity locally deletes its Keychain material and
-publishes descriptor and association deletions. A remote metadata deletion does not erase
-Keychain material; private key bytes are never copied into the app database or CloudKit.
+pages only from this Mac. Removing a client identity from Major Tom publishes descriptor and
+association deletions but preserves its certificate and private key in Keychain. The separate
+Delete Identity Permanently action removes that Keychain material as well. A remote metadata
+deletion does not erase Keychain material; private key bytes are never copied into the app
+database or CloudKit.
 
 Cloud Tabs are an unordered, deduplicated set of URL, title, and optional favicon values per Mac.
 All committed URL schemes are eligible except `about:` and `data:`. Cloud Tabs never include

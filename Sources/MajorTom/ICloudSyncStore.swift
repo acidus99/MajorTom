@@ -136,7 +136,12 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         keyValueObserver = NotificationCenter.default.publisher(
             for: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
             object: NSUbiquitousKeyValueStore.default
-        ).sink { [weak self] _ in
+        )
+        // SyncedDefaults posts this notification on com.apple.kvs.client.callback.
+        // Deliver downstream on the main queue before entering the @MainActor-isolated
+        // sink; wrapping only the body in Task is too late for Swift 6's executor check.
+        .receive(on: DispatchQueue.main)
+        .sink { [weak self] _ in
             Task { @MainActor in self?.applyUbiquitousPreferences() }
         }
         applyUbiquitousPreferences()
@@ -165,6 +170,33 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     func updateClientCertificates(_ snapshot: ClientCertificateSyncState) {
         localClientCertificates = snapshot
         persistCertificatesIfReady()
+    }
+
+    /// Fans an explicit user deletion out to every UUID that previously represented
+    /// the same certificate. Automatic fingerprint reconciliation never calls this.
+    func deleteClientCertificateRecords(
+        descriptorIDs: some Sequence<UUID>,
+        associationIDs: some Sequence<UUID>
+    ) {
+        guard let activeAccount, let localDatabase else { return }
+        do {
+            let descriptorIDs = Set(descriptorIDs)
+            let associationIDs = Set(associationIDs)
+            try ClientCertificateSyncRepository(
+                database: localDatabase, accountIdentityHash: activeAccount
+            ).enqueueExplicitDeletion(
+                descriptorIDs: descriptorIDs,
+                associationIDs: associationIDs
+            )
+            cloudSyncLogger.notice(
+                "explicit certificate deletion queued descriptors=\(descriptorIDs.count) associations=\(associationIDs.count)"
+            )
+            status = .syncing
+            requestSend()
+        } catch {
+            Self.log(error, operation: "queueing client certificate deletion")
+            status = .failed(Self.description(for: error))
+        }
     }
 
     func configure(bookmarks: SyncedBookmarks?) {
@@ -972,6 +1004,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
 
     private func handleSent(_ sent: CKSyncEngine.Event.SentRecordZoneChanges) throws {
         guard let account = activeAccount, let repository else { return }
+        cloudSyncLogger.info(
+            "outgoing result saved=\(sent.savedRecords.count) deleted=\(sent.deletedRecordIDs.count) failedSaves=\(sent.failedRecordSaves.count) failedDeletes=\(sent.failedRecordDeletes.count)"
+        )
         var surfacedError: CKError?
         for record in sent.savedRecords {
             if let generation = attemptedGenerations[record.recordID.recordName] {

@@ -103,6 +103,38 @@ final class SecuritySyncRepositoryTests: XCTestCase {
         XCTAssertEqual(after, before)
     }
 
+    func testExplicitCertificateDeletionQueuesEveryAliasAndAssociation() throws {
+        // Prevents a duplicate metadata UUID on another Mac from surviving a user
+        // deletion after local fingerprint reconciliation has hidden that row.
+        let database = try MajorTomDatabase(inMemory: ())
+        let account = "account"
+        let repository = ClientCertificateSyncRepository(
+            database: database,
+            accountIdentityHash: account
+        )
+        let descriptorIDs: Set<UUID> = [UUID(), UUID(), UUID()]
+        let associationIDs: Set<UUID> = [UUID(), UUID()]
+
+        try repository.enqueueExplicitDeletion(
+            descriptorIDs: descriptorIDs,
+            associationIDs: associationIDs
+        )
+
+        let pending = try CloudSyncRepository(database: database).pendingChanges(for: account)
+        XCTAssertEqual(Set(pending.map(\.recordName)), Set(
+            descriptorIDs.map(\.uuidString) + associationIDs.map(\.uuidString)
+        ))
+        XCTAssertTrue(pending.allSatisfy { $0.operation == .delete })
+        XCTAssertEqual(
+            pending.filter { $0.recordType == "MTClientCertificateDescriptor" }.count,
+            descriptorIDs.count
+        )
+        XCTAssertEqual(
+            pending.filter { $0.recordType == "MTClientCertificateAssociation" }.count,
+            associationIDs.count
+        )
+    }
+
     func testFetchedCertificateMetadataDoesNotEcho() throws {
         let database = try MajorTomDatabase(inMemory: ())
         let repository = ClientCertificateSyncRepository(

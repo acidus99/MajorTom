@@ -397,6 +397,65 @@ final class CloudSyncModelTests: XCTestCase {
         )
     }
 
+    func testDuplicateCertificateFingerprintsConvergeWithoutLosingApprovals() throws {
+        // Prevents independently imported copies of one Keychain identity from
+        // remaining as duplicate CloudKit certificate records on every Mac.
+        let firstID = try XCTUnwrap(UUID(uuidString: "10000000-0000-0000-0000-000000000000"))
+        let secondID = try XCTUnwrap(UUID(uuidString: "20000000-0000-0000-0000-000000000000"))
+        let fingerprint = String(repeating: "a", count: 64)
+        func descriptor(_ id: UUID) -> ClientCertificateDescriptor {
+            ClientCertificateDescriptor(
+                id: id,
+                commonName: "Shared Identity",
+                notBefore: .distantPast,
+                notAfter: .distantFuture,
+                certificateSHA256: fingerprint,
+                publicKeySHA256: String(repeating: "b", count: 64)
+            )
+        }
+        let endpoint = CapsuleEndpoint(host: "example.com")
+        let duplicateApprovalA = ClientCertificateAssociation(
+            id: try XCTUnwrap(UUID(uuidString: "30000000-0000-0000-0000-000000000000")),
+            certificateID: firstID,
+            endpoint: endpoint,
+            scope: .entireCapsule,
+            pathPrefix: "/login"
+        )
+        let duplicateApprovalB = ClientCertificateAssociation(
+            id: try XCTUnwrap(UUID(uuidString: "40000000-0000-0000-0000-000000000000")),
+            certificateID: secondID,
+            endpoint: endpoint,
+            scope: .entireCapsule,
+            pathPrefix: "/other"
+        )
+        let distinctApproval = ClientCertificateAssociation(
+            certificateID: secondID,
+            endpoint: endpoint,
+            scope: .pathAndDescendants,
+            pathPrefix: "/account"
+        )
+        let state = ClientCertificateSyncState().reconciled(
+            certificates: [descriptor(secondID), descriptor(firstID)],
+            associations: [duplicateApprovalB, distinctApproval, duplicateApprovalA],
+            at: Date(timeIntervalSince1970: 10)
+        )
+
+        let repaired = state.canonicalizingDuplicateCertificates(
+            at: Date(timeIntervalSince1970: 20)
+        )
+
+        let activeCertificates = repaired.activeCertificates(preservingLocalStorageFrom: [])
+        XCTAssertEqual(activeCertificates.map(\.id), [firstID])
+        XCTAssertEqual(Set(activeCertificates[0].keychainIdentifiers), [firstID, secondID])
+        XCTAssertEqual(repaired.activeAssociations.count, 2)
+        XCTAssertTrue(repaired.activeAssociations.allSatisfy { $0.certificateID == firstID })
+        XCTAssertEqual(
+            repaired.activeAssociations.filter { $0.scope == .entireCapsule }.map(\.id),
+            [duplicateApprovalA.id]
+        )
+        XCTAssertEqual(repaired.canonicalizingDuplicateCertificates(at: .distantFuture), repaired)
+    }
+
     func testDifferentActiveTrustKeysBecomeAConflict() {
         let endpoint = CapsuleEndpoint(host: "example.com", port: 1_965)
         let first = SyncedServerTrust(decisions: [SyncedServerTrustDecision(

@@ -30,6 +30,34 @@ final class ClientCertificateKeychainTests: XCTestCase {
         XCTAssertEqual(exported.certificateDER, der)
     }
 
+    func testFingerprintLookupFindsIdentityStoredUnderLegacyUUID() throws {
+        // Prevents CloudKit's canonical metadata UUID from making an identical
+        // iCloud Keychain identity stored under an older UUID appear unavailable.
+        let keychain = ClientCertificateKeychain()
+        let stored = try keychain.create(ClientCertificateCreationRequest(
+            commonName: "Major Tom Alias Test \(UUID().uuidString)",
+            validUntil: Date().addingTimeInterval(24 * 60 * 60)
+        ))
+        defer { try? keychain.delete(id: stored.id) }
+        let canonical = ClientCertificateDescriptor(
+            id: UUID(),
+            commonName: stored.commonName,
+            notBefore: stored.notBefore,
+            notAfter: stored.notAfter,
+            certificateSHA256: stored.certificateSHA256,
+            publicKeySHA256: stored.publicKeySHA256,
+            keychainIdentifiers: [stored.id],
+            synchronizesWithICloud: stored.synchronizesWithICloud
+        )
+
+        XCTAssertEqual(
+            try keychain.certificateDER(for: canonical),
+            try keychain.certificateDER(for: stored.id)
+        )
+        try assertCanSign(keychain.identity(for: canonical))
+        XCTAssertNoThrow(try keychain.validateIdentityCanSign(for: canonical))
+    }
+
     private func assertCanSign(_ identity: ClientTLSIdentity) throws {
         var reloadedPrivateKey: SecKey?
         XCTAssertEqual(

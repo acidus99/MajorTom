@@ -126,7 +126,16 @@ The row retains the local decision source, fingerprint, certificate observation,
 times, and sighting count. Server trust is deliberately local-only. Client-certificate CloudKit
 metadata uses one row per descriptor and association, with separate per-identity local Keychain
 synchronization flags. The actual private key and certificate identity remain Keychain items;
-remote metadata deletion never deletes Keychain material.
+remote metadata deletion never deletes Keychain material. Certificate descriptors that have the
+same certificate SHA-256 fingerprint are one logical identity: every Mac deterministically keeps
+the lexicographically first metadata UUID, merges capsule/path approvals onto it, and synchronizes
+the former UUIDs as non-secret Keychain lookup aliases. This lets a canonical CloudKit record use
+identity material that iCloud Keychain still stores under an older UUID without copying private-key
+bytes or allowing metadata cleanup to delete a credential. Removing an identity from Major Tom
+queues CloudKit deletes for the canonical descriptor, every synchronized alias UUID, and locally
+known approvals, so a stale duplicate on another Mac cannot survive while all Keychain material
+is preserved. Delete Identity Permanently performs the same metadata cleanup only after deleting
+the matching Keychain certificate and private-key aliases on the initiating Mac.
 
 ### Data ownership and storage map
 

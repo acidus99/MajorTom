@@ -247,12 +247,33 @@ public struct ClientCertificateKeychain: Sendable {
         }
     }
 
+    /// Resolves an identity by certificate fingerprint when CloudKit metadata and
+    /// Keychain material carry different legacy UUIDs.
+    public func identity(for descriptor: ClientCertificateDescriptor) throws -> ClientTLSIdentity {
+        for id in candidateIdentifiers(for: descriptor) {
+            guard let der = try? certificateDER(for: id),
+                  CertificateDetails.sha256(certificateDER: der)
+                    .caseInsensitiveCompare(descriptor.certificateSHA256) == .orderedSame,
+                  let identity = try? identity(for: id) else { continue }
+            return identity
+        }
+        throw ClientCertificateKeychainError.identityUnavailable
+    }
+
     /// Confirms that the persisted private key can perform the operation TLS needs.
     /// For a legacy key created by an older ad-hoc build, this explicit user-initiated
     /// check gives macOS an opportunity to authorize the current build before
     /// Network.framework reaches the non-interactive handshake.
     public func validateIdentityCanSign(for id: UUID) throws {
         let identity = try identity(for: id)
+        try validateCanSign(identity)
+    }
+
+    public func validateIdentityCanSign(for descriptor: ClientCertificateDescriptor) throws {
+        try validateCanSign(identity(for: descriptor))
+    }
+
+    private func validateCanSign(_ identity: ClientTLSIdentity) throws {
         var privateKey: SecKey?
         let status = SecIdentityCopyPrivateKey(identity.securityIdentity, &privateKey)
         guard status == errSecSuccess, let privateKey else {
@@ -324,6 +345,18 @@ public struct ClientCertificateKeychain: Sendable {
             + "\n"
             + privateKeyPEM
             + "\n"
+    }
+
+    public func exportIdentityPEM(for descriptor: ClientCertificateDescriptor) throws -> String {
+        guard let id = candidateIdentifiers(for: descriptor).first(where: { id in
+            guard let der = try? certificateDER(for: id) else { return false }
+            return CertificateDetails.sha256(certificateDER: der)
+                .caseInsensitiveCompare(descriptor.certificateSHA256) == .orderedSame
+                && (try? identity(for: id)) != nil
+        }) else {
+            throw ClientCertificateKeychainError.identityUnavailable
+        }
+        return try exportIdentityPEM(for: id)
     }
 
     private func privateKey(for id: UUID) throws -> SecKey {
@@ -458,6 +491,29 @@ public struct ClientCertificateKeychain: Sendable {
         )
     }
 
+    public func certificateDER(for descriptor: ClientCertificateDescriptor) throws -> Data {
+        for id in candidateIdentifiers(for: descriptor) {
+            guard let der = try? certificateDER(for: id),
+                  CertificateDetails.sha256(certificateDER: der)
+                    .caseInsensitiveCompare(descriptor.certificateSHA256) == .orderedSame else {
+                continue
+            }
+            return der
+        }
+        throw ClientCertificateKeychainError.identityUnavailable
+    }
+
+    /// Deletes every Major Tom Keychain copy of one cryptographic identity. This is
+    /// used only for an explicit user deletion; CloudKit metadata cleanup never calls it.
+    public func delete(_ descriptor: ClientCertificateDescriptor) throws {
+        let identifiers = candidateIdentifiers(for: descriptor).filter { id in
+            guard let der = try? certificateDER(for: id) else { return false }
+            return CertificateDetails.sha256(certificateDER: der)
+                .caseInsensitiveCompare(descriptor.certificateSHA256) == .orderedSame
+        }
+        for id in Set(identifiers + [descriptor.id]) { try delete(id: id) }
+    }
+
     public func delete(id: UUID) throws {
         let synchronizedCertificateStatus = SecItemDelete([
             kSecClass: kSecClassGenericPassword,
@@ -514,6 +570,12 @@ public struct ClientCertificateKeychain: Sendable {
             throw ClientCertificateKeychainError.keychain(localLegacyCertificateStatus)
         }
         try deleteKey(id: id)
+    }
+
+    private func candidateIdentifiers(
+        for descriptor: ClientCertificateDescriptor
+    ) -> [UUID] {
+        [descriptor.id] + descriptor.keychainIdentifiers.filter { $0 != descriptor.id }
     }
 
     private func deleteKey(id: UUID) throws {

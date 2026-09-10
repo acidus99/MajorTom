@@ -1,6 +1,12 @@
 import Combine
 import Foundation
 import MajorTomCore
+import OSLog
+
+private let clientCertificateLogger = Logger(
+    subsystem: "dev.gemi.major-tom",
+    category: "ClientCertificateSync"
+)
 
 struct ResolvedClientCertificate {
     var descriptor: ClientCertificateDescriptor
@@ -106,6 +112,7 @@ final class ClientCertificateStore: ObservableObject {
         accountObserver = ICloudSyncStore.shared.activeAccountChanged.sink { [weak self] account in
             self?.switchAccount(to: account)
         }
+        repairDuplicateMetadata()
         persist(syncState)
         ICloudSyncStore.shared.configure(
             clientCertificates: syncState.certificates.isEmpty && syncState.associations.isEmpty
@@ -127,6 +134,7 @@ final class ClientCertificateStore: ObservableObject {
         certificates = loaded.state.activeCertificates(preservingLocalStorageFrom: certificates)
         associations = loaded.state.activeAssociations
         applyLocalStorageFlags()
+        repairDuplicateMetadata()
         refreshAvailability()
     }
 
@@ -168,9 +176,9 @@ final class ClientCertificateStore: ObservableObject {
         let digest = CertificateDetails.sha256(certificateDER: imported.certificateDER)
         if let existing = certificates.first(where: { $0.certificateSHA256 == digest }) {
             let keychain = self.keychain
-            if (try? keychain.certificateDER(for: existing.id)) != nil {
+            if (try? keychain.certificateDER(for: existing)) != nil {
                 try await Task.detached(priority: .userInitiated) {
-                    try keychain.validateIdentityCanSign(for: existing.id)
+                    try keychain.validateIdentityCanSign(for: existing)
                 }.value
                 availability[existing.id] = true
                 signingValidated.insert(existing.id)
@@ -204,11 +212,23 @@ final class ClientCertificateStore: ObservableObject {
         return descriptor
     }
 
-    func delete(_ descriptor: ClientCertificateDescriptor) async throws {
+    func removeFromMajorTom(_ descriptor: ClientCertificateDescriptor) {
+        removeMetadata(for: descriptor)
+    }
+
+    func deleteIdentity(_ descriptor: ClientCertificateDescriptor) async throws {
         let keychain = self.keychain
         try await Task.detached(priority: .userInitiated) {
-            try keychain.delete(id: descriptor.id)
+            try keychain.delete(descriptor)
         }.value
+        removeMetadata(for: descriptor)
+    }
+
+    private func removeMetadata(for descriptor: ClientCertificateDescriptor) {
+        let descriptorIDs = descriptor.keychainIdentifiers
+        let associationIDs = associations.filter {
+            $0.certificateID == descriptor.id
+        }.map(\.id)
         certificates.removeAll { $0.id == descriptor.id }
         associations.removeAll { $0.certificateID == descriptor.id }
         availability.removeValue(forKey: descriptor.id)
@@ -216,17 +236,23 @@ final class ClientCertificateStore: ObservableObject {
         identityCache.removeValue(forKey: descriptor.id)
         signingValidated.remove(descriptor.id)
         changed()
+        ICloudSyncStore.shared.deleteClientCertificateRecords(
+            descriptorIDs: descriptorIDs,
+            associationIDs: associationIDs
+        )
     }
 
     /// Deletes every client identity and its approval rules. The Keychain work runs off
     /// the main actor, then metadata is changed once so iCloud receives one coherent set
     /// of deletion tombstones.
     func deleteAll() async throws {
-        let identifiers = certificates.map(\.id)
+        let descriptors = certificates
+        let descriptorIDs = descriptors.flatMap(\.keychainIdentifiers)
+        let associationIDs = associations.map(\.id)
         let keychain = self.keychain
         try await Task.detached(priority: .userInitiated) {
-            for identifier in identifiers {
-                try keychain.delete(id: identifier)
+            for descriptor in descriptors {
+                try keychain.delete(descriptor)
             }
         }.value
         certificates = []
@@ -236,6 +262,10 @@ final class ClientCertificateStore: ObservableObject {
         identityCache = [:]
         signingValidated = []
         changed()
+        ICloudSyncStore.shared.deleteClientCertificateRecords(
+            descriptorIDs: descriptorIDs,
+            associationIDs: associationIDs
+        )
     }
 
     func associate(
@@ -329,8 +359,10 @@ final class ClientCertificateStore: ObservableObject {
                 identity = await Task.detached(priority: .userInitiated) {
                     () -> ClientTLSIdentity? in
                     do {
-                        if needsSigningCheck { try keychain.validateIdentityCanSign(for: id) }
-                        return try keychain.identity(for: id)
+                        if needsSigningCheck {
+                            try keychain.validateIdentityCanSign(for: descriptor)
+                        }
+                        return try keychain.identity(for: descriptor)
                     } catch {
                         return nil
                     }
@@ -350,19 +382,19 @@ final class ClientCertificateStore: ObservableObject {
     }
 
     func certificatePEM(for descriptor: ClientCertificateDescriptor) -> String? {
-        guard let der = try? keychain.certificateDER(for: descriptor.id) else { return nil }
+        guard let der = try? keychain.certificateDER(for: descriptor) else { return nil }
         return CertificateDetails.pem(certificateDER: der)
     }
 
     func exportIdentityPEM(for descriptor: ClientCertificateDescriptor) async throws -> String {
         let keychain = self.keychain
         return try await Task.detached(priority: .userInitiated) {
-            try keychain.exportIdentityPEM(for: descriptor.id)
+            try keychain.exportIdentityPEM(for: descriptor)
         }.value
     }
 
     func certificateDER(for descriptor: ClientCertificateDescriptor) -> Data? {
-        try? keychain.certificateDER(for: descriptor.id)
+        try? keychain.certificateDER(for: descriptor)
     }
 
     func associations(for descriptor: ClientCertificateDescriptor) -> [ClientCertificateAssociation] {
@@ -378,21 +410,23 @@ final class ClientCertificateStore: ObservableObject {
     /// One Keychain query per stored certificate. Called from `init`, so doing it inline
     /// blocked the main actor for the whole catalogue while the first tab was created.
     func refreshAvailability() {
-        let identifiers = certificates.map(\.id)
-        guard !identifiers.isEmpty else { return }
+        let descriptors = certificates
+        guard !descriptors.isEmpty else { return }
         let keychain = self.keychain
         Task { [weak self] in
             let found = await Task.detached(priority: .utility) {
                 () -> [UUID: ClientTLSIdentity] in
                 var result: [UUID: ClientTLSIdentity] = [:]
-                for id in identifiers {
-                    if let identity = try? keychain.identity(for: id) { result[id] = identity }
+                for descriptor in descriptors {
+                    if let identity = try? keychain.identity(for: descriptor) {
+                        result[descriptor.id] = identity
+                    }
                 }
                 return result
             }.value
             guard let self else { return }
-            for id in identifiers {
-                self.availability[id] = found[id] != nil
+            for descriptor in descriptors {
+                self.availability[descriptor.id] = found[descriptor.id] != nil
             }
             self.identityCache.merge(found) { _, refreshed in refreshed }
         }
@@ -432,7 +466,7 @@ final class ClientCertificateStore: ObservableObject {
         associations = incoming.activeAssociations
         syncState = incoming
         isApplyingRemote = false
-        persist(syncState)
+        if !repairDuplicateMetadata() { persist(syncState) }
         refreshAvailability()
     }
 
@@ -457,6 +491,53 @@ final class ClientCertificateStore: ObservableObject {
                 certificates[index].synchronizesWithICloud = value
             }
         }
+    }
+
+    /// Repairs the legacy state where separate Macs gave identical certificate bytes
+    /// different record UUIDs. This changes CloudKit metadata only; Keychain items are
+    /// intentionally retained and fingerprint lookup keeps any old UUID usable.
+    @discardableResult
+    private func repairDuplicateMetadata() -> Bool {
+        let active = syncState.certificates.filter { $0.deletedAt == nil }
+        let groups = Dictionary(grouping: active) { $0.certificateSHA256.lowercased() }
+        let duplicates = groups.values.filter {
+            !$0[0].certificateSHA256.isEmpty && $0.count > 1
+        }
+        guard !duplicates.isEmpty else { return false }
+
+        var canonicalIDByID: [UUID: UUID] = [:]
+        for group in duplicates {
+            let ids = group.map(\.id).sorted { $0.uuidString < $1.uuidString }
+            guard let canonicalID = ids.first else { continue }
+            for id in ids { canonicalIDByID[id] = canonicalID }
+            let flags = ids.compactMap { localSynchronizationFlags[$0] }
+            if !flags.isEmpty {
+                localSynchronizationFlags[canonicalID] = flags.contains(true)
+            }
+            for id in ids where id != canonicalID {
+                localSynchronizationFlags.removeValue(forKey: id)
+            }
+        }
+
+        let repaired = syncState.canonicalizingDuplicateCertificates(at: Date())
+        guard repaired != syncState else { return false }
+        let oldCertificateCount = certificates.count
+        let oldAssociationCount = associations.count
+        syncState = repaired
+        certificates = repaired.activeCertificates(preservingLocalStorageFrom: certificates)
+        associations = repaired.activeAssociations
+        applyLocalStorageFlags()
+        identityCache = [:]
+        signingValidated = []
+        if let selected = managerSelectionRequest {
+            managerSelectionRequest = canonicalIDByID[selected] ?? selected
+        }
+        persist(syncState)
+        scheduleUpload(syncState)
+        clientCertificateLogger.info(
+            "reconciled duplicate certificate metadata certificates=\(oldCertificateCount)->\(self.certificates.count) associations=\(oldAssociationCount)->\(self.associations.count)"
+        )
+        return true
     }
 
     private func scheduleUpload(_ snapshot: ClientCertificateSyncState) {
