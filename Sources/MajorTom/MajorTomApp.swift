@@ -422,7 +422,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        ICloudSyncStore.shared.refresh()
+        ICloudSyncStore.shared.refresh(trigger: .activation)
     }
 
 

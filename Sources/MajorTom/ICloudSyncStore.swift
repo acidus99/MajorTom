@@ -41,6 +41,10 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     @Published private(set) var status: ICloudSyncStatus = .preparing {
         didSet {
             guard status != oldValue else { return }
+            // `.upToDate` carries the time it completed, so consecutive values differ
+            // while reading identically to the reader. Logging those produced a stream
+            // of "status changed from=Up to date to=Up to date".
+            guard status.label != oldValue.label else { return }
             cloudSyncLogger.notice(
                 "status changed from=\(oldValue.label, privacy: .public) to=\(self.status.label, privacy: .public)"
             )
@@ -82,6 +86,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     private var attemptedGenerations: [String: Int64] = [:]
     private var writesBlocked = false
     private var manualSyncInFlight = false
+    private var lastFullSyncAt: Date?
     private var lastSendFailureWasHandled = false
     private var localPreferences: SyncedBrowserPreferences?
     private var localClientCertificates: ClientCertificateSyncState?
@@ -240,15 +245,44 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         }
     }
 
-    func refresh() {
+    /// Why a full sync was asked for, which decides both how it is logged and whether
+    /// it may be skipped as redundant.
+    enum FullSyncTrigger: String {
+        /// Sync Now, or opening a view that offers the current state as fact.
+        case user
+        /// Returning to Major Tom, where a sync is worth attempting but was not asked
+        /// for.
+        case activation
+    }
+
+    /// Returning to the application syncs often enough that an unconditional full round
+    /// trip is wasteful: switching away and back repeatedly issued a fetch and a send
+    /// each time. A sync this recent has nothing to add, and CKSyncEngine keeps its own
+    /// schedule besides.
+    private static let activationSyncInterval: TimeInterval = 30
+
+    func refresh(trigger: FullSyncTrigger = .user) {
         guard let engine, !writesBlocked else { return }
         guard !manualSyncInFlight else {
-            cloudSyncLogger.debug("manual full sync skipped because one is already running")
+            cloudSyncLogger.debug(
+                "full sync skipped because one is already running trigger=\(trigger.rawValue, privacy: .public)"
+            )
+            return
+        }
+        if trigger == .activation,
+           let lastFullSyncAt,
+           Date().timeIntervalSince(lastFullSyncAt) < Self.activationSyncInterval {
+            cloudSyncLogger.debug("activation full sync skipped because one just completed")
             return
         }
         manualSyncInFlight = true
+        lastFullSyncAt = Date()
         lastSendFailureWasHandled = false
-        cloudSyncLogger.notice("manual full sync requested")
+        // Logged as what it is: describing an activation as a "manual" sync made the log
+        // report a user action nobody performed, several times an hour.
+        cloudSyncLogger.notice(
+            "full sync requested trigger=\(trigger.rawValue, privacy: .public)"
+        )
         status = .syncing
         // Account-change handling can reach refresh() from a CKSyncEngine delegate callback.
         // A detached task prevents CloudKit operations from inheriting that callback context.
@@ -257,7 +291,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
                 try await engine.fetchChanges()
                 try await engine.sendChanges()
             } catch {
-                Self.log(error, operation: "manual full sync")
+                Self.log(error, operation: "full sync")
                 await MainActor.run {
                     guard let self else { return }
                     if self.lastSendFailureWasHandled {
