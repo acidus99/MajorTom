@@ -25,6 +25,8 @@ Major Tom is a multiwindow, tabbed macOS browser. Each tab independently owns it
 
 The unified address field accepts Gemini locations and searches. A submitted explicit Gemini URL navigates; probable hostnames are normalized as Gemini locations; allowed external URLs are handed to macOS; other text is sent to the selected Gemini search provider. Invalid explicit Gemini URLs must produce useful feedback rather than silently becoming searches.
 
+A location Major Tom is asked to open by the rest of the system opens the same way a location typed into the address field does: a `gemini://` link activated in another application, and a Gemtext or plain-text document opened from the Finder, each become a new selected tab of the frontmost window, or the first window when none is open. A launch caused by one of these shows it alongside any restored session rather than behind the homepage. Opening a location never creates a window the reader cannot see.
+
 Document themes are independent of application appearance. Dracula Dark is the default document theme. On first launch, Major Tom opens `gemini://gemi.dev/major-tom/` as its homepage.
 
 When a visited capsule provides a valid favicon, its full-color emoji appears on the Page Information control and the tab. Without a favicon, the Page Information control uses the standard information-in-a-circle symbol. Major Tom remembers both valid favicons and confirmed absence for 30 days; failed or interrupted favicon checks are tried again later.

@@ -240,8 +240,30 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
     private var openICloudTabObserver: (any NSObjectProtocol)?
     private var terminationTask: Task<Void, Never>?
     private var hasPreparedForTermination = false
+    /// Locations delivered before the first window exists, opened once launching ends.
+    private var pendingRequestedLocations: [URL] = []
+    private var hasFinishedLaunching = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // Claim the Gemini-URL event before AppKit installs the default handler, which
+        // is what forwards it to SwiftUI's scene routing. Declining the event per scene
+        // instead was not workable: `handlesExternalEvents` on the browser group merely
+        // moved the unwanted window to the next scene in the graph, and adding it to the
+        // Cloud Tabs window made that window present itself at every launch. Consuming
+        // the event here means no scene is ever offered it.
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleGetURLAppleEvent(_:withReplyEvent:)),
+            forEventClass: Self.internetEventClass,
+            andEventID: Self.getURLEventID
+        )
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleOpenDocumentsAppleEvent(_:withReplyEvent:)),
+            forEventClass: Self.coreEventClass,
+            andEventID: Self.openDocumentsEventID
+        )
+
         // Native tab dragging is an AppKit window-tabbing feature. Opt in before the
         // first SwiftUI WindowGroup window is created so a tab dragged from any Major
         // Tom window can join another compatible Major Tom window.
@@ -303,12 +325,98 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
             queue: .main
         ) { notification in
             guard let url = notification.object as? URL else { return }
-            MainActor.assumeIsolated { NativeTabCoordinator.shared.openCloudTab(url) }
+            MainActor.assumeIsolated { NativeTabCoordinator.shared.openLocation(url) }
         }
 
         if #available(macOS 26.0, *) {
             MainActor.assumeIsolated {
-                NativeTabCoordinator.shared.restoreSessionOrOpenInitialWindow()
+                let requestedLocations = pendingRequestedLocations
+                pendingRequestedLocations.removeAll()
+                NativeTabCoordinator.shared.restoreSessionOrOpenInitialWindow(
+                    openingInitially: requestedLocations
+                )
+            }
+        }
+        hasFinishedLaunching = true
+    }
+
+    /// Four-character Apple Event codes, spelled out so this file needs no Carbon
+    /// import: `kInternetEventClass` and `kAEGetURL` are both `'GURL'`,
+    /// `kCoreEventClass` is `'aevt'`, `kAEOpenDocuments` is `'odoc'`,
+    /// `keyDirectObject` is `'----'`, and `typeFileURL` is `'furl'`.
+    private static let internetEventClass = AEEventClass(0x4755_524C)
+    private static let getURLEventID = AEEventID(0x4755_524C)
+    private static let coreEventClass = AEEventClass(0x6165_7674)
+    private static let openDocumentsEventID = AEEventID(0x6F64_6F63)
+    private static let directObjectKeyword = AEKeyword(0x2D2D_2D2D)
+    private static let fileURLDescriptorType = DescType(0x6675_726C)
+
+    /// Opens a `gemini://` link activated in another application.
+    @objc
+    private func handleGetURLAppleEvent(
+        _ event: NSAppleEventDescriptor,
+        withReplyEvent reply: NSAppleEventDescriptor
+    ) {
+        guard let directObject = event.paramDescriptor(forKeyword: Self.directObjectKeyword) else {
+            return
+        }
+        // The direct object is a single URL string for one link and a list of them when
+        // several arrive together.
+        let descriptors: [NSAppleEventDescriptor] = directObject.numberOfItems > 0
+            ? (1...directObject.numberOfItems).compactMap(directObject.atIndex)
+            : [directObject]
+        openRequestedLocations(descriptors.compactMap { $0.stringValue.flatMap(URL.init(string:)) })
+    }
+
+    /// Opens the Gemtext and plain-text documents declared in `Info.plist`, whether
+    /// double-clicked in the Finder or passed to `open`.
+    ///
+    /// Handled as an Apple Event for the same reason as `gemini://` above, and because
+    /// declaring `application(_:open:)` instead changes how AppKit treats the launch:
+    /// with the browser group's own launch scene suppressed, SwiftUI answered by
+    /// presenting the Cloud Tabs window at every launch.
+    @objc
+    private func handleOpenDocumentsAppleEvent(
+        _ event: NSAppleEventDescriptor,
+        withReplyEvent reply: NSAppleEventDescriptor
+    ) {
+        openRequestedLocations(documentURLs(in: event))
+    }
+
+    private func documentURLs(in event: NSAppleEventDescriptor) -> [URL] {
+        guard let directObject = event.paramDescriptor(forKeyword: Self.directObjectKeyword) else {
+            return []
+        }
+        let descriptors: [NSAppleEventDescriptor] = directObject.numberOfItems > 0
+            ? (1...directObject.numberOfItems).compactMap(directObject.atIndex)
+            : [directObject]
+        // The Finder sends aliases and bookmarks rather than URLs, so each item is
+        // coerced to 'furl' before being read.
+        return descriptors.compactMap { descriptor in
+            guard let coerced = descriptor.coerce(toDescriptorType: Self.fileURLDescriptorType),
+                  let text = String(data: coerced.data, encoding: .utf8) else { return nil }
+            return URL(string: text)
+        }
+    }
+
+    /// Shows locations the system asked Major Tom to open.
+    ///
+    /// Browser windows are built by NativeTabCoordinator and stay transparent until
+    /// their geometry settles, so any window SwiftUI created for one of these events
+    /// was never revealed and never carried the requested location: every `gemini://`
+    /// link used to leak a permanently invisible homepage window while appearing to do
+    /// nothing at all.
+    private func openRequestedLocations(_ urls: [URL]) {
+        guard !urls.isEmpty, #available(macOS 26.0, *) else { return }
+        // A launch triggered by opening a location delivers the event before the session
+        // has been restored, so the location waits for a window to exist.
+        guard hasFinishedLaunching else {
+            pendingRequestedLocations.append(contentsOf: urls)
+            return
+        }
+        MainActor.assumeIsolated {
+            for url in urls {
+                NativeTabCoordinator.shared.openLocation(url)
             }
         }
     }
@@ -813,11 +921,19 @@ final class NativeTabCoordinator {
         persistSession()
     }
 
-    func restoreSessionOrOpenInitialWindow() {
+    /// - Parameter requestedLocations: locations the system asked Major Tom to open as
+    ///   it launched, such as a `gemini://` link clicked in another application. They
+    ///   arrive before the first window exists, so they are opened here rather than
+    ///   through `openLocation(_:)`, which would find no window to attach a tab to and
+    ///   create a second one alongside this launch's window.
+    func restoreSessionOrOpenInitialWindow(openingInitially requestedLocations: [URL] = []) {
         guard let session = SessionRestorationStore.shared.loadApplication(),
               let first = session.windows.first,
               let firstTab = first.tabs.first else {
-            openWindow(url: nil)
+            // A location Major Tom was launched to open belongs in the window it is
+            // opening anyway, not behind a homepage the reader never asked for.
+            let window = openWindow(url: requestedLocations.first)
+            openTabs(for: requestedLocations.dropFirst(), in: window)
             return
         }
 
@@ -857,6 +973,15 @@ final class NativeTabCoordinator {
             attachPreparedTabOverviewControls(
                 in: selectedWindow.tabGroup?.windows ?? [selectedWindow]
             )
+        }
+        // Added to the restored session rather than replacing it: a launch that both
+        // restores windows and carries a location should show both.
+        openTabs(for: requestedLocations, in: restoredSelections[keyIndex])
+    }
+
+    private func openTabs(for urls: some Sequence<URL>, in parent: NSWindow) {
+        for url in urls {
+            openTab(url: url, from: parent, inBackground: false, atEnd: true)
         }
     }
 
@@ -1021,7 +1146,8 @@ final class NativeTabCoordinator {
         return true
     }
 
-    func openWindow(url: URL?, from source: NSWindow? = nil) {
+    @discardableResult
+    func openWindow(url: URL?, from source: NSWindow? = nil) -> NSWindow {
         let source = source ?? NSApplication.shared.keyWindow
         let window = makeBrowserWindow(url: url, matching: source)
         let cascadedTopLeft = source.map { source in
@@ -1064,9 +1190,15 @@ final class NativeTabCoordinator {
             }
         }
         window.tabbingMode = .preferred
+        return window
     }
 
-    func openCloudTab(_ url: URL) {
+    /// Opens `url` as a new selected tab of the frontmost browser window, or in a new
+    /// window when Major Tom has none open.
+    ///
+    /// Shared by Cloud Tabs and by the locations the system hands Major Tom, because
+    /// both mean "show me this page" without expressing a preference about windows.
+    func openLocation(_ url: URL) {
         let keyBrowserWindow = NSApplication.shared.keyWindow.flatMap { window in
             registeredTabs[ObjectIdentifier(window)]?.browser == nil ? nil : window
         }
