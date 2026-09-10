@@ -1691,11 +1691,10 @@ private struct BrowserWindowView: View {
         // NSTextAttachment uses image-cell metrics and pushed the page title visibly
         // below titles on tabs without a favicon.
         hostWindow.tab.attributedTitle = nil
-        if let favicon = browser.favicon {
-            hostWindow.tab.title = "\(favicon)  \(browser.title)"
-        } else {
-            hostWindow.tab.title = browser.title
-        }
+        hostWindow.tab.title = BrowserPageTitle.labelled(
+            browser.title,
+            favicon: browser.favicon
+        )
         hostWindow.tab.toolTip = browser.committedURL?.absoluteString ?? browser.title
         NativeTabCoordinator.shared.publishCloudTabsIfNeeded()
     }

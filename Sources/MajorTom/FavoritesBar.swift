@@ -212,8 +212,10 @@ struct FavoritesBar: View {
     }
 
     private func displayTitle(for bookmark: Bookmark) -> String {
-        bookmarks.favicon(for: bookmark.url)
-            .map { "\($0)  \(bookmark.title)" } ?? bookmark.title
+        BrowserPageTitle.labelled(
+            bookmark.title,
+            favicon: bookmarks.favicon(for: bookmark.url)
+        )
     }
 
     private func itemWidth(for bookmark: Bookmark) -> CGFloat {
