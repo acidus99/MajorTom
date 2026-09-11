@@ -82,6 +82,12 @@ The log includes lifecycle and status transitions, record-type counts, opaque re
 observation counts, visible remote-device/tab counts, and complete CloudKit error codes and server
 descriptions. Use `log show --last 15m` with the same predicate to collect a recent trace.
 
+For a bug report, `Scripts/create-support-bundle.sh --last 2h` writes a ZIP archive to the
+Desktop. It contains Major Tom's recent unified-log entries plus a redacted local CloudKit state
+summary (database integrity, migration state, outbox and record-type counts). It deliberately
+does not copy bookmark data, page bodies, preferences, certificates, or Keychain material. The
+log itself can contain URLs involved in browser activity, so review the archive before sharing.
+
 The live transport test is opt-in:
 
 ```bash
