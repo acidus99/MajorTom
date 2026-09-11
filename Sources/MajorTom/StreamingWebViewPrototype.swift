@@ -2858,7 +2858,7 @@ final class BrowserModel: ObservableObject {
     private func offersArchive(after error: any Error) -> Bool {
         guard let transportError = error as? GeminiTransportError else { return false }
         switch transportError {
-        case .connectionFailed, .timedOut:
+        case .connectionFailed, .connectionTimedOut, .responseTimedOut:
             return true
         case .certificateUnavailable, .publicKeyFingerprintFailed, .trustDeclined,
              .responseFailed, .responseTooLarge:
@@ -2888,12 +2888,14 @@ final class BrowserModel: ObservableObject {
                 return "Major Tom could not identify the capsule's public key."
             case .trustDeclined:
                 return "The capsule identity was not trusted."
-            case .connectionFailed(let detail):
-                return "The secure connection failed. \(detail)"
+            case .connectionFailed(let failure):
+                return failure.userFacingDescription
             case .responseFailed(let protocolError):
-                return "The capsule returned an invalid Gemini response: \(protocolError)."
-            case .timedOut:
-                return "The capsule did not respond within 30 seconds."
+                return protocolError.userFacingDescription
+            case .connectionTimedOut:
+                return "The connection attempt timed out. The capsule may be offline or unreachable from this network."
+            case .responseTimedOut:
+                return "The capsule stopped responding for 30 seconds."
             case .responseTooLarge(let limit):
                 return "The response exceeded Major Tom's \(limit / 1_024 / 1_024) MB safety limit."
             }
@@ -3674,7 +3676,7 @@ final class BrowserModel: ObservableObject {
         redirects: Int = 0
     ) async throws -> (data: Data, mimeType: String, finalURL: URL) {
         guard redirects <= 5 else {
-            throw GeminiTransportError.connectionFailed("The capsule redirected too many times.")
+            throw GeminiTransportError.connectionFailed(.message("The capsule redirected too many times."))
         }
         guard let target = try? GeminiRequestTarget(url.absoluteString) else {
             throw URLError(.badURL)
@@ -3707,14 +3709,16 @@ final class BrowserModel: ObservableObject {
                 if header.isRedirect {
                     let meta = header.meta.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard let next = URL(string: meta, relativeTo: url)?.absoluteURL else {
-                        throw GeminiTransportError.connectionFailed(
+                        throw GeminiTransportError.connectionFailed(.message(
                             "The capsule returned a redirect Major Tom could not understand: \(header.meta)"
-                        )
+                        ))
                     }
                     return try await retrieveGeminiResource(next, redirects: redirects + 1)
                 }
                 guard header.isSuccess else {
-                    throw GeminiTransportError.connectionFailed("Gemini status \(header.status): \(header.meta)")
+                    throw GeminiTransportError.connectionFailed(.message(
+                        "The capsule returned Gemini status \(header.status): \(header.meta)"
+                    ))
                 }
                 // Trim and lowercase, or the charset parameter and stray whitespace
                 // defeat BrowserFilenameSuggestion's extension mapping.
@@ -3729,7 +3733,9 @@ final class BrowserModel: ObservableObject {
             }
         }
         guard completed, let responseHeader else {
-            throw GeminiTransportError.connectionFailed("The response ended before it completed.")
+            throw GeminiTransportError.connectionFailed(.message(
+                "The response ended before it completed."
+            ))
         }
         if !responseIsCached {
             storeInContentCacheIfNeeded(ContentResponse(

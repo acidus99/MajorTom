@@ -14,10 +14,91 @@ public enum GeminiTransportError: Error, Sendable {
     case certificateUnavailable
     case publicKeyFingerprintFailed
     case trustDeclined
-    case connectionFailed(String)
+    case connectionFailed(GeminiConnectionFailure)
     case responseFailed(GeminiProtocolError)
-    case timedOut
+    case connectionTimedOut
+    case responseTimedOut
     case responseTooLarge(limit: Int)
+}
+
+/// A stable, user-relevant description of a failure before a Gemini response arrived.
+///
+/// `NWError.localizedDescription` exposes framework implementation details (for example,
+/// a DNS-SD error number). Keep those details at this boundary so presentation can explain
+/// what the reader can do instead of repeating an opaque system error.
+public enum GeminiConnectionFailure: Equatable, Sendable {
+    case dnsRecordNotFound
+    case dnsLookupFailed
+    case connectionRefused
+    case connectionTimedOut
+    case networkUnavailable
+    case hostUnreachable
+    case connectionLost
+    case tlsNegotiationFailed
+    case tlsHandshakeFailed
+    case tlsFailed
+    case other
+    case message(String)
+
+    public var userFacingDescription: String {
+        switch self {
+        case .dnsRecordNotFound:
+            return "Major Tom could not find the capsule's address. Its DNS records may be missing or temporarily unavailable."
+        case .dnsLookupFailed:
+            return "Major Tom could not look up the capsule's address. Check your network connection and try again."
+        case .connectionRefused:
+            return "The capsule refused the connection. It may not be accepting Gemini connections on this port."
+        case .connectionTimedOut:
+            return "The connection attempt timed out. The capsule may be offline or unreachable from this network."
+        case .networkUnavailable:
+            return "Your network connection appears to be unavailable."
+        case .hostUnreachable:
+            return "No network route to the capsule is currently available."
+        case .connectionLost:
+            return "The capsule closed the connection before it sent a response."
+        case .tlsNegotiationFailed:
+            return "Major Tom and the capsule could not agree on a compatible TLS version or cipher suite."
+        case .tlsHandshakeFailed:
+            return "The capsule did not complete a valid TLS handshake. It may not be serving Gemini over TLS on this port."
+        case .tlsFailed:
+            return "The secure TLS connection to the capsule failed."
+        case .other:
+            return "The network connection to the capsule failed."
+        case .message(let message):
+            return message
+        }
+    }
+
+    static func classify(_ error: NWError) -> Self {
+        switch error {
+        case .dns(let code):
+            // kDNSServiceErr_NoSuchName and kDNSServiceErr_NoSuchRecord.
+            return switch code {
+            case -65_538, -65_554: .dnsRecordNotFound
+            default: .dnsLookupFailed
+            }
+        case .posix(let code):
+            return switch code {
+            case .ECONNREFUSED: .connectionRefused
+            case .ETIMEDOUT: .connectionTimedOut
+            case .ENETDOWN: .networkUnavailable
+            case .ENETUNREACH, .EHOSTUNREACH: .hostUnreachable
+            case .ECONNRESET, .ECONNABORTED, .EPIPE: .connectionLost
+            default: .other
+            }
+        case .tls(let status):
+            return switch status {
+            case errSSLNegotiation, errSSLBadCipherSuite: .tlsNegotiationFailed
+            case errSSLProtocol, errSSLPeerHandshakeFail, errSSLClosedAbort, errSSLClosedNoNotify:
+                .tlsHandshakeFailed
+            default: .tlsFailed
+            }
+        case .wifiAware:
+            return .other
+        @unknown default:
+            return .other
+        }
+    }
 }
 
 public struct GeminiTransportConfiguration: Equatable, Sendable {
@@ -95,6 +176,7 @@ private final class GeminiConnectionSession: @unchecked Sendable {
     }
     private var hasFinished = false
     private var isCancelled = false
+    private var connectionIsReady = false
     private var receivedByteCount = 0
     private var timeoutTask: Task<Void, Never>?
 
@@ -212,17 +294,22 @@ private final class GeminiConnectionSession: @unchecked Sendable {
         guard let connection else { return }
         switch state {
         case .ready:
+            connectionIsReady = true
             resetTimeout()
             connection.send(content: target.requestData, completion: .contentProcessed { [weak self] error in
                 guard let self else { return }
                 if let error {
-                    finish(throwing: GeminiTransportError.connectionFailed(error.localizedDescription))
+                    finish(throwing: GeminiTransportError.connectionFailed(
+                        GeminiConnectionFailure.classify(error)
+                    ))
                 } else {
                     receiveNextChunk()
                 }
             })
         case .failed(let error), .waiting(let error):
-            finish(throwing: GeminiTransportError.connectionFailed(error.localizedDescription))
+            finish(throwing: GeminiTransportError.connectionFailed(
+                GeminiConnectionFailure.classify(error)
+            ))
         case .cancelled:
             finish()
         default:
@@ -262,7 +349,9 @@ private final class GeminiConnectionSession: @unchecked Sendable {
             }
 
             if let error {
-                finish(throwing: GeminiTransportError.connectionFailed(error.localizedDescription))
+                finish(throwing: GeminiTransportError.connectionFailed(
+                    GeminiConnectionFailure.classify(error)
+                ))
             } else if isComplete {
                 do {
                     try responseDecoder.finish()
@@ -306,7 +395,9 @@ private final class GeminiConnectionSession: @unchecked Sendable {
             try? await Task.sleep(for: timeout)
             guard !Task.isCancelled else { return }
             self?.queue.async { [weak self] in
-                self?.finish(throwing: GeminiTransportError.timedOut)
+                self?.finish(throwing: self?.connectionIsReady == true
+                    ? GeminiTransportError.responseTimedOut
+                    : GeminiTransportError.connectionTimedOut)
             }
         }
     }
