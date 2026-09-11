@@ -629,7 +629,11 @@ final class BrowserModel: ObservableObject {
     private let trustStore: TrustedIdentityStore?
     private let contentCache = SharedContentCache.shared
     private let cacheDecider = GeminiCacheDecider()
-    private let renderer = HTMLDocumentStreamRenderer()
+    /// Rebuilt per access rather than stored, so a document rendered after the reader
+    /// changes content theme resolves its ANSI colors against the new background.
+    private var renderer: HTMLDocumentStreamRenderer {
+        HTMLDocumentStreamRenderer(contentPalette: contentPalette)
+    }
     private var cancellables = Set<AnyCancellable>()
 
     private var navigationTask: Task<Void, Never>?
@@ -2903,9 +2907,18 @@ final class BrowserModel: ObservableObject {
         return error.localizedDescription
     }
 
+    private var effectiveDarkAppearance: Bool {
+        NSApplication.shared.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    }
+
+    private var contentPalette: ContentThemePalette {
+        settings.preferences.contentTheme.palette(effectiveDarkAppearance: effectiveDarkAppearance)
+    }
+
     private var themeCSS: String {
-        let dark = NSApplication.shared.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        var theme = settings.preferences.contentTheme.css(effectiveDarkAppearance: dark)
+        var theme = settings.preferences.contentTheme.css(
+            effectiveDarkAppearance: effectiveDarkAppearance
+        )
         if settings.preferences.renderingOptions.collapsesConsecutiveQuotes {
             theme += HTMLDocumentStreamRenderer.collapsedQuotesCSS
         }
@@ -2941,7 +2954,15 @@ final class BrowserModel: ObservableObject {
 
         if preferences.contentTheme != lastPreferences.contentTheme
             || preferences.contentWidth != lastPreferences.contentWidth {
-            applyThemeWithoutReload()
+            // An ANSI foreground is resolved against the theme background while the
+            // document is built and written into the markup as an inline color, so a
+            // document carrying one needs rendering again rather than a new stylesheet.
+            if preferences.contentTheme != lastPreferences.contentTheme,
+               usesANSIColors(with: preferences) {
+                renderCurrentContent()
+            } else {
+                applyThemeWithoutReload()
+            }
             return
         }
 
@@ -2952,6 +2973,19 @@ final class BrowserModel: ObservableObject {
             || preferences.automaticallyLoadsDataImages != lastPreferences.automaticallyLoadsDataImages
         guard renderingChanged, !isLoading else { return }
         renderCurrentContent()
+    }
+
+    /// Whether the document on screen may have ANSI colors baked into it.
+    ///
+    /// Read from the received bytes rather than tracked while rendering: an escape
+    /// character anywhere in a gemtext response is enough to make re-rendering the
+    /// cheaper answer than being wrong about it.
+    private func usesANSIColors(with preferences: BrowserPreferences) -> Bool {
+        preferences.renderingOptions.rendersANSIColors
+            && currentMIMEType == "text/gemini"
+            && canSavePage
+            && !isLoading
+            && currentSourceBytes.contains(0x1B)
     }
 
     private func applyThemeWithoutReload() {

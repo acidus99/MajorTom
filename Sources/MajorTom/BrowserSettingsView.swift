@@ -220,6 +220,19 @@ struct BrowserSettingsView: View {
                 .foregroundStyle(.secondary)
 
             Toggle(
+                "Render ANSI colors in preformatted text",
+                isOn: store.binding(\.renderingOptions.rendersANSIColors)
+            )
+            Toggle(
+                "Include ANSI background colors",
+                isOn: store.binding(\.renderingOptions.rendersANSIBackgroundColors)
+            )
+            .disabled(!store.preferences.renderingOptions.rendersANSIColors)
+            Text("Some capsules color their ASCII art with terminal escape codes. Major Tom brightens or darkens each color so it stays readable on your content theme. Background colors are applied only where the capsule also sets a text color, because a background on its own can hide the text underneath it.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+
+            Toggle(
                 "Show link type hints",
                 isOn: store.binding(\.renderingOptions.showsLinkHints)
             )

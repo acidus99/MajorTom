@@ -224,6 +224,16 @@ titlebar accessory, WebKit cannot infer their geometry. The presentation bridge 
 the measured chrome height only to `NSScrollView.scrollerInsets`, keeping the scroll thumb
 below the browser chrome without removing the document background from the glass context.
 
+ANSI SGR escapes are parsed in Core, by a line-at-a-time splitter that turns a
+preformatted line into styled runs. It is not a terminal emulator and holds no state
+between lines, so it needs no cursor model and cannot be desynchronized by a streamed
+chunk boundary. Colors are resolved in Core too, against the content theme's own
+palette: the renderer is constructed with the palette, so the contrast rule is a pure
+function of author color and theme rather than something the view layer computes. That
+does mean an ANSI color is baked into the document as an inline color at render time,
+so changing content theme re-renders a document carrying escapes rather than only
+swapping the stylesheet.
+
 This boundary permits another renderer in the future without changing protocol, trust, parsing, or persistence. That is a containment boundary, not a plug-in system.
 
 ## Security boundaries

@@ -9,19 +9,36 @@ public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
     public var collapsesConsecutiveQuotes: Bool
     /// Shows a glyph ahead of each link label indicating where the link leads.
     public var showsLinkHints: Bool
+    /// Applies the colors an ANSI SGR escape sets inside a preformatted block.
+    ///
+    /// The escape sequences are removed from the displayed text either way — they are
+    /// control codes, not characters the author meant a reader to see, and leaving them
+    /// in turns ANSI art into a field of `[38;5;208m`. Turning this off renders the
+    /// block in the theme's own text color, which is the fallback a capsule should
+    /// already read well in.
+    public var rendersANSIColors: Bool
+    /// Also applies ANSI background colors, on runs that set a foreground too.
+    ///
+    /// Off by default: a background is the half of ANSI styling that can hide text
+    /// outright, and most capsules using it never saw this reader's theme.
+    public var rendersANSIBackgroundColors: Bool
 
     public init(
         recognizesEmphasis: Bool = true,
         recognizesStrongEmphasis: Bool = true,
         recognizesInlineCode: Bool = true,
         collapsesConsecutiveQuotes: Bool = true,
-        showsLinkHints: Bool = true
+        showsLinkHints: Bool = true,
+        rendersANSIColors: Bool = true,
+        rendersANSIBackgroundColors: Bool = false
     ) {
         self.recognizesEmphasis = recognizesEmphasis
         self.recognizesStrongEmphasis = recognizesStrongEmphasis
         self.recognizesInlineCode = recognizesInlineCode
         self.collapsesConsecutiveQuotes = collapsesConsecutiveQuotes
         self.showsLinkHints = showsLinkHints
+        self.rendersANSIColors = rendersANSIColors
+        self.rendersANSIBackgroundColors = rendersANSIBackgroundColors
     }
 
     /// Decodes leniently so that adding an option cannot discard a user's settings.
@@ -36,11 +53,23 @@ public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
         recognizesInlineCode = try container.decodeIfPresent(Bool.self, forKey: .recognizesInlineCode) ?? true
         collapsesConsecutiveQuotes = try container.decodeIfPresent(Bool.self, forKey: .collapsesConsecutiveQuotes) ?? true
         showsLinkHints = try container.decodeIfPresent(Bool.self, forKey: .showsLinkHints) ?? true
+        rendersANSIColors = try container.decodeIfPresent(Bool.self, forKey: .rendersANSIColors) ?? true
+        rendersANSIBackgroundColors = try container
+            .decodeIfPresent(Bool.self, forKey: .rendersANSIBackgroundColors) ?? false
     }
 }
 
 public struct HTMLDocumentStreamRenderer: Sendable {
-    public init() {}
+    /// The colors the document is drawn in, needed because an ANSI foreground is
+    /// adapted to the background it will actually sit on.
+    private let contentPalette: ContentThemePalette
+
+    public init(
+        contentPalette: ContentThemePalette = ContentTheme.draculaDark
+            .palette(effectiveDarkAppearance: true)
+    ) {
+        self.contentPalette = contentPalette
+    }
 
     public func documentStart(
         themeCSS: String = Self.defaultThemeCSS + Self.printThemeCSS,
@@ -122,7 +151,7 @@ public struct HTMLDocumentStreamRenderer: Sendable {
             // One element per source line lets CSS and the host-side interaction script
             // distinguish a genuinely multiline block without buffering streamed input.
             // The newline remains outside the span so copied text is unchanged.
-            html = "<span class=\"pre-line\">\(Self.escape(text))</span>\n"
+            html = "<span class=\"pre-line\">\(renderPreformatted(text, options: options))</span>\n"
         case .endPreformatted:
             html = "</code></pre></details>"
         }
@@ -177,6 +206,43 @@ public struct HTMLDocumentStreamRenderer: Sendable {
         escape(value)
             .replacingOccurrences(of: "\"", with: "&quot;")
             .replacingOccurrences(of: "'", with: "&#39;")
+    }
+
+    /// Renders one preformatted line, applying the ANSI SGR attributes it carries.
+    ///
+    /// The line's own escape sequences never reach the document — they are control
+    /// codes, and a client that shows them shows garbage. They stay in the received
+    /// bytes, so View Source, Save Page As and the reader's own copy of the capsule
+    /// are the author's text exactly as sent (spec 5.1).
+    ///
+    /// Each line is parsed on its own, so attributes reset at every newline. That is
+    /// what ANSI art needs: authors set the color again on every line rather than
+    /// trusting a client to carry state, and a block that ends mid-color cannot bleed
+    /// into the rest of the page.
+    func renderPreformatted(_ text: String, options: HTMLRenderingOptions) -> String {
+        let runs = ANSISGRParser.runs(in: text)
+        if runs.isEmpty { return "" }
+        if runs.count == 1, runs[0].style.isPlain { return Self.escape(runs[0].text) }
+
+        // Measured against the block's own surface, not the page background. Every
+        // theme gives `pre` a tinted panel of its own, and on the light themes that
+        // panel is the more demanding of the two.
+        let resolver = ANSIStyleResolver(
+            themeForeground: contentPalette.foreground,
+            themeBackground: contentPalette.codeBackground,
+            rendersBackgroundColors: options.rendersANSIBackgroundColors
+        )
+        var output = ""
+        for run in runs {
+            let style = options.rendersANSIColors ? resolver.resolve(run.style) : ResolvedANSIStyle()
+            let css = style.css
+            guard !css.isEmpty else {
+                output += Self.escape(run.text)
+                continue
+            }
+            output += "<span style=\"\(Self.escapeAttribute(css))\">\(Self.escape(run.text))</span>"
+        }
+        return output
     }
 
     public static func renderInline(
