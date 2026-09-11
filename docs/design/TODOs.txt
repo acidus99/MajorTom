@@ -74,9 +74,6 @@ things to check:
   import, strict delete-wins conflicts, sign-out/offline edits, account switching, Cloud Tabs,
   iCloud Key-Value Store preferences, and Keychain metadata arriving before/after key material.
 
-* Verify if the Find functionality also has a "replace" option, which makes no sense in this context.
-
 - If no windows, clicking on the icon in dock opens 2 windows (I think if no windows, I close the app right now)
 
 - When opening a new tab, or new window, or restoring a window, the content theme is not applied until the content is downloaded and shown. So a new tab can be all white, only to then update to showing the dark theme. This is very jarring. You should show a placeholder that just shows the background color of the selected content theme, so there isn't this flash of white or black
-

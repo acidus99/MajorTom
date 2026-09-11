@@ -445,6 +445,24 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
                 if didExitTabOverview {
                     return nil
                 }
+
+                let shouldRouteToFind = MainActor.assumeIsolated { () -> Bool in
+                    guard let keyWindow = NSApplication.shared.keyWindow,
+                          keyWindow.tabbingIdentifier == NativeTabCoordinator.tabbingIdentifier,
+                          keyWindow.attachedSheet == nil,
+                          keyWindow.sheetParent == nil else { return false }
+                    if let textView = keyWindow.firstResponder as? NSTextView {
+                        return !textView.isEditable
+                    }
+                    if let field = keyWindow.firstResponder as? NSTextField {
+                        return !field.isEditable
+                    }
+                    return true
+                }
+                if shouldRouteToFind {
+                    NotificationCenter.default.post(name: .majorTomDismissFind, object: nil)
+                    return nil
+                }
             }
 
             let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -2303,6 +2321,10 @@ private struct BrowserTabView: View {
         .onCommand(.majorTomHome, when: { isCommandTarget }) { browser.goHome() }
         .onCommand(.majorTomUp, when: { isCommandTarget }) { browser.goUpOneLevel() }
         .onCommand(.majorTomRoot, when: { isCommandTarget }) { browser.goToCapsuleRoot() }
+        .onReceive(NotificationCenter.default.publisher(for: .majorTomDismissFind)) { _ in
+            guard isCommandTarget else { return }
+            showsFind = false
+        }
         .sheet(item: $addBookmarkTarget) { target in
             AddBookmarkView(
                 url: target.url,
@@ -2954,6 +2976,7 @@ extension Notification.Name {
     static let majorTomSavePage = Notification.Name("MajorTomSavePage")
     static let majorTomPrint = Notification.Name("MajorTomPrint")
     static let majorTomFind = Notification.Name("MajorTomFind")
+    static let majorTomDismissFind = Notification.Name("MajorTomDismissFind")
     static let majorTomZoomIn = Notification.Name("MajorTomZoomIn")
     static let majorTomZoomOut = Notification.Name("MajorTomZoomOut")
     static let majorTomActualSize = Notification.Name("MajorTomActualSize")

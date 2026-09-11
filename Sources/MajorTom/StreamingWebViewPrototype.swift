@@ -3831,6 +3831,15 @@ private actor AsyncSemaphore {
     }
 }
 
+// WKWebView adopts NSTextFinderClient but does not implement its optional
+// `isEditable` property. AppKit treats an omitted value as true and therefore
+// exposes Replace in the native Find bar for an otherwise read-only web page.
+// Supplying the client value keeps AppKit's native Find behavior while limiting
+// its operations to those a browser document actually supports.
+extension WKWebView {
+    @objc var isEditable: Bool { false }
+}
+
 @available(macOS 26.0, *)
 struct StreamingWebViewPrototype: View {
     @ObservedObject var browser: BrowserModel
@@ -3897,6 +3906,8 @@ private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
         weak var webView: WKWebView?
         weak var browser: BrowserModel?
         var eventMonitor: Any?
+        var scrollObservation: NSObjectProtocol?
+        var liveScrollObservation: NSObjectProtocol?
         var discoveryTask: Task<Void, Never>?
         var horizontalDelta: CGFloat = 0
         var verticalDelta: CGFloat = 0
@@ -3918,13 +3929,20 @@ private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
 
         private func handleScrollWheel(_ event: NSEvent) -> NSEvent? {
             guard event.type == .scrollWheel,
-                  event.hasPreciseScrollingDeltas,
                   let webView,
                   !webView.isHiddenOrHasHiddenAncestor,
                   event.window === webView.window,
                   webView.bounds.contains(webView.convert(event.locationInWindow, from: nil)) else {
                 return event
             }
+
+            if event.scrollingDeltaY != 0 {
+                cancelFindIndicator(in: webView.window?.contentView)
+            }
+
+            // Only high-resolution trackpad events participate in horizontal history
+            // navigation. A conventional mouse wheel still dismisses the indicator.
+            guard event.hasPreciseScrollingDeltas else { return event }
 
             if !event.momentumPhase.isEmpty {
                 // A single physical swipe commonly continues as several momentum events.
@@ -3976,6 +3994,64 @@ private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
                 }
             }
             return claimedSwipe ? nil : event
+        }
+
+        func observeScrolling(in scrollView: NSScrollView) {
+            guard self.scrollView !== scrollView || scrollObservation == nil else { return }
+            stopObservingScrolling()
+            self.scrollView = scrollView
+            scrollView.contentView.postsBoundsChangedNotifications = true
+            scrollObservation = NotificationCenter.default.addObserver(
+                forName: NSView.boundsDidChangeNotification,
+                object: scrollView.contentView,
+                queue: .main
+            ) { [weak self, weak scrollView] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let scrollView else { return }
+                    self.cancelFindIndicator(in: scrollView.window?.contentView)
+                }
+            }
+            liveScrollObservation = NotificationCenter.default.addObserver(
+                forName: NSScrollView.didLiveScrollNotification,
+                object: scrollView,
+                queue: .main
+            ) { [weak self, weak scrollView] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let scrollView else { return }
+                    self.cancelFindIndicator(in: scrollView.window?.contentView)
+                }
+            }
+        }
+
+        func stopObservingScrolling() {
+            if let scrollObservation {
+                NotificationCenter.default.removeObserver(scrollObservation)
+                self.scrollObservation = nil
+            }
+            if let liveScrollObservation {
+                NotificationCenter.default.removeObserver(liveScrollObservation)
+                self.liveScrollObservation = nil
+            }
+        }
+
+        @discardableResult
+        private func cancelFindIndicator(in view: NSView?) -> Bool {
+            guard let view else { return false }
+            // WebKit currently leaves AppKit's transient active-match indicator fixed
+            // in window coordinates while its asynchronously scrolled content moves.
+            // AppKit exposes cancellation for exactly this lifecycle transition. The
+            // platform Find bar wraps its NSTextFinder, so route the documented action
+            // through the bar control target that implements it.
+            let action = #selector(NSTextFinder.cancelFindIndicator)
+            if let target = (view as? NSControl)?.target as? NSObject,
+               target.responds(to: action) {
+                target.perform(action)
+                return true
+            }
+            for subview in view.subviews {
+                if cancelFindIndicator(in: subview) { return true }
+            }
+            return false
         }
 
         private func beginSwipe(direction: BrowserHistorySwipeDirection, in webView: WKWebView) {
@@ -4046,6 +4122,7 @@ private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
     static func dismantleNSView(_ view: NSView, coordinator: Coordinator) {
         coordinator.discoveryTask?.cancel()
         coordinator.discoveryTask = nil
+        coordinator.stopObservingScrolling()
         if let eventMonitor = coordinator.eventMonitor {
             NSEvent.removeMonitor(eventMonitor)
             coordinator.eventMonitor = nil
@@ -4072,14 +4149,18 @@ private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
                     // precedes it and is noninteractive even while it is visible.
                     coordinator.webView = webViews.last
                     if let webView = coordinator.webView {
-                        coordinator.scrollView = firstScrollView(in: webView)
+                        if let scrollView = firstScrollView(in: webView) {
+                            coordinator.observeScrolling(in: scrollView)
+                        }
                         browserNavigationLogger.notice(
                             "installed model-owned trackpad history gesture webViews=\(webViews.count)"
                         )
                     }
                 }
                 if coordinator.scrollView == nil {
-                    coordinator.scrollView = enclosingScrollView(for: view)
+                    if let scrollView = enclosingScrollView(for: view) {
+                        coordinator.observeScrolling(in: scrollView)
+                    }
                 }
                 guard let scrollView = coordinator.scrollView else {
                     try? await Task.sleep(for: .milliseconds(50))
