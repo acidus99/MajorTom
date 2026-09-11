@@ -487,19 +487,26 @@ final class ANSIPreformattedRenderingTests: XCTestCase {
 
     func testBackgroundColorsFollowTheirOwnOption() {
         let line = "\(esc)[37;44mpanel"
-        XCTAssertFalse(
-            render(.preformattedLine(line)).contains("background-color"),
-            "backgrounds must be opt-in"
-        )
         XCTAssertTrue(
+            render(.preformattedLine(line)).contains("background-color:#"),
+            "backgrounds should render by default"
+        )
+        XCTAssertFalse(
             render(
                 .preformattedLine(line),
                 options: HTMLRenderingOptions(
                     rendersANSIColors: true,
-                    rendersANSIBackgroundColors: true
+                    rendersANSIBackgroundColors: false
                 )
-            ).contains("background-color:#")
+            ).contains("background-color")
         )
+    }
+
+    func testDecodingOptionsWithoutBackgroundPreferenceUsesEnabledDefault() throws {
+        let json = Data(#"{"recognizesEmphasis":false}"#.utf8)
+        let options = try JSONDecoder().decode(HTMLRenderingOptions.self, from: json)
+        XCTAssertFalse(options.recognizesEmphasis)
+        XCTAssertTrue(options.rendersANSIBackgroundColors)
     }
 
     func testTraitsReachTheRunAsFontStyling() {

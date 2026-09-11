@@ -18,9 +18,6 @@ public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
     /// already read well in.
     public var rendersANSIColors: Bool
     /// Also applies ANSI background colors, on runs that set a foreground too.
-    ///
-    /// Off by default: a background is the half of ANSI styling that can hide text
-    /// outright, and most capsules using it never saw this reader's theme.
     public var rendersANSIBackgroundColors: Bool
 
     public init(
@@ -30,7 +27,7 @@ public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
         collapsesConsecutiveQuotes: Bool = true,
         showsLinkHints: Bool = true,
         rendersANSIColors: Bool = true,
-        rendersANSIBackgroundColors: Bool = false
+        rendersANSIBackgroundColors: Bool = true
     ) {
         self.recognizesEmphasis = recognizesEmphasis
         self.recognizesStrongEmphasis = recognizesStrongEmphasis
@@ -55,7 +52,7 @@ public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
         showsLinkHints = try container.decodeIfPresent(Bool.self, forKey: .showsLinkHints) ?? true
         rendersANSIColors = try container.decodeIfPresent(Bool.self, forKey: .rendersANSIColors) ?? true
         rendersANSIBackgroundColors = try container
-            .decodeIfPresent(Bool.self, forKey: .rendersANSIBackgroundColors) ?? false
+            .decodeIfPresent(Bool.self, forKey: .rendersANSIBackgroundColors) ?? true
     }
 }
 
