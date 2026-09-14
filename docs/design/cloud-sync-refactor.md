@@ -431,7 +431,8 @@ ALTER TABLE bookmarks DROP COLUMN position;
 
 These tables were retained during the refactor so an intermediate development build could not
 lose a recovery path. They are removed by the `v8-remove-unused-local-storage` migration:
-no GitHub release contained `MajorTom.sqlite`, so no downloaded build can require them.
+no GitHub release contained these development-only tables, so no downloaded build can require
+them.
 
 ### 5.5 Unchanged
 

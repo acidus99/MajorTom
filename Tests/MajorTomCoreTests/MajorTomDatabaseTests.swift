@@ -21,6 +21,10 @@ final class MajorTomDatabaseTests: XCTestCase {
         }
     }
 
+    func testDurableDatabaseUsesDBFilename() {
+        XCTAssertEqual(MajorTomDatabase.filename, "MajorTom.db")
+    }
+
     func testFoundationMigrationIsApplied() throws {
         let database = try MajorTomDatabase(inMemory: ())
 
@@ -82,6 +86,36 @@ final class MajorTomDatabaseTests: XCTestCase {
 
         XCTAssertEqual(value, Data("saved".utf8))
         try reopened.validate()
+    }
+
+    func testCheckpointAndCloseFoldsWALIntoMainDatabase() throws {
+        let fileURL = directory.appendingPathComponent(MajorTomDatabase.filename)
+        let database = try MajorTomDatabase(fileURL: fileURL)
+        try database.write { db in
+            try db.execute(
+                sql: """
+                    INSERT INTO persistence_metadata (key, value, updated_at)
+                    VALUES (?, ?, ?)
+                    """,
+                arguments: ["checkpoint-test", Data("saved".utf8), Date()]
+            )
+        }
+
+        try database.checkpointAndClose()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path + "-wal"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path + "-shm"))
+
+        let reopened = try MajorTomDatabase(fileURL: fileURL)
+        XCTAssertEqual(try reopened.read { db in
+            try Data.fetchOne(
+                db,
+                sql: "SELECT value FROM persistence_metadata WHERE key = ?",
+                arguments: ["checkpoint-test"]
+            )
+        }, Data("saved".utf8))
+        try reopened.checkpointAndClose()
     }
 
     func testV10RepairsDatabaseThatRecordedV8BeforePositionCleanup() throws {

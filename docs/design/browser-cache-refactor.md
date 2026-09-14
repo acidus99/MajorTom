@@ -36,7 +36,7 @@ Back/Forward data lives only in its own SQLite file:
 
 `~/Library/Application Support/Major Tom/BFCache.db`
 
-It does not use `MajorTom.sqlite`. The standalone database owns the normalized application
+It does not use `MajorTom.db`. The standalone database owns the normalized application
 session, windows, tabs, and history entries.
 
 `browser_tab_history` has one row per visit, not one row per URL. Its columns are:

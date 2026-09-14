@@ -192,7 +192,8 @@ reading state. Client-certificate-authenticated response bodies are not retained
 Orderly application termination is deferred until pending per-tab Back/Forward writes and the
 final normalized session save complete. The standalone pool then performs a truncating WAL
 checkpoint, closes, and removes the disconnected `-wal` and `-shm` files; crash recovery
-retains SQLite's normal companion-file behavior.
+retains SQLite's normal companion-file behavior. After all application-level writers have
+finished, the shared `MajorTom.db` pool receives the same checkpoint-and-close treatment.
 
 Reusable network responses live separately in `ContentCache.db`, keyed only by URL. The
 cache is a passive store: callers ask for a fresh complete response, remove one, or store one

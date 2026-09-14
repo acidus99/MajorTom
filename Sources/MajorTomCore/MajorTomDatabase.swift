@@ -7,9 +7,10 @@ import GRDB
 /// creation, connection policy and ordered schema migrations, so SwiftUI views and network
 /// services never need to know how the database is configured.
 public final class MajorTomDatabase: @unchecked Sendable {
-    public static let filename = "MajorTom.sqlite"
+    public static let filename = "MajorTom.db"
 
     private let writer: any DatabaseWriter
+    private let fileURL: URL?
 
     /// Opens (or creates) the durable database and applies every pending migration.
     public init(fileURL: URL) throws {
@@ -28,6 +29,7 @@ public final class MajorTomDatabase: @unchecked Sendable {
         let pool = try DatabasePool(path: fileURL.path, configuration: configuration)
         try Self.migrator.migrate(pool)
         writer = pool
+        self.fileURL = fileURL
     }
 
     /// Creates an isolated database for tests and previews.
@@ -41,6 +43,7 @@ public final class MajorTomDatabase: @unchecked Sendable {
         let queue = try DatabaseQueue(configuration: configuration)
         try Self.migrator.migrate(queue)
         writer = queue
+        fileURL = nil
     }
 
     /// The normal database location in the user's Application Support directory.
@@ -82,6 +85,23 @@ public final class MajorTomDatabase: @unchecked Sendable {
             let violations = try Row.fetchAll(database, sql: "PRAGMA foreign_key_check")
             guard violations.isEmpty else {
                 throw MajorTomDatabaseError.foreignKeyCheckFailed(violations.count)
+            }
+        }
+    }
+
+    /// Folds committed WAL frames into the main database and closes every pooled
+    /// connection. Call only after all application-level writes have finished.
+    public func checkpointAndClose() throws {
+        _ = try writer.writeWithoutTransaction { database in
+            try database.checkpoint(.truncate)
+        }
+        try writer.close()
+        guard let fileURL else { return }
+        let fileManager = FileManager.default
+        for suffix in ["-wal", "-shm"] {
+            let companion = URL(fileURLWithPath: fileURL.path + suffix)
+            if fileManager.fileExists(atPath: companion.path) {
+                try fileManager.removeItem(at: companion)
             }
         }
     }
@@ -272,9 +292,8 @@ public final class MajorTomDatabase: @unchecked Sendable {
             )
         }
         migrator.registerMigration("v8-remove-unused-local-storage") { database in
-            // No released Major Tom build ever used MajorTom.sqlite. These tables were
-            // introduced during development and superseded before release by BFCache
-            // and the record-level CloudKit outbox.
+            // These tables were introduced during development and superseded before
+            // release by BFCache and the record-level CloudKit outbox.
             for table in [
                 "page_cache_fts",
                 "page_cache",

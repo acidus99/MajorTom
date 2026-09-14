@@ -558,6 +558,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
             BrowserSettingsStore.shared.flushPendingWrites()
             try? SharedContentCacheDatabase.shared?.checkpointAndClose()
             try? SharedBackForwardCacheDatabase.shared?.checkpointAndClose()
+            try? SharedMajorTomDatabase.shared?.checkpointAndClose()
             hasPreparedForTermination = true
             terminationTask = nil
             sender.reply(toApplicationShouldTerminate: true)
@@ -578,6 +579,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         BrowserSettingsStore.shared.flushPendingWrites()
         try? SharedContentCacheDatabase.shared?.checkpointAndClose()
         try? SharedBackForwardCacheDatabase.shared?.checkpointAndClose()
+        try? SharedMajorTomDatabase.shared?.checkpointAndClose()
     }
 
     /// AppKit sends this responder-chain action when the native tab bar's plus button
