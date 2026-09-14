@@ -5,7 +5,7 @@ import SwiftUI
 
 @MainActor
 final class BrowserSettingsStore: ObservableObject {
-    static let shared = BrowserSettingsStore()
+    static let shared = BrowserSettingsStore(defaults: MajorTomDataScope.defaults)
 
     /// `@Published` emits from `willSet`, while browser models need to read the fully
     /// updated store when re-rendering. This post-update stream keeps every tab in sync

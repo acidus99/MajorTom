@@ -9,13 +9,9 @@ import MajorTomCore
 /// first-use auto-trust, so there must never be competing in-memory catalogues.
 enum SharedTrustedIdentityStore {
     static let shared: TrustedIdentityStore? = {
-        guard let root = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else { return nil }
-        let legacyFileURL = root
-            .appendingPathComponent("Major Tom", isDirectory: true)
-            .appendingPathComponent("trusted-identities.json")
+        guard let legacyFileURL = MajorTomDataScope.supportFile(
+            named: "trusted-identities.json"
+        ) else { return nil }
         if let database = SharedMajorTomDatabase.shared {
             return try? TrustedIdentityStore(
                 database: database,
@@ -29,7 +25,9 @@ enum SharedTrustedIdentityStore {
 /// The one local SQLite database for browser-owned durable state.
 enum SharedMajorTomDatabase {
     static let shared: MajorTomDatabase? = {
-        guard let fileURL = try? MajorTomDatabase.defaultFileURL() else { return nil }
+        guard let fileURL = MajorTomDataScope.supportFile(
+            named: MajorTomDatabase.filename
+        ) else { return nil }
         return try? MajorTomDatabase(fileURL: fileURL)
     }()
 }
@@ -38,7 +36,9 @@ enum SharedMajorTomDatabase {
 /// bodies never share a database with bookmarks, trust, certificates, or sync state.
 enum SharedBackForwardCacheDatabase {
     static let shared: BackForwardCacheDatabase? = {
-        guard let fileURL = try? BackForwardCacheDatabase.defaultFileURL() else { return nil }
+        guard let fileURL = MajorTomDataScope.supportFile(
+            named: BackForwardCacheDatabase.filename
+        ) else { return nil }
         return try? BackForwardCacheDatabase(fileURL: fileURL)
     }()
 }
@@ -50,7 +50,7 @@ enum SharedBackForwardCacheStore {
 /// Reusable network responses live independently of browser history and user data.
 enum SharedContentCacheDatabase {
     static let shared: ContentCacheDatabase? = {
-        guard let fileURL = try? ContentCacheDatabase.defaultFileURL(),
+        guard let fileURL = MajorTomDataScope.supportFile(named: ContentCacheDatabase.filename),
               let database = try? ContentCacheDatabase(fileURL: fileURL) else { return nil }
         // The old JSON file was only a disposable cache. Once the replacement database
         // is available, leaving it behind would imply that it was still authoritative.
@@ -94,7 +94,7 @@ struct RestoredApplicationState: Codable {
 @MainActor
 final class SessionRestorationStore {
     static let shared = SessionRestorationStore()
-    private let defaults = UserDefaults.standard
+    private let defaults = MajorTomDataScope.defaults
     private let key = "last-window-session-v1"
     private let applicationKey = "last-application-session-v2"
     private let sessionRepository: SessionRepository?
@@ -210,7 +210,7 @@ final class BrowsingHistoryStore: ObservableObject {
     static let shared = BrowsingHistoryStore()
     @Published private(set) var records: [BrowsingHistoryEntry] = []
 
-    private let defaults = UserDefaults.standard
+    private let defaults = MajorTomDataScope.defaults
     private let key = "browsing-history-v1"
     private let repository: BrowsingHistoryRepository?
 

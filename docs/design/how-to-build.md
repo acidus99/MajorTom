@@ -70,6 +70,12 @@ iCloud Key-Value Store, and iCloud Keychain. The checked-in entitlements use dev
 production APNs environments respectively. Deploy the development CloudKit schema to production
 before distributing a production build.
 
+Production keeps the established `~/Library/Application Support/Major Tom` directory and standard
+preferences domain. Development-signed and ad-hoc builds use `Major Tom Development`, a separate
+preferences suite, a separate client-certificate Keychain namespace, and environment-specific
+ubiquitous-preference keys. This lets both builds run on one Mac without sharing restored windows,
+tabs, history, bookmarks, trust, identities, caches, or CloudKit state.
+
 To trace synchronization on a development Mac without exposing tab URLs, titles, account IDs, or
 certificate contents, stream Major Tom's structured CloudKit and bookmark diagnostics:
 

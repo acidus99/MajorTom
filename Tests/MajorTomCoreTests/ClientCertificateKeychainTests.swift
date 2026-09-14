@@ -4,6 +4,26 @@ import XCTest
 @testable import MajorTomCore
 
 final class ClientCertificateKeychainTests: XCTestCase {
+    func testNamespacesCannotReadEachOthersIdentity() throws {
+        let development = ClientCertificateKeychain(namespace: "development-test")
+        let production = ClientCertificateKeychain(namespace: "production-test")
+        let descriptor = try development.create(ClientCertificateCreationRequest(
+            commonName: "Major Tom Namespace Test \(UUID().uuidString)",
+            validUntil: Date().addingTimeInterval(24 * 60 * 60)
+        ))
+        defer {
+            try? development.delete(id: descriptor.id)
+            try? production.delete(id: descriptor.id)
+        }
+
+        XCTAssertNoThrow(try development.identity(for: descriptor.id))
+        XCTAssertThrowsError(try production.identity(for: descriptor.id)) { error in
+            guard case ClientCertificateKeychainError.identityUnavailable = error else {
+                return XCTFail("Expected an unavailable identity, got \(error)")
+            }
+        }
+    }
+
     func testGeneratedCertificateFormsAResolvableKeychainIdentity() throws {
         let keychain = ClientCertificateKeychain()
         let descriptor = try keychain.create(ClientCertificateCreationRequest(

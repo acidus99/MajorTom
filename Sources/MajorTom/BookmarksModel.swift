@@ -34,13 +34,7 @@ final class BookmarksModel: ObservableObject {
     init() {
         let database = SharedMajorTomDatabase.shared
         self.database = database
-        if let root = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first {
-            let fileURL = root
-                .appendingPathComponent("Major Tom", isDirectory: true)
-                .appendingPathComponent("bookmarks.json")
+        if let fileURL = MajorTomDataScope.supportFile(named: "bookmarks.json") {
             legacyFileURL = fileURL
             if let database {
                 let account = try? CloudSyncRepository(database: database)

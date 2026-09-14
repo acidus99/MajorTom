@@ -51,6 +51,7 @@ public final class ClientTLSIdentity: @unchecked Sendable {
 public struct ClientCertificateKeychain: Sendable {
     private static let labelPrefix = "dev.gemi.major-tom.client-cert."
     private static let certificateService = "dev.gemi.major-tom.client-certificates"
+    private let namespace: String?
 
     private enum KeyStorage {
         case synchronizedDataProtection
@@ -66,7 +67,9 @@ public struct ClientCertificateKeychain: Sendable {
         }
     }
 
-    public init() {}
+    public init(namespace: String? = nil) {
+        self.namespace = namespace
+    }
 
     public func create(
         _ request: ClientCertificateCreationRequest,
@@ -81,8 +84,8 @@ public struct ClientCertificateKeychain: Sendable {
         }
         guard request.validUntil > now else { throw ClientCertificateKeychainError.invalidExpiration }
 
-        let label = Self.label(for: id)
-        let applicationTag = Self.applicationTag(for: id)
+        let label = label(for: id)
+        let applicationTag = applicationTag(for: id)
         let (privateKey, keyStorage) = try generatePrivateKey(
             label: label,
             applicationTag: applicationTag
@@ -125,8 +128,8 @@ public struct ClientCertificateKeychain: Sendable {
             // pairs these bytes with the matching permanent private key.
             var addCertificate: [CFString: Any] = [
                 kSecClass: kSecClassGenericPassword,
-                kSecAttrService: Self.certificateService,
-                kSecAttrAccount: Self.account(for: id),
+                kSecAttrService: certificateService,
+                kSecAttrAccount: account(for: id),
                 kSecAttrLabel: label,
                 kSecValueData: certificateDER
             ]
@@ -168,8 +171,8 @@ public struct ClientCertificateKeychain: Sendable {
         _ imported: ClientCertificateImport,
         id: UUID = UUID()
     ) throws -> ClientCertificateDescriptor {
-        let label = Self.label(for: id)
-        let applicationTag = Self.applicationTag(for: id)
+        let label = label(for: id)
+        let applicationTag = applicationTag(for: id)
         let privateKey = try imported.makePrivateKey()
         let storage = try storeImportedPrivateKey(
             privateKey,
@@ -180,8 +183,8 @@ public struct ClientCertificateKeychain: Sendable {
         do {
             var addCertificate: [CFString: Any] = [
                 kSecClass: kSecClassGenericPassword,
-                kSecAttrService: Self.certificateService,
-                kSecAttrAccount: Self.account(for: id),
+                kSecAttrService: certificateService,
+                kSecAttrAccount: account(for: id),
                 kSecAttrLabel: label,
                 kSecValueData: imported.certificateDER
             ]
@@ -369,7 +372,7 @@ public struct ClientCertificateKeychain: Sendable {
 
         let query: [CFString: Any] = [
             kSecClass: kSecClassKey,
-            kSecAttrApplicationTag: Self.applicationTag(for: id),
+            kSecAttrApplicationTag: applicationTag(for: id),
             kSecUseDataProtectionKeychain: false,
             kSecReturnRef: true,
             kSecMatchLimit: kSecMatchLimitOne
@@ -391,7 +394,7 @@ public struct ClientCertificateKeychain: Sendable {
     ) throws -> SecKey? {
         var query: [CFString: Any] = [
             kSecClass: kSecClassKey,
-            kSecAttrApplicationTag: Self.applicationTag(for: id),
+            kSecAttrApplicationTag: applicationTag(for: id),
             kSecUseDataProtectionKeychain: true,
             kSecReturnRef: true,
             kSecMatchLimit: kSecMatchLimitOne
@@ -409,8 +412,8 @@ public struct ClientCertificateKeychain: Sendable {
     public func certificateDER(for id: UUID) throws -> Data {
         let synchronizedQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.certificateService,
-            kSecAttrAccount: Self.account(for: id),
+            kSecAttrService: certificateService,
+            kSecAttrAccount: account(for: id),
             kSecAttrSynchronizable: kSecAttrSynchronizableAny,
             kSecUseDataProtectionKeychain: true,
             kSecReturnData: true,
@@ -422,8 +425,8 @@ public struct ClientCertificateKeychain: Sendable {
 
         let localDataProtectionQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.certificateService,
-            kSecAttrAccount: Self.account(for: id),
+            kSecAttrService: certificateService,
+            kSecAttrAccount: account(for: id),
             kSecUseDataProtectionKeychain: true,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne
@@ -437,8 +440,8 @@ public struct ClientCertificateKeychain: Sendable {
 
         let localQuery: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.certificateService,
-            kSecAttrAccount: Self.account(for: id),
+            kSecAttrService: certificateService,
+            kSecAttrAccount: account(for: id),
             kSecUseDataProtectionKeychain: false,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne
@@ -450,7 +453,7 @@ public struct ClientCertificateKeychain: Sendable {
         // Compatibility with identities created by the first client-certificate build.
         let synchronizedLegacyQuery: [CFString: Any] = [
             kSecClass: kSecClassCertificate,
-            kSecAttrLabel: Self.label(for: id),
+            kSecAttrLabel: label(for: id),
             kSecAttrSynchronizable: kSecAttrSynchronizableAny,
             kSecUseDataProtectionKeychain: true,
             kSecReturnData: true,
@@ -464,7 +467,7 @@ public struct ClientCertificateKeychain: Sendable {
         if synchronizedLegacyStatus == errSecSuccess, let data = result as? Data { return data }
         let localLegacyQuery: [CFString: Any] = [
             kSecClass: kSecClassCertificate,
-            kSecAttrLabel: Self.label(for: id),
+            kSecAttrLabel: label(for: id),
             kSecUseDataProtectionKeychain: false,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne
@@ -517,8 +520,8 @@ public struct ClientCertificateKeychain: Sendable {
     public func delete(id: UUID) throws {
         let synchronizedCertificateStatus = SecItemDelete([
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.certificateService,
-            kSecAttrAccount: Self.account(for: id),
+            kSecAttrService: certificateService,
+            kSecAttrAccount: account(for: id),
             kSecAttrSynchronizable: kSecAttrSynchronizableAny,
             kSecUseDataProtectionKeychain: true
         ] as CFDictionary)
@@ -529,8 +532,8 @@ public struct ClientCertificateKeychain: Sendable {
         }
         let localDataProtectionCertificateStatus = SecItemDelete([
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.certificateService,
-            kSecAttrAccount: Self.account(for: id),
+            kSecAttrService: certificateService,
+            kSecAttrAccount: account(for: id),
             kSecUseDataProtectionKeychain: true
         ] as CFDictionary)
         guard localDataProtectionCertificateStatus == errSecSuccess
@@ -540,8 +543,8 @@ public struct ClientCertificateKeychain: Sendable {
         }
         let localCertificateStatus = SecItemDelete([
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: Self.certificateService,
-            kSecAttrAccount: Self.account(for: id),
+            kSecAttrService: certificateService,
+            kSecAttrAccount: account(for: id),
             kSecUseDataProtectionKeychain: false
         ] as CFDictionary)
         guard localCertificateStatus == errSecSuccess
@@ -551,7 +554,7 @@ public struct ClientCertificateKeychain: Sendable {
         }
         let synchronizedLegacyCertificateStatus = SecItemDelete([
             kSecClass: kSecClassCertificate,
-            kSecAttrLabel: Self.label(for: id),
+            kSecAttrLabel: label(for: id),
             kSecAttrSynchronizable: kSecAttrSynchronizableAny,
             kSecUseDataProtectionKeychain: true
         ] as CFDictionary)
@@ -562,7 +565,7 @@ public struct ClientCertificateKeychain: Sendable {
         }
         let localLegacyCertificateStatus = SecItemDelete([
             kSecClass: kSecClassCertificate,
-            kSecAttrLabel: Self.label(for: id),
+            kSecAttrLabel: label(for: id),
             kSecUseDataProtectionKeychain: false
         ] as CFDictionary)
         guard localLegacyCertificateStatus == errSecSuccess
@@ -581,7 +584,7 @@ public struct ClientCertificateKeychain: Sendable {
     private func deleteKey(id: UUID) throws {
         let synchronizedStatus = SecItemDelete([
             kSecClass: kSecClassKey,
-            kSecAttrApplicationTag: Self.applicationTag(for: id),
+            kSecAttrApplicationTag: applicationTag(for: id),
             kSecAttrSynchronizable: kSecAttrSynchronizableAny,
             kSecUseDataProtectionKeychain: true
         ] as CFDictionary)
@@ -592,7 +595,7 @@ public struct ClientCertificateKeychain: Sendable {
         }
         let localDataProtectionStatus = SecItemDelete([
             kSecClass: kSecClassKey,
-            kSecAttrApplicationTag: Self.applicationTag(for: id),
+            kSecAttrApplicationTag: applicationTag(for: id),
             kSecUseDataProtectionKeychain: true
         ] as CFDictionary)
         guard localDataProtectionStatus == errSecSuccess
@@ -602,7 +605,7 @@ public struct ClientCertificateKeychain: Sendable {
         }
         let localStatus = SecItemDelete([
             kSecClass: kSecClassKey,
-            kSecAttrApplicationTag: Self.applicationTag(for: id),
+            kSecAttrApplicationTag: applicationTag(for: id),
             kSecUseDataProtectionKeychain: false
         ] as CFDictionary)
         guard localStatus == errSecSuccess || localStatus == errSecItemNotFound else {
@@ -736,8 +739,13 @@ public struct ClientCertificateKeychain: Sendable {
         throw ClientCertificateKeychainError.keychain(localStatus)
     }
 
-    private static func label(for id: UUID) -> String {
-        labelPrefix + id.uuidString.lowercased()
+    private var certificateService: String {
+        namespace.map { "\(Self.certificateService).\($0)" } ?? Self.certificateService
+    }
+
+    private func label(for id: UUID) -> String {
+        let prefix = namespace.map { "\(Self.labelPrefix)\($0)." } ?? Self.labelPrefix
+        return prefix + id.uuidString.lowercased()
     }
 
     private static func pem(label: String, data: Data) -> String {
@@ -757,11 +765,11 @@ public struct ClientCertificateKeychain: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    private static func applicationTag(for id: UUID) -> Data {
+    private func applicationTag(for id: UUID) -> Data {
         Data(label(for: id).utf8)
     }
 
-    private static func account(for id: UUID) -> String {
+    private func account(for id: UUID) -> String {
         id.uuidString.lowercased()
     }
 

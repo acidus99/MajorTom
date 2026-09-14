@@ -21,7 +21,11 @@ struct ResolvedClientCertificate {
 /// connection is about to be made.
 @MainActor
 final class ClientCertificateStore: ObservableObject {
-    static let shared = ClientCertificateStore(database: SharedMajorTomDatabase.shared)
+    static let shared = ClientCertificateStore(
+        defaults: MajorTomDataScope.defaults,
+        keychain: ClientCertificateKeychain(namespace: MajorTomDataScope.keychainNamespace),
+        database: SharedMajorTomDatabase.shared
+    )
 
     @Published private(set) var certificates: [ClientCertificateDescriptor] = []
     @Published private(set) var associations: [ClientCertificateAssociation] = []

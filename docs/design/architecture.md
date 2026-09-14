@@ -116,6 +116,11 @@ Cloud sync state lives in `cloud_sync_state`, `cloud_pending_changes`, and
 includes archived CloudKit system fields and the last server payload, allowing conflict retries
 to retain change tags and fields written by a newer app. Each CloudKit type has exactly one
 encrypted `payload` field containing a schema-tagged JSON envelope. Record names are stable UUIDs.
+Production builds retain the historical `Major Tom` Application Support directory and standard
+preferences domain. Development-signed and ad-hoc builds use `Major Tom Development` plus a
+development preferences suite and Keychain namespace. Ubiquitous preferences are also keyed by
+CloudKit environment. Consequently development and production never share local sessions, history,
+bookmarks, trust, certificate metadata or keys, caches, CloudKit engine state, or synced settings.
 
 Cloud data lives only in the `MajorTomUserDataV2` private custom zone. Its
 `MTDataModelManifest` gates readers and writers before model records are applied. On an account's

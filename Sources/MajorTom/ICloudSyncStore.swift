@@ -72,6 +72,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     private static let cloudModelMajor = 3
     private static let deviceIDKey = "icloud-device-id-v1"
     private static let cachedTabsKey = "icloud-tabs-cache-v2"
+    private static let preferencesKey = "browser-preferences-v3"
     private static let orderAndTabsRepairKey = "cloud-full-refetch-order-and-tabs-v1"
     private static let manifestRecordName = "data-model-manifest"
     private let zoneID = CKRecordZone.ID(zoneName: "MajorTomUserDataV2")
@@ -81,6 +82,8 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     private let repository: CloudSyncRepository?
     private let container: CKContainer?
     private let cloudDatabase: CKDatabase?
+    private let cloudEnvironment: String?
+    private let ubiquitousPreferencesKey: String
     private var engine: CKSyncEngine?
     private var activeAccount: String?
     private var attemptedGenerations: [String: Int64] = [:]
@@ -101,8 +104,12 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     }()
     private let decoder = JSONDecoder()
 
-    private init(defaults: UserDefaults = .standard) {
+    private init(defaults: UserDefaults = MajorTomDataScope.defaults) {
         self.defaults = defaults
+        let cloudEnvironment = Self.entitledCloudEnvironment
+        self.cloudEnvironment = cloudEnvironment
+        let storageScope = cloudEnvironment ?? "unentitled"
+        ubiquitousPreferencesKey = "\(Self.preferencesKey)-\(storageScope)"
         if let value = defaults.string(forKey: Self.deviceIDKey), let id = UUID(uuidString: value) {
             localDeviceID = id
         } else {
@@ -113,7 +120,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         localDeviceName = Host.current().localizedName ?? "Mac"
         localDatabase = SharedMajorTomDatabase.shared
         repository = localDatabase.map(CloudSyncRepository.init(database:))
-        if Self.hasRequiredEntitlements {
+        if cloudEnvironment != nil {
             let value = CKContainer(identifier: "iCloud.dev.gemi.major-tom")
             container = value
             cloudDatabase = value.privateCloudDatabase
@@ -159,7 +166,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     func updatePreferences(_ snapshot: SyncedBrowserPreferences) {
         localPreferences = snapshot
         if let data = try? encoder.encode(snapshot) {
-            NSUbiquitousKeyValueStore.default.set(data, forKey: "browser-preferences-v2")
+            NSUbiquitousKeyValueStore.default.set(data, forKey: ubiquitousPreferencesKey)
             if let account = activeAccount {
                 defaults.set(data, forKey: "browser-preferences-v2-\(account)")
             }
@@ -340,7 +347,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     }
 
     private func activateAccount(_ account: String) async throws {
-        guard let repository, let cloudDatabase else { return }
+        guard let repository, let cloudDatabase, cloudEnvironment != nil else { return }
         let priorActive = try repository.activeAccountIdentityHash()
         var state = try repository.state(for: account)
 
@@ -1136,7 +1143,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     }
 
     private func applyUbiquitousPreferences() {
-        guard let data = NSUbiquitousKeyValueStore.default.data(forKey: "browser-preferences-v2"),
+        guard let data = NSUbiquitousKeyValueStore.default.data(forKey: ubiquitousPreferencesKey),
               let value = try? decoder.decode(SyncedBrowserPreferences.self, from: data),
               value.shouldReplace(localPreferences) else { return }
         localPreferences = value
@@ -1178,18 +1185,22 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         "\(reason). Bookmarks and identities are saved on this Mac but are not syncing."
     }
 
-    private static var hasRequiredEntitlements: Bool {
+    private static var entitledCloudEnvironment: String? {
         guard let task = SecTaskCreateFromSelf(nil),
               let identifiers = SecTaskCopyValueForEntitlement(
                 task, "com.apple.developer.icloud-container-identifiers" as CFString, nil
               ) as? [String],
+              let environment = SecTaskCopyValueForEntitlement(
+                task, "com.apple.developer.icloud-container-environment" as CFString, nil
+              ) as? String,
               SecTaskCopyValueForEntitlement(
                 task, "com.apple.developer.aps-environment" as CFString, nil
               ) != nil,
               SecTaskCopyValueForEntitlement(
                 task, "com.apple.developer.ubiquity-kvstore-identifier" as CFString, nil
-              ) != nil else { return false }
-        return identifiers.contains("iCloud.dev.gemi.major-tom")
+              ) != nil,
+              identifiers.contains("iCloud.dev.gemi.major-tom") else { return nil }
+        return environment.lowercased()
     }
 
     private static func description(for error: Error) -> String {
