@@ -3,6 +3,11 @@
 Status: Approved implementation design
 Baseline commit: `380df18`
 
+For production-hardening work, also follow
+[`cloud-sync-reliability-guide.md`](cloud-sync-reliability-guide.md). That guide supersedes
+this document where it is more specific about outbox payload durability, generation reuse,
+transaction boundaries, reconciliation, status reporting, and fault testing.
+
 This document specifies every code-level change required to replace Major Tom's
 snapshot-polling CloudKit adapter with `CKSyncEngine`, retire the v1 compatibility zone,
 and stop synchronizing server-trust decisions.
