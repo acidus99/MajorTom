@@ -26,6 +26,53 @@ final class CloudSyncRepositoryTests: FileBackedDatabaseTestCase {
         XCTAssertEqual(changes[0].generation, 2)
     }
 
+    func testPendingLocalSaveBlocksStaleFetchedModification() {
+        // Prevents a fetch during Sync Now from replacing a newer local edit before
+        // the pending save builds its payload from the local row.
+        let pending = CloudPendingChangeSet([
+            CloudPendingChange(
+                accountIdentityHash: "account",
+                recordType: "MTBookmark",
+                recordName: "edited-bookmark",
+                operation: .save
+            )
+        ])
+
+        XCTAssertFalse(pending.allowsFetchedModification(recordName: "edited-bookmark"))
+        XCTAssertTrue(pending.allowsFetchedModification(recordName: "other-bookmark"))
+    }
+
+    func testPendingDeleteBlocksFetchedModification() {
+        let pending = CloudPendingChangeSet([
+            CloudPendingChange(
+                accountIdentityHash: "account",
+                recordType: "MTBookmark",
+                recordName: "deleted-bookmark",
+                operation: .delete
+            )
+        ])
+
+        XCTAssertFalse(pending.allowsFetchedModification(recordName: "deleted-bookmark"))
+    }
+
+    func testConflictSetIncludesChangesBeyondOutgoingBatchLimit() throws {
+        let repository = CloudSyncRepository(database: try makeFileBackedDatabase())
+        for index in 0...200 {
+            try repository.enqueue(CloudPendingChange(
+                accountIdentityHash: "account",
+                recordType: "MTBookmark",
+                recordName: "bookmark-\(index)",
+                operation: .save,
+                enqueuedAt: Date(timeIntervalSince1970: Double(index))
+            ))
+        }
+
+        let pending = try repository.pendingChangeSet(for: "account")
+
+        XCTAssertEqual(pending.saves.count, 201)
+        XCTAssertFalse(pending.allowsFetchedModification(recordName: "bookmark-200"))
+    }
+
     func testPendingChangesAreAccountScopedLimitedAndOldestFirst() throws {
         let database = try makeFileBackedDatabase()
         let repository = CloudSyncRepository(database: database)

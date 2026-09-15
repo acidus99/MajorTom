@@ -847,8 +847,8 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
 
     private func applyFetched(_ changes: CKSyncEngine.Event.FetchedRecordZoneChanges) throws {
         guard let account = activeAccount, let localDatabase else { return }
-        let pendingDeletes = Set((try repository?.pendingChanges(for: account) ?? [])
-            .filter { $0.operation == .delete }.map(\.recordName))
+        let pendingChanges = try repository?.pendingChangeSet(for: account)
+            ?? CloudPendingChangeSet([])
         if let manifestRecord = changes.modifications.map(\.record).first(where: {
             $0.recordType == "MTDataModelManifest"
         }), let manifest: CloudDataModelManifest = decodeRecord(manifestRecord) {
@@ -860,9 +860,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             }
         }
         try applyBookmarkChanges(changes, account: account, database: localDatabase,
-                                 pendingDeletes: pendingDeletes)
+                                 pendingChanges: pendingChanges)
         try applyCertificateChanges(changes, account: account, database: localDatabase,
-                                    pendingDeletes: pendingDeletes)
+                                    pendingChanges: pendingChanges)
         applyTabChanges(changes)
         for record in changes.modifications.map(\.record) {
             try saveRecordMetadata(record, account: account)
@@ -878,7 +878,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         _ changes: CKSyncEngine.Event.FetchedRecordZoneChanges,
         account: String,
         database: MajorTomDatabase,
-        pendingDeletes: Set<String>
+        pendingChanges: CloudPendingChangeSet
     ) throws {
         let repository = BookmarkRepository(database: database, accountIdentityHash: account)
         var folders = try repository.collection().folders
@@ -889,7 +889,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         var bookmarkOrder = try repository.bookmarkOrderKeys()
         var faviconCorrections = Set<UUID>()
         for record in changes.modifications.map(\.record) where record.recordID.zoneID == zoneID {
-            guard !pendingDeletes.contains(record.recordID.recordName) else { continue }
+            guard pendingChanges.allowsFetchedModification(
+                recordName: record.recordID.recordName
+            ) else { continue }
             if record.recordType == BookmarkRepository.folderRecordType,
                let payload: CloudBookmarkFolderPayload = decodeRecord(record) {
                 if let index = folders.firstIndex(where: { $0.id == payload.id }) {
@@ -920,7 +922,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         }
         for record in changes.modifications.map(\.record)
         where record.recordType == BookmarkRepository.bookmarkRecordType {
-            guard !pendingDeletes.contains(record.recordID.recordName) else { continue }
+            guard pendingChanges.allowsFetchedModification(
+                recordName: record.recordID.recordName
+            ) else { continue }
             guard let payload: CloudBookmarkPayload = decodeRecord(record) else { continue }
             let localFavicon = folders.lazy.flatMap(\.bookmarks)
                 .first(where: { $0.id == payload.id })?.favicon
@@ -981,7 +985,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         _ changes: CKSyncEngine.Event.FetchedRecordZoneChanges,
         account: String,
         database: MajorTomDatabase,
-        pendingDeletes: Set<String>
+        pendingChanges: CloudPendingChangeSet
     ) throws {
         let repository = ClientCertificateSyncRepository(database: database, accountIdentityHash: account)
         let loaded = try repository.load()
@@ -989,7 +993,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         var associations = Dictionary(uniqueKeysWithValues: loaded.state.associations.map { ($0.id, $0) })
         let now = Date()
         for record in changes.modifications.map(\.record) {
-            guard !pendingDeletes.contains(record.recordID.recordName) else { continue }
+            guard pendingChanges.allowsFetchedModification(
+                recordName: record.recordID.recordName
+            ) else { continue }
             if record.recordType == "MTClientCertificateDescriptor",
                let payload: CloudClientCertificateDescriptorPayload = decodeRecord(record) {
                 descriptors[payload.id] = SyncedClientCertificateDescriptor(

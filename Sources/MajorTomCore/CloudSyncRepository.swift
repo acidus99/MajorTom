@@ -86,6 +86,28 @@ public struct CloudPendingChange: Equatable, Sendable {
     }
 }
 
+/// The local intent that must win while a CloudKit record change is in flight.
+///
+/// A fetched modification may carry the server value from immediately before a local
+/// edit. Applying it would replace the row that the pending save reads, causing the
+/// subsequent upload to send the stale server value back to CloudKit. Deletions are
+/// included because a record queued for deletion must not be recreated locally while
+/// its delete is pending. Confirmed server deletions are handled separately and still
+/// win over local edits.
+public struct CloudPendingChangeSet: Equatable, Sendable {
+    public let saves: Set<String>
+    public let deletes: Set<String>
+
+    public init(_ changes: some Sequence<CloudPendingChange>) {
+        saves = Set(changes.filter { $0.operation == .save }.map(\.recordName))
+        deletes = Set(changes.filter { $0.operation == .delete }.map(\.recordName))
+    }
+
+    public func allowsFetchedModification(recordName: String) -> Bool {
+        !saves.contains(recordName) && !deletes.contains(recordName)
+    }
+}
+
 public struct CloudRecordState: Equatable, Sendable {
     public var accountIdentityHash: String
     public var recordType: String
@@ -241,6 +263,16 @@ public struct CloudSyncRepository: Sendable {
                 arguments: [accountIdentityHash]
             ) ?? false
         }
+    }
+
+    /// Returns every pending record name for conflict handling. This is deliberately
+    /// not limited to the next 200-record send batch: a fetched record must never
+    /// overwrite local intent merely because that intent is waiting in a later batch.
+    public func pendingChangeSet(for accountIdentityHash: String) throws -> CloudPendingChangeSet {
+        CloudPendingChangeSet(try pendingChanges(
+            for: accountIdentityHash,
+            limit: .max
+        ))
     }
 
     /// Acknowledges only the generation that was actually sent.
