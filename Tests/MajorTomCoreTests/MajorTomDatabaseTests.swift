@@ -186,7 +186,86 @@ final class MajorTomDatabaseTests: XCTestCase {
         XCTAssertEqual(try repaired.read {
             try String.fetchOne($0, sql: "SELECT title FROM bookmarks WHERE id = 'bookmark'")
         }, "Title")
+        // A database must never record v11 while leaving its CloudKit repositories
+        // unusable, even if an old development build skipped the v6 sync tables.
+        XCTAssertTrue(try repaired.read { try $0.tableExists("cloud_sync_state") })
+        XCTAssertTrue(try repaired.read { try $0.tableExists("cloud_pending_changes") })
+        XCTAssertTrue(try repaired.read { try $0.tableExists("cloud_record_state") })
+        XCTAssertTrue(try repaired.read { try $0.tableExists("cloud_record_generations") })
+        XCTAssertTrue(try repaired.read {
+            try $0.columns(in: "cloud_pending_changes").contains { $0.name == "model_payload" }
+        })
         try repaired.validate()
+    }
+
+    func testV11MigratesLegacyPendingRowsAndSeedsTheirGenerationLedger() throws {
+        let fileURL = directory.appendingPathComponent(MajorTomDatabase.filename)
+        let oldDatabase = try DatabaseQueue(path: fileURL.path)
+        try oldDatabase.write { db in
+            try db.execute(sql: "CREATE TABLE grdb_migrations (identifier TEXT NOT NULL PRIMARY KEY)")
+            for number in 1...10 {
+                let names = [
+                    "v1-foundation", "v2-history-and-input-drafts", "v3-bookmarks",
+                    "v4-sessions-cache-and-search", "v5-security-and-sync-metadata",
+                    "v6-cloud-sync-refactor", "v7-cloud-certificate-metadata",
+                    "v8-remove-unused-local-storage", "v9-history-titles",
+                    "v10-repair-bookmark-order-columns",
+                ]
+                try db.execute(
+                    sql: "INSERT INTO grdb_migrations (identifier) VALUES (?)",
+                    arguments: [names[number - 1]]
+                )
+            }
+            try db.execute(sql: """
+                CREATE TABLE cloud_pending_changes (
+                    account_identity_hash TEXT NOT NULL,
+                    record_type TEXT NOT NULL,
+                    record_name TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    generation INTEGER NOT NULL,
+                    payload_digest TEXT,
+                    enqueued_at DATETIME NOT NULL,
+                    PRIMARY KEY (account_identity_hash, record_name)
+                )
+                """)
+            try db.execute(
+                sql: """
+                    INSERT INTO cloud_pending_changes
+                        (account_identity_hash, record_type, record_name, operation, generation,
+                         payload_digest, enqueued_at)
+                    VALUES ('account', 'MTBookmark', 'save', 'save', 17, NULL, ?),
+                           ('account', 'MTBookmark', 'delete', 'delete', 23, NULL, ?)
+                    """,
+                arguments: [Date(), Date()]
+            )
+        }
+
+        let migrated = try MajorTomDatabase(fileURL: fileURL)
+        let rows = try migrated.read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT record_name, last_generation FROM cloud_record_generations ORDER BY record_name"
+            )
+        }
+        XCTAssertEqual(rows.map { "\($0["record_name"] as String):\($0["last_generation"] as Int)" }, [
+            "delete:23", "save:17",
+        ])
+        XCTAssertNil(try migrated.read {
+            try Data.fetchOne($0, sql: "SELECT model_payload FROM cloud_pending_changes WHERE record_name = 'save'")
+        })
+
+        let repository = CloudSyncRepository(database: migrated)
+        try repository.enqueueSave(
+            accountIdentityHash: "account", recordType: "MTBookmark", recordName: "save",
+            payload: CloudDataModelManifest(
+                formatMajor: 3, minimumReaderMajor: 3, minimumWriterMajor: 3,
+                createdAt: .distantPast
+            )
+        )
+        XCTAssertEqual(
+            try repository.pendingChange(recordName: "save", for: "account")?.generation,
+            18
+        )
     }
 
     func testThrowingWriteRollsBackTransaction() throws {

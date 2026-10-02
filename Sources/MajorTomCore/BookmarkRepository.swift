@@ -1,6 +1,11 @@
 import Foundation
 import GRDB
 
+public enum BookmarkRepositoryError: Error, Equatable, Sendable {
+    case invalidFolderRow
+    case invalidBookmarkRow
+}
+
 public struct CloudBookmarkFolderPayload: CloudSyncPayload, Equatable, Sendable {
     public static let payloadSchemaVersion = 1
     public static let knownPayloadKeys: Set<String> = ["id", "name", "orderKey"]
@@ -85,12 +90,28 @@ public struct BookmarkRepository: Sendable {
         }
     }
 
+    /// Reads the latest rows and applies a user operation under the same writer lock as
+    /// incoming sync. An actor's cached collection is not the database authority.
+    public func update(_ change: (inout BookmarkCollection) -> Void) throws -> BookmarkCollection {
+        try database.write { db in
+            var value = try Self.fetchCollection(db, account: accountIdentityHash)
+            change(&value)
+            try Self.apply(value, account: accountIdentityHash, cloud: cloud,
+                           enqueueChanges: accountIdentityHash != nil, in: db)
+            return value
+        }
+    }
+
     /// Replaces an account's cache without creating echo uploads for fetched records.
     public func replaceFromCloud(with collection: BookmarkCollection) throws {
-        try database.write { db in
-            try Self.apply(collection, account: accountIdentityHash, cloud: cloud,
-                           enqueueChanges: false, in: db)
-        }
+        try database.write { db in try replaceFromCloud(with: collection, in: db) }
+    }
+
+    /// Transaction-scoped variant used by sync reconciliation so fetched data and its
+    /// related bookkeeping can commit together.
+    public func replaceFromCloud(with collection: BookmarkCollection, in db: Database) throws {
+        try Self.apply(collection, account: accountIdentityHash, cloud: cloud,
+                       enqueueChanges: false, in: db)
     }
 
     /// Claims pre-account rows for the first signed-in account without copying them.
@@ -156,6 +177,18 @@ public struct BookmarkRepository: Sendable {
         }
     }
 
+    func legacyModelPayload(recordType: String, id: UUID, in db: Database) throws -> Data? {
+        if recordType == Self.folderRecordType {
+            return try Self.folderRows(in: db, account: accountIdentityHash).first { $0.id == id }.map {
+                try CloudSyncRepository.encodeModelPayload(CloudBookmarkFolderPayload(id: $0.id, name: $0.name, orderKey: $0.orderKey))
+            }
+        }
+        return try Self.bookmarkRows(in: db, account: accountIdentityHash).first { $0.id == id }.map {
+            try CloudSyncRepository.encodeModelPayload(CloudBookmarkPayload(id: $0.id, title: $0.title, url: $0.url,
+                addedAt: $0.addedAt, folderID: $0.folderID, orderKey: $0.orderKey, favicon: $0.favicon))
+        }
+    }
+
     /// The persisted fractional keys are required when applying a partial CloudKit batch.
     /// Reconstructing them from visible indices would mix a different key alphabet with
     /// incoming keys and could reorder untouched siblings.
@@ -183,41 +216,171 @@ public struct BookmarkRepository: Sendable {
                     """,
                 arguments: [accountIdentityHash]
             ).reduce(into: [UUID: UUID]()) { result, row in
-                if let id = UUID(uuidString: row["id"]),
-                   let folderID = UUID(uuidString: row["pending_folder_id"]) {
-                    result[id] = folderID
+                guard let id = UUID(uuidString: row["id"]),
+                      let folderID = UUID(uuidString: row["pending_folder_id"]) else {
+                    throw CloudSyncRepositoryError.invalidRecordIdentity
                 }
+                result[id] = folderID
             }
         }
     }
 
     public func savePendingFolderIDs(_ values: [UUID: UUID]) throws {
-        try database.write { db in
-            try db.execute(
+        try database.write { db in try savePendingFolderIDs(values, in: db) }
+    }
+
+    public func savePendingFolderIDs(_ values: [UUID: UUID], in db: Database) throws {
+        try db.execute(
                 sql: "UPDATE bookmarks SET pending_folder_id = NULL WHERE account_identity_hash IS ?",
                 arguments: [accountIdentityHash]
-            )
-            for (bookmarkID, folderID) in values {
-                try db.execute(
+        )
+        for (bookmarkID, folderID) in values {
+            try db.execute(
                     sql: """
                         UPDATE bookmarks SET pending_folder_id = ?
                         WHERE id = ? AND account_identity_hash IS ?
-                        """,
+                    """,
                     arguments: [folderID.uuidString, bookmarkID.uuidString, accountIdentityHash]
-                )
+            )
+        }
+    }
+
+    /// Applies partial cloud records without regenerating untouched fractional keys.
+    /// The sync repository owns the surrounding transaction and metadata commit.
+    func applyIncoming(_ models: [CloudRecordModel], deletions: [CloudIncomingDeletion], in db: Database) throws {
+        guard models.contains(where: {
+            switch $0 { case .bookmark, .folder: true; default: false }
+        }) || deletions.contains(where: { $0.recordType == Self.bookmarkRecordType || $0.recordType == Self.folderRecordType }) else { return }
+        let account = accountIdentityHash
+        let incomingFolders = models.compactMap { if case .folder(let value) = $0 { value } else { nil } }
+        for folder in incomingFolders {
+            try db.execute(sql: """
+                INSERT INTO bookmark_folders(id, name, order_key, account_identity_hash) VALUES (?, ?, ?, ?)
+                ON CONFLICT(id, account_scope) DO UPDATE SET name = excluded.name, order_key = excluded.order_key
+                """, arguments: [folder.id.uuidString, folder.name, folder.orderKey, account])
+        }
+        var favorite = try String.fetchOne(db, sql: """
+            SELECT id FROM bookmark_folders WHERE account_identity_hash IS ? AND name = ? ORDER BY order_key, id LIMIT 1
+            """, arguments: [account, BookmarkCollection.favoritesName])
+        if favorite == nil {
+            favorite = Self.recoveryFavoritesID(account: account).uuidString
+            try db.execute(sql: "INSERT INTO bookmark_folders(id, name, order_key, account_identity_hash) VALUES (?, ?, ?, ?)",
+                           arguments: [favorite, BookmarkCollection.favoritesName, OrderKey.initial(count: 1)[0], account])
+        }
+        // A provisional empty restore folder must not displace the server Favorites.
+        if let serverFavorite = incomingFolders.filter({ $0.name == BookmarkCollection.favoritesName })
+            .min(by: { ($0.orderKey, $0.id.uuidString) < ($1.orderKey, $1.id.uuidString) }) {
+            let provisional = try String.fetchAll(db, sql: "SELECT id FROM bookmark_folders WHERE account_identity_hash IS ? AND name = ? AND id != ?",
+                                                  arguments: [account, BookmarkCollection.favoritesName, serverFavorite.id.uuidString])
+            for provisionalID in provisional {
+            // Leave established local folders intact; a clean synthesized folder has
+            // neither server metadata nor local intent and is safe to fold into it.
+            let established = try Bool.fetchOne(db, sql: """
+                SELECT EXISTS(SELECT 1 FROM cloud_record_state WHERE account_identity_hash IS ? AND record_name = ?)
+                    OR EXISTS(SELECT 1 FROM cloud_pending_changes WHERE account_identity_hash IS ? AND record_name = ?)
+                """, arguments: [account, provisionalID, account, provisionalID]) ?? false
+            if !established {
+                try db.execute(sql: "UPDATE bookmarks SET folder_id = ? WHERE account_identity_hash IS ? AND folder_id = ?",
+                               arguments: [serverFavorite.id.uuidString, account, provisionalID])
+                try db.execute(sql: "DELETE FROM bookmark_folders WHERE account_identity_hash IS ? AND id = ?",
+                               arguments: [account, provisionalID])
+                favorite = serverFavorite.id.uuidString
+            }
+            }
+        }
+        for folder in incomingFolders {
+            try db.execute(sql: "UPDATE bookmarks SET folder_id = ?, pending_folder_id = NULL WHERE account_identity_hash IS ? AND pending_folder_id = ?",
+                           arguments: [folder.id.uuidString, account, folder.id.uuidString])
+        }
+        let localBookmarks = Dictionary(uniqueKeysWithValues: try Self.bookmarkRows(in: db, account: account).map { ($0.id, $0) })
+        for case .bookmark(let value) in models {
+            let exists = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM bookmark_folders WHERE account_identity_hash IS ? AND id = ?)",
+                                          arguments: [account, value.folderID.uuidString]) ?? false
+            let local = localBookmarks[value.id]
+            let favicon: BookmarkFaviconSnapshot?
+            // SQLite's existing date columns round to milliseconds. Rounding alone
+            // must not manufacture a newer observation and an echo upload.
+            if let current = local?.favicon, current.fetchedAt.timeIntervalSince(value.favicon?.fetchedAt ?? .distantPast) > 0.001 {
+                favicon = current
+            } else { favicon = value.favicon }
+            try db.execute(sql: """
+                INSERT INTO bookmarks(id, folder_id, title, url, added_at, order_key, account_identity_hash,
+                                      pending_folder_id, favicon_state, favicon_emoji, favicon_fetched_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id, account_scope) DO UPDATE SET
+                    folder_id = excluded.folder_id, title = excluded.title, url = excluded.url,
+                    added_at = excluded.added_at, order_key = excluded.order_key,
+                    pending_folder_id = excluded.pending_folder_id, favicon_state = excluded.favicon_state,
+                    favicon_emoji = excluded.favicon_emoji, favicon_fetched_at = excluded.favicon_fetched_at
+                """, arguments: [value.id.uuidString, exists ? value.folderID.uuidString : favorite!,
+                                  value.title, value.url.absoluteString, value.addedAt, value.orderKey, account,
+                                  exists ? nil : value.folderID.uuidString,
+                                  favicon.map { $0.emoji == nil ? 0 : 1 }, favicon?.emoji, favicon?.fetchedAt])
+            if favicon != value.favicon, let account {
+                var corrected = value
+                corrected.favicon = favicon
+                try cloud.enqueueSave(accountIdentityHash: account, recordType: Self.bookmarkRecordType,
+                                      recordName: value.id.uuidString, payload: corrected, in: db)
+            }
+        }
+        for deletion in deletions where deletion.recordType == Self.bookmarkRecordType {
+            try db.execute(sql: "DELETE FROM bookmarks WHERE account_identity_hash IS ? AND id = ?",
+                           arguments: [account, deletion.recordName])
+        }
+        for deletion in deletions where deletion.recordType == Self.folderRecordType {
+            if deletion.recordName == favorite {
+                favorite = Self.recoveryFavoritesID(account: account, deletedID: deletion.recordName).uuidString
+                try db.execute(sql: "INSERT INTO bookmark_folders(id, name, order_key, account_identity_hash) VALUES (?, ?, ?, ?)",
+                               arguments: [favorite, BookmarkCollection.favoritesName, OrderKey.initial(count: 1)[0], account])
+                if let account {
+                    try cloud.enqueueSave(accountIdentityHash: account, recordType: Self.folderRecordType,
+                        recordName: favorite!, payload: CloudBookmarkFolderPayload(id: UUID(uuidString: favorite!)!,
+                            name: BookmarkCollection.favoritesName, orderKey: OrderKey.initial(count: 1)[0]), in: db)
+                }
+            }
+            try db.execute(sql: "UPDATE bookmarks SET folder_id = ?, pending_folder_id = NULL WHERE account_identity_hash IS ? AND (folder_id = ? OR pending_folder_id = ?)",
+                           arguments: [favorite, account, deletion.recordName, deletion.recordName])
+            try db.execute(sql: "DELETE FROM bookmark_folders WHERE account_identity_hash IS ? AND id = ?",
+                           arguments: [account, deletion.recordName])
+            if let account {
+                let pending = try Row.fetchAll(db, sql: "SELECT * FROM cloud_pending_changes WHERE account_identity_hash = ? AND record_type = ? AND operation = 'save'",
+                                               arguments: [account, Self.bookmarkRecordType]).map(CloudSyncRepository.pendingChange(from:))
+                for change in pending {
+                    guard let bytes = change.modelPayload else { continue } // materialized before send
+                    var payload = try JSONDecoder().decode(CloudBookmarkPayload.self, from: bytes)
+                    guard payload.folderID.uuidString == deletion.recordName else { continue }
+                    payload.folderID = UUID(uuidString: favorite!)!
+                    let parentHasServerState = try Bool.fetchOne(db, sql: "SELECT EXISTS(SELECT 1 FROM cloud_record_state WHERE account_identity_hash = ? AND record_name = ?) OR EXISTS(SELECT 1 FROM cloud_pending_changes WHERE account_identity_hash = ? AND record_name = ? AND operation = 'save')",
+                                                                arguments: [account, favorite, account, favorite]) ?? false
+                    if !parentHasServerState, let parent = try Self.folderRows(in: db, account: account).first(where: { $0.id == payload.folderID }) {
+                        try cloud.enqueueSave(accountIdentityHash: account, recordType: Self.folderRecordType,
+                            recordName: parent.id.uuidString, payload: CloudBookmarkFolderPayload(id: parent.id, name: parent.name, orderKey: parent.orderKey), in: db)
+                    }
+                    try cloud.enqueueSave(accountIdentityHash: account, recordType: Self.bookmarkRecordType,
+                                          recordName: change.recordName, payload: payload, in: db)
+                }
             }
         }
     }
 
-    private static func fetchCollection(_ db: Database, account: String?) throws -> BookmarkCollection {
-        let folders = try folderRows(in: db, account: account).sorted { $0.orderKey < $1.orderKey }
+    private static func recoveryFavoritesID(account: String?, deletedID: String = "missing") -> UUID {
+        // The same confirmed deletion must not create a different parent on every Mac.
+        let hex = CloudSyncRepository.digest(Data("MajorTom.recovery-favorites:\(account ?? "unowned"):\(deletedID)".utf8))
+        let chars = Array(hex.prefix(32))
+        let name = [String(chars[0..<8]), String(chars[8..<12]), String(chars[12..<16]),
+                    String(chars[16..<20]), String(chars[20..<32])].joined(separator: "-")
+        return UUID(uuidString: name)!
+    }
+
+    static func fetchCollection(_ db: Database, account: String?) throws -> BookmarkCollection {
+        let folders = try folderRows(in: db, account: account).sorted { ($0.orderKey, $0.id.uuidString) < ($1.orderKey, $1.id.uuidString) }
         let bookmarks = try bookmarkRows(in: db, account: account)
         let byFolder = Dictionary(grouping: bookmarks, by: \BookmarkRow.folderID)
         return BookmarkCollection(folders: folders.map { folder in
             BookmarkFolder(
                 id: folder.id,
                 name: folder.name,
-                bookmarks: (byFolder[folder.id] ?? []).sorted { $0.orderKey < $1.orderKey }.map {
+                bookmarks: (byFolder[folder.id] ?? []).sorted { ($0.orderKey, $0.id.uuidString) < ($1.orderKey, $1.id.uuidString) }.map {
                     Bookmark(id: $0.id, title: $0.title, url: $0.url,
                              addedAt: $0.addedAt, favicon: $0.favicon)
                 }
@@ -225,7 +388,7 @@ public struct BookmarkRepository: Sendable {
         })
     }
 
-    private static func apply(
+    static func apply(
         _ collection: BookmarkCollection,
         account: String?,
         cloud: CloudSyncRepository,
@@ -237,15 +400,21 @@ public struct BookmarkRepository: Sendable {
         let oldBookmarks = Dictionary(uniqueKeysWithValues:
             try bookmarkRows(in: db, account: account).map { ($0.id, $0) })
         let folderKeys = OrderKey.initial(count: collection.folders.count)
+        let unchangedFolderOrder = oldFolders.values.sorted { ($0.orderKey, $0.id.uuidString) < ($1.orderKey, $1.id.uuidString) }
+            .map(\.id) == collection.folders.map(\.id)
         let newFolders = collection.folders.enumerated().map {
-            FolderRow(id: $0.element.id, name: $0.element.name, orderKey: folderKeys[$0.offset])
+            FolderRow(id: $0.element.id, name: $0.element.name,
+                      orderKey: unchangedFolderOrder ? oldFolders[$0.element.id]!.orderKey : folderKeys[$0.offset])
         }
         let newBookmarks = collection.folders.flatMap { folder -> [BookmarkRow] in
             let keys = OrderKey.initial(count: folder.bookmarks.count)
+            let unchangedOrder = oldBookmarks.values.filter { $0.folderID == folder.id }
+                .sorted { ($0.orderKey, $0.id.uuidString) < ($1.orderKey, $1.id.uuidString) }
+                .map(\.id) == folder.bookmarks.map(\.id)
             return folder.bookmarks.enumerated().map {
                 BookmarkRow(id: $0.element.id, folderID: folder.id, title: $0.element.title,
                             url: $0.element.url, addedAt: $0.element.addedAt,
-                            orderKey: keys[$0.offset],
+                            orderKey: unchangedOrder ? oldBookmarks[$0.element.id]!.orderKey : keys[$0.offset],
                             favicon: $0.element.favicon)
             }
         }
@@ -263,39 +432,63 @@ public struct BookmarkRepository: Sendable {
                 sql: """
                     INSERT INTO bookmark_folders (id, name, order_key, account_identity_hash)
                     VALUES (?, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET name = excluded.name,
+                    ON CONFLICT(id, account_scope) DO UPDATE SET name = excluded.name,
                         order_key = excluded.order_key,
                         account_identity_hash = excluded.account_identity_hash
                     """,
                 arguments: [row.id.uuidString, row.name, row.orderKey, account]
             )
-            try enqueue(.save, type: folderRecordType, id: row.id, account: account,
-                        cloud: cloud, enabled: enqueueChanges, in: db)
+            if enqueueChanges, let account {
+                try cloud.enqueueSave(
+                    accountIdentityHash: account,
+                    recordType: folderRecordType,
+                    recordName: row.id.uuidString,
+                    payload: CloudBookmarkFolderPayload(
+                        id: row.id, name: row.name, orderKey: row.orderKey
+                    ),
+                    in: db
+                )
+            }
         }
 
         for row in newBookmarks where oldBookmarks[row.id] != row {
             let state: Int? = row.favicon.map { $0.emoji == nil ? 0 : 1 }
+            // A title/favicon edit is not a move out of a not-yet-fetched folder.
+            let desiredParent: String? = oldBookmarks[row.id]?.folderID == row.folderID
+                ? try String.fetchOne(db, sql: "SELECT pending_folder_id FROM bookmarks WHERE id = ? AND account_identity_hash IS ?",
+                                      arguments: [row.id.uuidString, account]) : nil
             try db.execute(
                 sql: """
                     INSERT INTO bookmarks
                         (id, folder_id, title, url, added_at, order_key,
                          account_identity_hash, pending_folder_id,
                          favicon_state, favicon_emoji, favicon_fetched_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET folder_id = excluded.folder_id,
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id, account_scope) DO UPDATE SET folder_id = excluded.folder_id,
                         title = excluded.title, url = excluded.url, added_at = excluded.added_at,
                         order_key = excluded.order_key,
                         account_identity_hash = excluded.account_identity_hash,
-                        pending_folder_id = NULL, favicon_state = excluded.favicon_state,
+                        pending_folder_id = excluded.pending_folder_id, favicon_state = excluded.favicon_state,
                         favicon_emoji = excluded.favicon_emoji,
                         favicon_fetched_at = excluded.favicon_fetched_at
                     """,
                 arguments: [row.id.uuidString, row.folderID.uuidString, row.title,
                             row.url.absoluteString, row.addedAt, row.orderKey,
-                            account, state, row.favicon?.emoji, row.favicon?.fetchedAt]
+                            account, desiredParent, state, row.favicon?.emoji, row.favicon?.fetchedAt]
             )
-            try enqueue(.save, type: bookmarkRecordType, id: row.id, account: account,
-                        cloud: cloud, enabled: enqueueChanges, in: db)
+            if enqueueChanges, let account {
+                try cloud.enqueueSave(
+                    accountIdentityHash: account,
+                    recordType: bookmarkRecordType,
+                    recordName: row.id.uuidString,
+                    payload: CloudBookmarkPayload(
+                        id: row.id, title: row.title, url: row.url, addedAt: row.addedAt,
+                        folderID: desiredParent.flatMap(UUID.init(uuidString:)) ?? row.folderID,
+                        orderKey: row.orderKey, favicon: row.favicon
+                    ),
+                    in: db
+                )
+            }
         }
 
         let newFolderIDs = Set(newFolders.map(\.id))
@@ -320,8 +513,10 @@ public struct BookmarkRepository: Sendable {
         try Row.fetchAll(db, sql: """
             SELECT id, name, order_key FROM bookmark_folders
             WHERE account_identity_hash IS ?
-            """, arguments: [account]).compactMap { row in
-            guard let id = UUID(uuidString: row["id"]) else { return nil }
+            """, arguments: [account]).map { row in
+            guard let id = UUID(uuidString: row["id"]) else {
+                throw BookmarkRepositoryError.invalidFolderRow
+            }
             let key: String? = row["order_key"]
             return FolderRow(id: id, name: row["name"], orderKey: key ?? "")
         }
@@ -332,10 +527,12 @@ public struct BookmarkRepository: Sendable {
             SELECT id, folder_id, title, url, added_at, order_key,
                    favicon_state, favicon_emoji, favicon_fetched_at
             FROM bookmarks WHERE account_identity_hash IS ?
-            """, arguments: [account]).compactMap { row in
+            """, arguments: [account]).map { row in
             guard let id = UUID(uuidString: row["id"]),
                   let folderID = UUID(uuidString: row["folder_id"]),
-                  let url = URL(string: row["url"]) else { return nil }
+                  let url = URL(string: row["url"]) else {
+                throw BookmarkRepositoryError.invalidBookmarkRow
+            }
             let state: Int? = row["favicon_state"]
             let fetchedAt: Date? = row["favicon_fetched_at"]
             let key: String? = row["order_key"]

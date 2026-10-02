@@ -334,6 +334,158 @@ public final class MajorTomDatabase: @unchecked Sendable {
                 try database.execute(sql: "ALTER TABLE bookmarks DROP COLUMN position")
             }
         }
+        migrator.registerMigration("v11-durable-cloud-outbox-payloads") { database in
+            // A few development databases recorded v8/v10 while omitting the
+            // experimental CloudKit tables altogether. A migration must leave every
+            // database it marks as migrated usable, rather than silently recording v11
+            // and deferring a missing-table failure until the first sync.
+            if try !database.tableExists("cloud_pending_changes") {
+                try database.create(table: "cloud_pending_changes") { table in
+                    table.column("account_identity_hash", .text).notNull()
+                    table.column("record_type", .text).notNull()
+                    table.column("record_name", .text).notNull()
+                    table.column("operation", .text).notNull()
+                        .check { ["save", "delete"].contains($0) }
+                    table.column("generation", .integer).notNull()
+                    table.column("model_payload", .blob)
+                    table.column("payload_digest", .text)
+                    table.column("enqueued_at", .datetime).notNull()
+                    table.primaryKey(["account_identity_hash", "record_name"])
+                }
+            } else {
+                // A pending save must describe the value that was committed locally,
+                // rather than requiring the transport to reread a mutable domain row later.
+                try database.alter(table: "cloud_pending_changes") { table in
+                    table.add(column: "model_payload", .blob)
+                }
+            }
+            if try !database.tableExists("cloud_sync_state") {
+                try database.create(table: "cloud_sync_state") { table in
+                    table.column("account_identity_hash", .text).primaryKey()
+                    table.column("engine_state", .blob)
+                    table.column("model_major", .integer).notNull()
+                    table.column("migrated_from_v1", .boolean).notNull().defaults(to: false)
+                    table.column("migration_phase", .text).notNull()
+                    table.column("zone_state", .text).notNull()
+                    table.column("favorites_folder_id", .text)
+                    table.column("last_fetched_at", .datetime)
+                    table.column("last_sent_at", .datetime)
+                    table.column("updated_at", .datetime).notNull()
+                }
+            }
+            if try !database.tableExists("cloud_record_state") {
+                try database.create(table: "cloud_record_state") { table in
+                    table.column("account_identity_hash", .text).notNull()
+                    table.column("record_type", .text).notNull()
+                    table.column("record_name", .text).notNull()
+                    table.column("system_fields", .blob)
+                    table.column("server_payload", .blob)
+                    table.column("payload_digest", .text)
+                    table.column("last_seen_epoch", .integer)
+                    table.column("updated_at", .datetime).notNull()
+                    table.primaryKey(["account_identity_hash", "record_name"])
+                }
+            }
+            // The outbox row is deleted after acknowledgement, so it cannot be the source
+            // of the next generation. Keep a small per-record ledger instead.
+            try database.create(table: "cloud_record_generations") { table in
+                table.column("account_identity_hash", .text).notNull()
+                table.column("record_name", .text).notNull()
+                table.column("last_generation", .integer).notNull()
+                table.primaryKey(["account_identity_hash", "record_name"])
+            }
+            try database.execute(sql: """
+                INSERT INTO cloud_record_generations
+                    (account_identity_hash, record_name, last_generation)
+                SELECT account_identity_hash, record_name, MAX(generation)
+                FROM cloud_pending_changes
+                GROUP BY account_identity_hash, record_name
+                """)
+            try database.create(
+                index: "cloud_pending_changes_account_enqueued",
+                on: "cloud_pending_changes",
+                columns: ["account_identity_hash", "enqueued_at", "record_name"]
+            )
+        }
+        migrator.registerMigration("v12-account-qualified-domain-keys") { db in
+            // UUIDs identify cloud records within an account, not across accounts. Keep
+            // NULL for pre-account rows; a generated scope gives those rows a real key.
+            if try db.tableExists("bookmarks") {
+                try db.execute(sql: """
+                    CREATE TABLE bookmark_folders_scoped (
+                        id TEXT NOT NULL, name TEXT NOT NULL, order_key TEXT,
+                        account_identity_hash TEXT,
+                        account_scope TEXT GENERATED ALWAYS AS (ifnull(account_identity_hash, '')) STORED,
+                        UNIQUE (id, account_scope)
+                    );
+                    INSERT INTO bookmark_folders_scoped (id, name, order_key, account_identity_hash)
+                    SELECT id, name, order_key, account_identity_hash FROM bookmark_folders;
+                    CREATE TABLE bookmarks_scoped (
+                        id TEXT NOT NULL, folder_id TEXT NOT NULL, title TEXT NOT NULL,
+                        url TEXT NOT NULL, added_at DATETIME NOT NULL, order_key TEXT,
+                        account_identity_hash TEXT, pending_folder_id TEXT,
+                        favicon_state INTEGER, favicon_emoji TEXT, favicon_fetched_at DATETIME,
+                        account_scope TEXT GENERATED ALWAYS AS (ifnull(account_identity_hash, '')) STORED,
+                        UNIQUE (id, account_scope),
+                        FOREIGN KEY (folder_id, account_scope)
+                            REFERENCES bookmark_folders(id, account_scope)
+                            ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
+                    );
+                    INSERT INTO bookmarks_scoped
+                        (id, folder_id, title, url, added_at, order_key, account_identity_hash,
+                         pending_folder_id, favicon_state, favicon_emoji, favicon_fetched_at)
+                    SELECT id, folder_id, title, url, added_at, order_key, account_identity_hash,
+                           pending_folder_id, favicon_state, favicon_emoji, favicon_fetched_at FROM bookmarks;
+                    DROP TABLE bookmarks;
+                    DROP TABLE bookmark_folders;
+                    ALTER TABLE bookmark_folders_scoped RENAME TO bookmark_folders;
+                    ALTER TABLE bookmarks_scoped RENAME TO bookmarks;
+                    CREATE INDEX bookmark_folders_account_order ON bookmark_folders(account_identity_hash, order_key, id);
+                    CREATE INDEX bookmarks_account_folder_order ON bookmarks(account_identity_hash, folder_id, order_key, id);
+                    """)
+            }
+            for table in ["client_certificates", "client_certificate_associations", "client_certificate_local_flags"]
+            where try db.tableExists(table) {
+                let isFlags = table == "client_certificate_local_flags"
+                let columns = isFlags ? "id, synchronizes_with_icloud, account_identity_hash"
+                    : table == "client_certificate_associations"
+                    ? "id, payload, modified_at, account_identity_hash, pending_certificate_id"
+                    : "id, payload, modified_at, account_identity_hash"
+                let fields = isFlags ? "synchronizes_with_icloud BOOLEAN NOT NULL"
+                    : "payload BLOB NOT NULL, modified_at DATETIME NOT NULL"
+                let pending = table == "client_certificate_associations" ? ", pending_certificate_id TEXT" : ""
+                try db.execute(sql: """
+                    CREATE TABLE \(table)_scoped (
+                        id TEXT NOT NULL, \(fields), account_identity_hash TEXT\(pending),
+                        account_scope TEXT GENERATED ALWAYS AS (ifnull(account_identity_hash, '')) STORED,
+                        UNIQUE (id, account_scope)
+                    );
+                    INSERT INTO \(table)_scoped (\(columns)) SELECT \(columns) FROM \(table);
+                    DROP TABLE \(table);
+                    ALTER TABLE \(table)_scoped RENAME TO \(table);
+                    CREATE INDEX \(table)_account ON \(table)(account_identity_hash, id);
+                    """)
+            }
+        }
+        migrator.registerMigration("v13-cloud-incoming-journal") { db in
+            try db.execute(sql: """
+                CREATE TABLE cloud_incoming_batches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_identity_hash TEXT NOT NULL,
+                    payload BLOB NOT NULL
+                );
+                CREATE INDEX cloud_incoming_batches_account ON cloud_incoming_batches(account_identity_hash, id);
+                """)
+        }
+        migrator.registerMigration("v14-confirmed-deletion-fences") { db in
+            try db.execute(sql: """
+                CREATE TABLE cloud_confirmed_deletions (
+                    account_identity_hash TEXT NOT NULL,
+                    record_name TEXT NOT NULL,
+                    PRIMARY KEY(account_identity_hash, record_name)
+                )
+                """)
+        }
         return migrator
     }
 }

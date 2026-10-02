@@ -134,6 +134,34 @@ final class BookmarkRepositoryTests: XCTestCase {
             .hasPendingChanges(for: "account"))
     }
 
+    func testLocalRenameKeepsCommittedCloudSnapshotWhenOldServerValueIsApplied() throws {
+        // Prevents the production-prefix bug: the old server value arrived after a
+        // local rename and previously changed the value later uploaded to CloudKit.
+        let database = try MajorTomDatabase(inMemory: ())
+        let repository = BookmarkRepository(database: database, accountIdentityHash: "account")
+        var original = BookmarkCollection()
+        let bookmark = original.add(
+            title: "Station", url: URL(string: "gemini://station.example/")!
+        )
+        try repository.replace(with: original)
+        let oldServerCollection = try repository.collection()
+
+        var renamed = try repository.collection()
+        renamed.rename(bookmarkWith: bookmark.id, to: "PRODUCTION - Station")
+        try repository.replace(with: renamed)
+
+        // This emulates receipt of an older fetched value. The coordinator normally
+        // retains local pending intent; this assertion protects the deeper invariant
+        // that even an accidental replacement cannot rewrite the durable send payload.
+        try repository.replaceFromCloud(with: oldServerCollection)
+
+        let pending = try XCTUnwrap(try CloudSyncRepository(database: database)
+            .pendingChange(recordName: bookmark.id.uuidString, for: "account"))
+        let payload = try XCTUnwrap(pending.modelPayload)
+        let encoded = try JSONDecoder().decode(CloudBookmarkPayload.self, from: payload)
+        XCTAssertEqual(encoded.title, "PRODUCTION - Station")
+    }
+
     func testClaimingRowsMovesUnownedCollectionToFirstAccount() throws {
         let database = try MajorTomDatabase(inMemory: ())
         let unowned = BookmarkRepository(database: database)

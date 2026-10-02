@@ -556,6 +556,9 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
                 await NativeTabCoordinator.shared.prepareForTermination()
             }
             BrowserSettingsStore.shared.flushPendingWrites()
+            await BookmarksModel.shared.flushPendingWrites()
+            await ClientCertificateStore.shared.flushPendingWrites()
+            await ICloudSyncStore.shared.prepareForTermination()
             try? SharedContentCacheDatabase.shared?.checkpointAndClose()
             try? SharedBackForwardCacheDatabase.shared?.checkpointAndClose()
             try? SharedMajorTomDatabase.shared?.checkpointAndClose()
@@ -577,6 +580,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         // Preferences coalesce their writes, so a change made moments before quitting
         // may still be waiting. History and drafts commit directly to SQLite.
         BrowserSettingsStore.shared.flushPendingWrites()
+        ICloudSyncStore.shared.stopForTermination()
         try? SharedContentCacheDatabase.shared?.checkpointAndClose()
         try? SharedBackForwardCacheDatabase.shared?.checkpointAndClose()
         try? SharedMajorTomDatabase.shared?.checkpointAndClose()

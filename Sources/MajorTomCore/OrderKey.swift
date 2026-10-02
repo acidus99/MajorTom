@@ -96,7 +96,7 @@ public enum OrderKey {
         return key[key.index(key.startIndex, offsetBy: position)]
     }
 
-    private static func validate(_ key: String?) throws {
+    public static func validate(_ key: String?) throws {
         guard let key else { return }
         guard !key.isEmpty,
               key.allSatisfy({ indexByCharacter[$0] != nil }),

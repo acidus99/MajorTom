@@ -94,8 +94,10 @@ struct ClientCertificatesManagerView: View {
             Button("Cancel", role: .cancel) { certificatePendingRemoval = nil }
             Button("Remove from Major Tom", role: .destructive) {
                 certificatePendingRemoval = nil
-                store.removeFromMajorTom(certificate)
-                selectedID = store.certificates.first?.id
+                store.performAccountAction {
+                    await store.removeFromMajorTom(certificate)
+                    selectedID = store.certificates.first?.id
+                }
             }
         } message: { certificate in
             Text("Removing “\(certificate.commonName)” removes it from Major Tom, deletes all saved capsule associations, and synchronizes that removal to your other Macs. Its certificate and private key remain untouched in Keychain.")
@@ -265,7 +267,7 @@ struct ClientCertificatesManagerView: View {
                                 TableColumn("Scope", value: \.scope) { row in
                                     Picker("Scope", selection: Binding(
                                         get: { row.association.scope },
-                                        set: { store.changeAssociationScope(id: row.id, to: $0) }
+                                        set: { scope in store.performAccountAction { await store.changeAssociationScope(id: row.id, to: scope) } }
                                     )) {
                                         Text("Entire capsule")
                                             .tag(ClientCertificateScopeChoice.entireCapsule)
@@ -279,7 +281,7 @@ struct ClientCertificatesManagerView: View {
                                 TableColumn("Actions") { row in
                                     Menu {
                                         Button("Remove Association", role: .destructive) {
-                                            store.removeAssociation(id: row.id)
+                                            store.performAccountAction { await store.removeAssociation(id: row.id) }
                                         }
                                     } label: {
                                         Image(systemName: "ellipsis.circle")

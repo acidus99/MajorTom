@@ -30,6 +30,12 @@ final class BookmarksModel: ObservableObject {
     private var faviconAttachmentInFlight = false
     private var cloudObserver: AnyCancellable?
     private var accountObserver: AnyCancellable?
+    private var publicationRevision = 0
+    private var mutationTasks: [UUID: Task<Void, Never>] = [:]
+    private var awaitedWrites = 0
+    private var writeDrainWaiters: [CheckedContinuation<Void, Never>] = []
+    private var initializationTask: Task<Void, Never>?
+    private var didLoadDurableCollection = false
 
     init() {
         let database = SharedMajorTomDatabase.shared
@@ -37,9 +43,10 @@ final class BookmarksModel: ObservableObject {
         if let fileURL = MajorTomDataScope.supportFile(named: "bookmarks.json") {
             legacyFileURL = fileURL
             if let database {
-                let account = try? CloudSyncRepository(database: database)
-                    .activeAccountIdentityHash()
-                store = try? BookmarkStore(database: database, accountIdentityHash: account)
+                do {
+                    let account = try CloudSyncRepository(database: database).activeAccountIdentityHash()
+                    store = try BookmarkStore(database: database, accountIdentityHash: account)
+                } catch { ICloudSyncStore.shared.reportLocalPersistenceFailure(error) }
             } else {
                 store = BookmarkStore(fileURL: fileURL)
             }
@@ -52,10 +59,14 @@ final class BookmarksModel: ObservableObject {
         }
         accountObserver = ICloudSyncStore.shared.activeAccountChanged.sink { [weak self] account in
             guard let self, let database = self.database else { return }
-            self.store = try? BookmarkStore(database: database, accountIdentityHash: account)
+            self.publicationRevision += 1
+            self.store = nil
+            self.collection = BookmarkCollection()
+            do { self.store = try BookmarkStore(database: database, accountIdentityHash: account) }
+            catch { ICloudSyncStore.shared.reportLocalPersistenceFailure(error) }
             Task { await self.reload() }
         }
-        Task { [weak self] in await self?.reload() }
+        initializationTask = Task { [weak self] in await self?.reload() }
     }
 
     // MARK: - Reading
@@ -102,6 +113,7 @@ final class BookmarksModel: ObservableObject {
     // MARK: - Writing
 
     func add(title: String, url: URL, toFolderWith folderID: UUID? = nil) {
+        let destination = store
         Task { [weak self] in
             let snapshot: BookmarkFaviconSnapshot?
             if let endpoint = CapsuleEndpoint(url: url),
@@ -114,7 +126,8 @@ final class BookmarksModel: ObservableObject {
             } else {
                 snapshot = nil
             }
-            self?.mutate {
+            guard let self, self.store === destination else { return }
+            self.mutate {
                 $0.add(
                     title: title,
                     url: url,
@@ -223,26 +236,25 @@ final class BookmarksModel: ObservableObject {
     /// Deletes every bookmark and custom folder, retaining only the required empty
     /// Favourites folder. The corresponding cloud snapshot carries deletion tombstones.
     func deleteAll() async throws {
-        let empty = BookmarkCollection()
-        if let store {
-            collection = try await store.replace(with: empty)
-        } else {
-            collection = empty
-        }
-        let previous = syncState ?? SyncedBookmarks(collection: collection, modifiedAt: .distantPast)
-        let next = previous.reconciled(with: collection, at: Date())
-        syncState = next
-        persistSyncState()
-        ICloudSyncStore.shared.updateBookmarks(next)
+        try await mutateAndWait { $0 = BookmarkCollection() }
     }
 
     private func reload() async {
         guard let store else { return }
-        if let legacyFileURL,
-           (try? await store.importLegacyJSON(at: legacyFileURL)) == true {
-            try? FileManager.default.removeItem(at: legacyFileURL)
+        publicationRevision += 1
+        let revision = publicationRevision
+        if let legacyFileURL {
+            do {
+                if try await store.importLegacyJSON(at: legacyFileURL) {
+                    try FileManager.default.removeItem(at: legacyFileURL)
+                }
+            } catch { ICloudSyncStore.shared.reportLocalPersistenceFailure(error); return }
         }
-        let localCollection = await store.collection()
+        let localCollection: BookmarkCollection
+        do { localCollection = try await store.reload() }
+        catch { ICloudSyncStore.shared.reportLocalPersistenceFailure(error); return }
+        guard revision == publicationRevision, self.store === store else { return }
+        didLoadDurableCollection = true
         collection = localCollection
 
         syncState = SyncedBookmarks(collection: localCollection, modifiedAt: Date())
@@ -253,14 +265,29 @@ final class BookmarksModel: ObservableObject {
     /// Every change goes through the store, which applies it and returns the result, so no
     /// operation can forget to persist and the published copy can never drift from disk.
     private func mutate(_ change: @escaping @Sendable (inout BookmarkCollection) -> Void) {
-        guard let store else {
-            change(&collection)
+        guard !ICloudSyncStore.shared.isClaimingLocalData else {
+            ICloudSyncStore.shared.reportLocalPersistenceFailure(CocoaError(.fileLocking))
             return
         }
-        Task { [weak self] in
-            guard let updated = try? await store.update(change) else { return }
-            self?.collection = updated
-            guard let self else { return }
+        guard let store else {
+            ICloudSyncStore.shared.reportLocalPersistenceFailure(CocoaError(.fileWriteUnknown))
+            return
+        }
+        publicationRevision += 1
+        let revision = publicationRevision
+        let operation = UUID()
+        ICloudSyncStore.shared.localPersistenceBegan()
+        mutationTasks[operation] = Task { [weak self] in
+            defer {
+                self?.mutationTasks[operation] = nil
+                ICloudSyncStore.shared.localPersistenceEnded()
+            }
+            let updated: BookmarkCollection
+            do { updated = try await store.update(change) }
+            catch { ICloudSyncStore.shared.reportLocalPersistenceFailure(error); return }
+            if self?.store === store { ICloudSyncStore.shared.localRecordsDidChange() }
+            guard let self, self.store === store, self.publicationRevision == revision else { return }
+            self.collection = updated
             let previous = self.syncState
                 ?? SyncedBookmarks(collection: updated, modifiedAt: .distantPast)
             let next = previous.reconciled(with: updated, at: Date())
@@ -273,11 +300,26 @@ final class BookmarksModel: ObservableObject {
     private func mutateAndWait(
         _ change: @escaping @Sendable (inout BookmarkCollection) -> Void
     ) async throws {
+        guard !ICloudSyncStore.shared.isClaimingLocalData else { throw CocoaError(.fileLocking) }
         guard let store else {
-            change(&collection)
-            return
+            throw CocoaError(.fileWriteUnknown)
+        }
+        publicationRevision += 1
+        let revision = publicationRevision
+        awaitedWrites += 1
+        ICloudSyncStore.shared.localPersistenceBegan()
+        defer {
+            ICloudSyncStore.shared.localPersistenceEnded()
+            awaitedWrites -= 1
+            if awaitedWrites == 0 {
+                let waiters = writeDrainWaiters
+                writeDrainWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
         }
         let updated = try await store.update(change)
+        if self.store === store { ICloudSyncStore.shared.localRecordsDidChange() }
+        guard revision == publicationRevision, self.store === store else { return }
         collection = updated
         let previous = syncState
             ?? SyncedBookmarks(collection: updated, modifiedAt: .distantPast)
@@ -287,7 +329,26 @@ final class BookmarksModel: ObservableObject {
         ICloudSyncStore.shared.updateBookmarks(next)
     }
 
+    func flushPendingWrites() async {
+        await initializationTask?.value
+        while let task = mutationTasks.values.first { await task.value }
+        if awaitedWrites > 0 {
+            await withCheckedContinuation { writeDrainWaiters.append($0) }
+        }
+    }
+
+    func prepareForFirstAccountClaim() async throws {
+        await flushPendingWrites()
+        guard didLoadDurableCollection else { throw CocoaError(.fileReadCorruptFile) }
+    }
+
     private func applyCloudState(_ incoming: SyncedBookmarks) async {
+        // The adapter has committed the batch already. Reload the current account's
+        // database; a queued notification is never permission to replay its snapshot.
+        if store != nil {
+            await reload()
+            return
+        }
         // The incremental transport publishes the complete active account dataset after
         // applying each batch, so absence is an authoritative server deletion.
         let merged = incoming
@@ -296,9 +357,6 @@ final class BookmarksModel: ObservableObject {
         bookmarkSyncLogger.info(
             "cloud bookmarks received folders=\(mergedCollection.folders.count) bookmarks=\(mergedCollection.allBookmarks.count) faviconObservations=\(faviconCount)"
         )
-        if let store {
-            _ = try? await store.replace(with: mergedCollection)
-        }
         syncState = merged.reconciled(with: mergedCollection, at: Date())
         collection = mergedCollection
         persistSyncState()

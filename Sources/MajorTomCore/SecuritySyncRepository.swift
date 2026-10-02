@@ -73,6 +73,12 @@ public struct CloudClientCertificateAssociationPayload: CloudSyncPayload, Equata
     public init(_ association: ClientCertificateAssociation) { self.association = association }
 }
 
+public enum ClientCertificateSyncRepositoryError: Error, Equatable, Sendable {
+    case invalidCertificatePayload
+    case invalidAssociationPayload
+    case invalidLocalFlagID
+}
+
 public struct ClientCertificateSyncRepository: Sendable {
     private let database: MajorTomDatabase
     private let accountIdentityHash: String?
@@ -85,57 +91,84 @@ public struct ClientCertificateSyncRepository: Sendable {
     }
 
     public func load() throws -> (state: ClientCertificateSyncState, localFlags: [UUID: Bool]) {
+        try database.read { try load(in: $0) }
+    }
+
+    func load(in db: Database) throws -> (state: ClientCertificateSyncState, localFlags: [UUID: Bool]) {
         let decoder = JSONDecoder()
-        return try database.read { db in
-            let certificates = try Data.fetchAll(
+            let certificatesData = try Row.fetchAll(
                 db,
-                sql: "SELECT payload FROM client_certificates WHERE account_identity_hash IS ? ORDER BY id",
+                sql: "SELECT id, payload FROM client_certificates WHERE account_identity_hash IS ? ORDER BY id",
                 arguments: [accountIdentityHash]
-            ).compactMap { try? decoder.decode(SyncedClientCertificateDescriptor.self, from: $0) }
-            let associations = try Data.fetchAll(
+            )
+            let certificates = try certificatesData.map { row in
+                do {
+                    let value = try decoder.decode(SyncedClientCertificateDescriptor.self, from: row["payload"])
+                    guard UUID(uuidString: row["id"]) == value.id else { throw CloudIncomingError.invalidIdentity }
+                    return value
+                } catch {
+                    throw ClientCertificateSyncRepositoryError.invalidCertificatePayload
+                }
+            }
+            let associationsData = try Row.fetchAll(
                 db,
-                sql: "SELECT payload FROM client_certificate_associations WHERE account_identity_hash IS ? ORDER BY id",
+                sql: "SELECT id, payload FROM client_certificate_associations WHERE account_identity_hash IS ? ORDER BY id",
                 arguments: [accountIdentityHash]
-            ).compactMap { try? decoder.decode(SyncedClientCertificateAssociation.self, from: $0) }
+            )
+            let associations = try associationsData.map { row in
+                do {
+                    let value = try decoder.decode(SyncedClientCertificateAssociation.self, from: row["payload"])
+                    guard UUID(uuidString: row["id"]) == value.id else { throw CloudIncomingError.invalidIdentity }
+                    return value
+                } catch {
+                    throw ClientCertificateSyncRepositoryError.invalidAssociationPayload
+                }
+            }
             let flags = try Row.fetchAll(
                 db,
                 sql: "SELECT id, synchronizes_with_icloud FROM client_certificate_local_flags WHERE account_identity_hash IS ?",
                 arguments: [accountIdentityHash]
             )
                 .reduce(into: [UUID: Bool]()) { result, row in
-                    if let id = UUID(uuidString: row["id"]) {
-                        result[id] = row["synchronizes_with_icloud"]
+                    guard let id = UUID(uuidString: row["id"]) else {
+                        throw ClientCertificateSyncRepositoryError.invalidLocalFlagID
                     }
+                    result[id] = row["synchronizes_with_icloud"]
                 }
             return (ClientCertificateSyncState(certificates: certificates, associations: associations), flags)
-        }
     }
 
     public func save(_ state: ClientCertificateSyncState, localFlags: [UUID: Bool]) throws {
         try database.write { db in
-            try updateRecords(
-                state.certificates.filter { $0.deletedAt == nil },
-                table: "client_certificates",
-                id: { $0.id.uuidString },
-                modifiedAt: { $0.modifiedAt },
-                account: accountIdentityHash,
-                cloud: cloud,
-                recordType: "MTClientCertificateDescriptor",
-                enqueueChanges: accountIdentityHash != nil,
-                in: db
-            )
-            try updateRecords(
-                state.associations.filter { $0.deletedAt == nil },
-                table: "client_certificate_associations",
-                id: { $0.id.uuidString },
-                modifiedAt: { $0.modifiedAt },
-                account: accountIdentityHash,
-                cloud: cloud,
-                recordType: "MTClientCertificateAssociation",
-                enqueueChanges: accountIdentityHash != nil,
-                in: db
-            )
-            try updateLocalFlags(localFlags, account: accountIdentityHash, in: db)
+            try save(state, localFlags: localFlags, enqueueChanges: accountIdentityHash != nil, in: db)
+        }
+    }
+
+    /// Runs a user operation against the latest rows under the writer lock. The app
+    /// can await this work off its main actor without publishing an uncommitted edit.
+    public func update(_ operation: @Sendable (inout [ClientCertificateDescriptor], inout [ClientCertificateAssociation], inout [UUID: Bool]) -> Void) throws
+        -> (state: ClientCertificateSyncState, localFlags: [UUID: Bool]) {
+        try database.write { db in
+            let loaded = try load(in: db)
+            var certificates = loaded.state.activeCertificates(preservingLocalStorageFrom: [])
+            for index in certificates.indices {
+                if let flag = loaded.localFlags[certificates[index].id] { certificates[index].synchronizesWithICloud = flag }
+            }
+            var associations = loaded.state.activeAssociations
+            var flags = loaded.localFlags
+            operation(&certificates, &associations, &flags)
+            let next = loaded.state.reconciled(certificates: certificates, associations: associations, at: Date())
+            try save(next, localFlags: flags, enqueueChanges: accountIdentityHash != nil, in: db)
+            if let accountIdentityHash {
+                let activeIDs = Set(certificates.map(\.id))
+                for removed in loaded.state.certificates where removed.deletedAt == nil && !activeIDs.contains(removed.id) {
+                    for alias in removed.descriptor.keychainIdentifiers where !activeIDs.contains(alias) {
+                        try cloud.enqueue(.init(accountIdentityHash: accountIdentityHash, recordType: "MTClientCertificateDescriptor",
+                                                recordName: alias.uuidString, operation: .delete), in: db)
+                    }
+                }
+            }
+            return (next, flags)
         }
     }
 
@@ -143,25 +176,15 @@ public struct ClientCertificateSyncRepository: Sendable {
         _ state: ClientCertificateSyncState,
         localFlags: [UUID: Bool]
     ) throws {
-        try database.write { db in
-            try updateRecords(
-                state.certificates.filter { $0.deletedAt == nil },
-                table: "client_certificates",
-                id: { $0.id.uuidString },
-                modifiedAt: { $0.modifiedAt },
-                account: accountIdentityHash,
-                in: db
-            )
-            try updateRecords(
-                state.associations.filter { $0.deletedAt == nil },
-                table: "client_certificate_associations",
-                id: { $0.id.uuidString },
-                modifiedAt: { $0.modifiedAt },
-                account: accountIdentityHash,
-                in: db
-            )
-            try updateLocalFlags(localFlags, account: accountIdentityHash, in: db)
-        }
+        try database.write { db in try saveFromCloud(state, localFlags: localFlags, in: db) }
+    }
+
+    public func saveFromCloud(
+        _ state: ClientCertificateSyncState,
+        localFlags: [UUID: Bool],
+        in db: Database
+    ) throws {
+        try save(state, localFlags: localFlags, enqueueChanges: false, in: db)
     }
 
     public func claimUnownedRows() throws {
@@ -177,6 +200,41 @@ public struct ClientCertificateSyncRepository: Sendable {
         }
     }
 
+    func applyIncoming(_ models: [CloudRecordModel], deletions: [CloudIncomingDeletion], in db: Database) throws {
+        for model in models {
+            let table: String
+            let id: UUID
+            let payload: Data
+            switch model {
+            case .certificate(let value):
+                table = "client_certificates"
+                id = value.id
+                payload = try CloudSyncRepository.encodeModelPayload(
+                    SyncedClientCertificateDescriptor(descriptor: value.descriptor, modifiedAt: Date()))
+            case .association(let value):
+                table = "client_certificate_associations"
+                id = value.association.id
+                payload = try CloudSyncRepository.encodeModelPayload(
+                    SyncedClientCertificateAssociation(association: value.association, modifiedAt: Date()))
+            default: continue
+            }
+            try db.execute(sql: """
+                INSERT INTO \(table)(id, payload, modified_at, account_identity_hash) VALUES (?, ?, ?, ?)
+                ON CONFLICT(id, account_scope) DO UPDATE SET payload = excluded.payload, modified_at = excluded.modified_at
+                """, arguments: [id.uuidString, payload, Date(), accountIdentityHash])
+        }
+        for deletion in deletions {
+            let table: String
+            switch deletion.recordType {
+            case "MTClientCertificateDescriptor": table = "client_certificates"
+            case "MTClientCertificateAssociation": table = "client_certificate_associations"
+            default: continue
+            }
+            try db.execute(sql: "DELETE FROM \(table) WHERE id = ? AND account_identity_hash IS ?",
+                           arguments: [deletion.recordName, accountIdentityHash])
+        }
+    }
+
     public func certificatePayload(id: UUID) throws -> CloudClientCertificateDescriptorPayload? {
         let loaded = try load().state.certificates.first { $0.id == id && $0.deletedAt == nil }
         return loaded.map { CloudClientCertificateDescriptorPayload($0.descriptor) }
@@ -185,6 +243,20 @@ public struct ClientCertificateSyncRepository: Sendable {
     public func associationPayload(id: UUID) throws -> CloudClientCertificateAssociationPayload? {
         let loaded = try load().state.associations.first { $0.id == id && $0.deletedAt == nil }
         return loaded.map { CloudClientCertificateAssociationPayload($0.association) }
+    }
+
+    func legacyModelPayload(recordType: String, id: UUID, in db: Database) throws -> Data? {
+        let table = recordType == "MTClientCertificateDescriptor" ? "client_certificates" : "client_certificate_associations"
+        guard let data = try Data.fetchOne(db, sql: "SELECT payload FROM \(table) WHERE id = ? AND account_identity_hash IS ?",
+                                           arguments: [id.uuidString, accountIdentityHash]) else { return nil }
+        if recordType == "MTClientCertificateDescriptor" {
+            let value = try JSONDecoder().decode(SyncedClientCertificateDescriptor.self, from: data)
+            guard value.id == id else { throw CloudIncomingError.invalidIdentity }
+            return try CloudSyncRepository.encodeModelPayload(CloudClientCertificateDescriptorPayload(value.descriptor))
+        }
+        let value = try JSONDecoder().decode(SyncedClientCertificateAssociation.self, from: data)
+        guard value.id == id else { throw CloudIncomingError.invalidIdentity }
+        return try CloudSyncRepository.encodeModelPayload(CloudClientCertificateAssociationPayload(value.association))
     }
 
     /// Reasserts an explicit deletion for every UUID that has represented an identity.
@@ -219,9 +291,61 @@ public struct ClientCertificateSyncRepository: Sendable {
         _ state: ClientCertificateSyncState,
         localFlags: [UUID: Bool]
     ) throws {
-        try importOnce(marker: "legacy-client-certificate-sync-v2-imported", database: database) {
-            try save(state, localFlags: localFlags)
+        try database.write { db in
+            let marker = "legacy-client-certificate-sync-v2-imported"
+            let imported = try Bool.fetchOne(
+                db,
+                sql: "SELECT EXISTS(SELECT 1 FROM persistence_metadata WHERE key = ?)",
+                arguments: [marker]
+            ) ?? false
+            guard !imported else { return }
+            try save(state, localFlags: localFlags, enqueueChanges: accountIdentityHash != nil, in: db)
+            try db.execute(
+                sql: "INSERT INTO persistence_metadata (key, value, updated_at) VALUES (?, ?, ?)",
+                arguments: [marker, Data(), Date()]
+            )
         }
+    }
+
+    func save(
+        _ state: ClientCertificateSyncState,
+        localFlags: [UUID: Bool],
+        enqueueChanges: Bool,
+        in db: Database
+    ) throws {
+        try updateRecords(
+            state.certificates.filter { $0.deletedAt == nil },
+            table: "client_certificates",
+            id: { $0.id.uuidString },
+            modifiedAt: { $0.modifiedAt },
+            account: accountIdentityHash,
+            cloud: cloud,
+            recordType: "MTClientCertificateDescriptor",
+            cloudPayload: {
+                try CloudSyncRepository.encodeModelPayload(
+                    CloudClientCertificateDescriptorPayload($0.descriptor)
+                )
+            },
+            enqueueChanges: enqueueChanges,
+            in: db
+        )
+        try updateRecords(
+            state.associations.filter { $0.deletedAt == nil },
+            table: "client_certificate_associations",
+            id: { $0.id.uuidString },
+            modifiedAt: { $0.modifiedAt },
+            account: accountIdentityHash,
+            cloud: cloud,
+            recordType: "MTClientCertificateAssociation",
+            cloudPayload: {
+                try CloudSyncRepository.encodeModelPayload(
+                    CloudClientCertificateAssociationPayload($0.association)
+                )
+            },
+            enqueueChanges: enqueueChanges,
+            in: db
+        )
+        try updateLocalFlags(localFlags, account: accountIdentityHash, in: db)
     }
 }
 
@@ -235,16 +359,17 @@ private func updateLocalFlags(
         sql: "SELECT id, synchronizes_with_icloud FROM client_certificate_local_flags WHERE account_identity_hash IS ?",
         arguments: [account]
     ).reduce(into: [UUID: Bool]()) { result, row in
-        if let id = UUID(uuidString: row["id"]) {
-            result[id] = row["synchronizes_with_icloud"]
+        guard let id = UUID(uuidString: row["id"]) else {
+            throw ClientCertificateSyncRepositoryError.invalidLocalFlagID
         }
+        result[id] = row["synchronizes_with_icloud"]
     }
     for (id, value) in localFlags where existingFlags[id] != value {
         try db.execute(
             sql: """
                 INSERT INTO client_certificate_local_flags
                     (id, synchronizes_with_icloud, account_identity_hash) VALUES (?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
+                ON CONFLICT(id, account_scope) DO UPDATE SET
                     synchronizes_with_icloud = excluded.synchronizes_with_icloud,
                     account_identity_hash = excluded.account_identity_hash
                 """,
@@ -267,6 +392,7 @@ private func updateRecords<Record: Encodable>(
     account: String? = nil,
     cloud: CloudSyncRepository? = nil,
     recordType: String? = nil,
+    cloudPayload: ((Record) throws -> Data)? = nil,
     enqueueChanges: Bool = false,
     in db: Database
 ) throws {
@@ -286,18 +412,21 @@ private func updateRecords<Record: Encodable>(
         try db.execute(
             sql: """
                 INSERT INTO \(table) (id, payload, modified_at, account_identity_hash) VALUES (?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET payload = excluded.payload,
+                ON CONFLICT(id, account_scope) DO UPDATE SET payload = excluded.payload,
                     modified_at = excluded.modified_at,
                     account_identity_hash = excluded.account_identity_hash
                 """,
             arguments: [identifier, payload, modifiedAt(record), account]
         )
-        if enqueueChanges, let account, let cloud, let recordType {
+        if enqueueChanges, let account, let cloud, let recordType, let cloudPayload {
+            let modelPayload = try cloudPayload(record)
             try cloud.enqueue(CloudPendingChange(
                 accountIdentityHash: account,
                 recordType: recordType,
                 recordName: identifier,
-                operation: .save
+                operation: .save,
+                modelPayload: modelPayload,
+                payloadDigest: CloudSyncRepository.digest(modelPayload)
             ), in: db)
         }
     }
@@ -314,27 +443,5 @@ private func updateRecords<Record: Encodable>(
                 operation: .delete
             ), in: db)
         }
-    }
-}
-
-private func importOnce(
-    marker: String,
-    database: MajorTomDatabase,
-    body: () throws -> Void
-) throws {
-    let imported = try database.read { db in
-        try Bool.fetchOne(
-            db,
-            sql: "SELECT EXISTS(SELECT 1 FROM persistence_metadata WHERE key = ?)",
-            arguments: [marker]
-        ) ?? false
-    }
-    guard !imported else { return }
-    try body()
-    try database.write { db in
-        try db.execute(
-            sql: "INSERT OR IGNORE INTO persistence_metadata (key, value, updated_at) VALUES (?, ?, ?)",
-            arguments: [marker, Data(), Date()]
-        )
     }
 }

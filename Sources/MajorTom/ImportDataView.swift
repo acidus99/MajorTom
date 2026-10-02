@@ -142,7 +142,7 @@ private final class ImportDataModel: ObservableObject {
                     && $0.scope == proposed.scope
                     && $0.pathPrefix == proposed.pathPrefix
             }) else { continue }
-            ClientCertificateStore.shared.associate(
+            await ClientCertificateStore.shared.associate(
                 certificateID: certificateID,
                 with: assignment.url,
                 scope: .pathAndDescendants
@@ -206,7 +206,7 @@ private final class ImportDataModel: ObservableObject {
                         && $0.scope == proposed.scope
                         && $0.pathPrefix == proposed.pathPrefix
                    }) {
-                    ClientCertificateStore.shared.associate(
+                    await ClientCertificateStore.shared.associate(
                         certificateID: descriptor.id, with: url, scope: .pathAndDescendants
                     )
                     associations += 1

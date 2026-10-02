@@ -13,14 +13,18 @@ public actor BookmarkStore {
 
     private let backend: Backend
     private var current: BookmarkCollection
+    private var loadFailure: (any Error)?
 
     public init(fileURL: URL) {
         backend = .json(fileURL)
-        if let data = try? Data(contentsOf: fileURL),
-           let decoded = try? JSONDecoder.bookmarkStore.decode(BookmarkCollection.self, from: data) {
-            current = decoded
-        } else {
+        do {
+            let data = try Data(contentsOf: fileURL)
+            current = try JSONDecoder.bookmarkStore.decode(BookmarkCollection.self, from: data)
+        } catch CocoaError.fileReadNoSuchFile {
             current = BookmarkCollection()
+        } catch {
+            current = BookmarkCollection()
+            loadFailure = error
         }
     }
 
@@ -35,12 +39,23 @@ public actor BookmarkStore {
 
     public func collection() -> BookmarkCollection { current }
 
+    public func reload() throws -> BookmarkCollection {
+        if let loadFailure { throw loadFailure }
+        if case .sqlite(let repository) = backend { current = try repository.collection() }
+        return current
+    }
+
     /// Applies a change and writes the result.
     ///
     /// One funnel for every mutation, so no operation can forget to persist, and callers
     /// get the updated collection back to publish.
     @discardableResult
     public func update(_ change: @Sendable (inout BookmarkCollection) -> Void) throws -> BookmarkCollection {
+        if let loadFailure { throw loadFailure }
+        if case .sqlite(let repository) = backend {
+            current = try repository.update(change)
+            return current
+        }
         var updated = current
         change(&updated)
         try persist(updated)
@@ -52,6 +67,7 @@ public actor BookmarkStore {
     /// remains complete and immediately usable while offline.
     @discardableResult
     public func replace(with collection: BookmarkCollection) throws -> BookmarkCollection {
+        if let loadFailure { throw loadFailure }
         try persist(collection)
         current = collection
         return current
@@ -60,12 +76,11 @@ public actor BookmarkStore {
     /// Transactionally imports the old JSON file into SQLite. Returns true when the file
     /// was decoded and SQLite either imported it or had already completed that import.
     public func importLegacyJSON(at fileURL: URL) throws -> Bool {
-        guard case .sqlite(let repository) = backend,
-              let data = try? Data(contentsOf: fileURL),
-              let decoded = try? JSONDecoder.bookmarkStore.decode(
-                BookmarkCollection.self,
-                from: data
-              ) else { return false }
+        guard case .sqlite(let repository) = backend else { return false }
+        let data: Data
+        do { data = try Data(contentsOf: fileURL) }
+        catch CocoaError.fileReadNoSuchFile { return false }
+        let decoded = try JSONDecoder.bookmarkStore.decode(BookmarkCollection.self, from: data)
         try repository.importLegacyCollection(decoded)
         current = try repository.collection()
         return true

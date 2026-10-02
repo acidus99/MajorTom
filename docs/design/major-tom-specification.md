@@ -118,9 +118,25 @@ Major Tom works offline. Local state is immediately authoritative. When iCloud s
 
 Cloud data is explicitly versioned. Major Tom validates a data-model manifest before applying
 versioned records and stops with an upgrade message if that model requires a newer app. A v1
-account is imported once; current experimental v2 data is disposable, and no new build writes
-the original zone. iCloud accounts have separate local datasets. Signing out keeps local data;
+account is imported once; a compatible server manifest is the account-wide cutoff, including
+on a Mac with an empty database. An absent local marker never authorizes erasing an existing
+cloud zone. Missing or incompatible metadata stops sync visibly. No new build writes the
+original zone. iCloud accounts have separate local datasets. Signing out keeps local data;
 switching accounts never uploads one account's rows to another.
+
+The CloudKit Data status is truthful rather than predictive: it reports Up to Date only after
+this Mac has completed a successful fetch/send cycle, has no unresolved CloudKit or local
+persistence error, and its durable CloudKit outbox is empty. It means this Mac has no known
+CloudKit work; it does not promise that another Mac is online or has already fetched the
+result. Sync status uses plain-language recovery states and never exposes CloudKit record
+identifiers, server payloads, or raw framework errors. Reading preferences (`NSUbiquitousKeyValueStore`) and private keys (iCloud Keychain)
+use separate Apple services and are not included in that completion proof.
+Sync Now requests a fresh server check, not just completion of the engine's already-known
+work. A click during another sync is coalesced into a subsequent explicit refresh. Automatic
+cross-device delivery may still be delayed by iCloud, network availability, or device sleep;
+the app does not promise instantaneous delivery to another Mac. If Major Tom observes that
+its Mac has reconnected after being offline, it automatically requests one fresh CloudKit
+sync; the user does not need to click Sync Now to retry a recoverable offline failure.
 
 Deleting synchronized user intent physically deletes its CloudKit record and wins over a
 concurrent edit. Clearing local browsing data removes history, session restoration, and cached

@@ -1755,11 +1755,15 @@ final class BrowserModel: ObservableObject {
 
     func useClientCertificate(_ certificateID: UUID, scope: ClientCertificateScopeChoice) {
         guard let pending = pendingClientCertificateChallenge else { return }
-        clientCertificates.associate(
+        let account = clientCertificates.accountToken
+        Task { @MainActor [weak self] in
+        guard let self, clientCertificates.accountToken == account else { return }
+        guard await clientCertificates.associate(
             certificateID: certificateID,
             with: pending.target.url,
             scope: scope
-        )
+        ), clientCertificates.accountToken == account,
+           pendingClientCertificateChallenge?.target.url == pending.target.url else { return }
         clientCertificatePrompt = nil
         pendingClientCertificateChallenge = nil
         navigate(
@@ -1767,6 +1771,7 @@ final class BrowserModel: ObservableObject {
             disposition: pending.disposition,
             renderAsSource: pending.renderAsSource
         )
+        }
     }
 
     func cancelClientCertificatePrompt() {
@@ -1779,17 +1784,27 @@ final class BrowserModel: ObservableObject {
 
     func stopUsingClientCertificateForCurrentPage() {
         guard let url = pageInformation?.url ?? committedURL else { return }
-        guard clientCertificates.stopUsing(for: url) else { return }
+        let account = clientCertificates.accountToken
+        Task { @MainActor [weak self] in
+        guard let self, clientCertificates.accountToken == account,
+              await clientCertificates.stopUsing(for: url), clientCertificates.accountToken == account,
+              (pageInformation?.url ?? committedURL) == url else { return }
         if var information = pageInformation {
             information.clientCertificateAssociation = nil
             pageInformation = information
+        }
         }
     }
 
     func stopUsingClientCertificateForPendingChallenge() {
         guard let prompt = clientCertificatePrompt else { return }
-        _ = clientCertificates.stopUsing(for: prompt.target.url)
-        cancelClientCertificatePrompt()
+        let account = clientCertificates.accountToken
+        Task { @MainActor [weak self] in
+            guard let self, clientCertificates.accountToken == account,
+                  await clientCertificates.stopUsing(for: prompt.target.url),
+                  clientCertificates.accountToken == account else { return }
+            if clientCertificatePrompt?.target.url == prompt.target.url { cancelClientCertificatePrompt() }
+        }
     }
 
     func respondToTrust(allow: Bool) {

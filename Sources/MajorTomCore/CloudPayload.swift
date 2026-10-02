@@ -26,7 +26,7 @@ public struct CloudRecordPayload<Model: CloudSyncPayload>: Sendable {
         let object = try Self.object(from: data)
         if case .number(let value)? = object["t"],
            value.rounded(.towardZero) == value,
-           let version = Int(exactly: value) {
+           let version = Int(exactly: value), version > 0 {
             storedSchemaVersion = version
         } else if object["t"] == nil {
             storedSchemaVersion = 1
@@ -45,7 +45,7 @@ public struct CloudRecordPayload<Model: CloudSyncPayload>: Sendable {
         for (key, value) in unknownFields where object[key] == nil {
             object[key] = value
         }
-        object["t"] = .number(Double(Model.payloadSchemaVersion))
+        object["t"] = .number(Double(max(storedSchemaVersion, Model.payloadSchemaVersion)))
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return try encoder.encode(object)

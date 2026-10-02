@@ -50,7 +50,7 @@ struct BrowserSettingsView: View {
                 }
             }
             Section("iCloud") {
-                LabeledContent("Synced data") {
+                LabeledContent("CloudKit Data") {
                     Label(cloud.status.label, systemImage: "icloud")
                         .foregroundStyle(.secondary)
                         .multilineTextAlignment(.trailing)
@@ -65,11 +65,11 @@ struct BrowserSettingsView: View {
                     }
                     if cloud.status == .removed {
                         Button("Re-upload This Mac’s Data…") {
-                            cloud.reuploadAfterCloudDataRemoval()
+                            Task { await cloud.reuploadAfterCloudDataRemoval() }
                         }
                     }
                 }
-                Text("Bookmarks, reading preferences, certificate approvals, and open-tab titles, URLs, and favicons sync privately through iCloud. Trusted capsule keys, proxy settings, appearance, window layout, history, and restored sessions stay on this Mac. Private keys use iCloud Keychain, not CloudKit.")
+                Text("This status covers CloudKit records: bookmarks, certificate approvals, and open-tab titles, URLs, and favicons. Reading preferences use iCloud separately, and private keys use iCloud Keychain; neither service can confirm that every Mac has received a change. Trusted capsule keys, proxy settings, appearance, window layout, history, and restored sessions stay on this Mac.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

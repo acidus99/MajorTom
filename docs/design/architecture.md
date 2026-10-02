@@ -82,7 +82,7 @@ A second, noninteractive WebView renders the adjacent cached model entry during 
 
 The trust service computes SHA-256 SPKI fingerprints and resolves first-use, changed-key, and certificate-date decisions before content is accepted. The UI presents a decision; the trust service records it.
 
-Persistent records use domain types, never views, WebKit objects, or network tasks. Local stores are authoritative while offline. CloudKit mirrors selected durable user intent; Keychain holds client identities and their private keys. `CKSyncEngine` incrementally fetches changes from Major Tom's private custom zone and resumes from a durable serialized token. Local edits commit their domain row and a generation-numbered outbox entry in one SQLite transaction. Confirmed server deletion wins over edits, and an in-flight send can acknowledge only the generation it actually sent. Complete and incomplete responses remain distinct throughout persistence and caching.
+Persistent records use domain types, never views, WebKit objects, or network tasks. Local stores are authoritative while offline. CloudKit mirrors selected durable user intent; Keychain holds client identities and their private keys. `CKSyncEngine` incrementally fetches changes from Major Tom's private custom zone and resumes from a durable serialized token. Local edits commit their domain row and an immutable canonical model snapshot in a generation-numbered outbox entry in one SQLite transaction. Generations are retained independently of removable outbox rows, so a late acknowledgement cannot remove a newer edit. Outgoing retries re-envelope that immutable model with the newest server metadata, preserving unknown fields. Confirmed server deletion wins over edits. Up to Date is emitted only after a successful fetch/send cycle has drained the durable CloudKit outbox; it does not claim KVS or Keychain propagation. Complete and incomplete responses remain distinct throughout persistence and caching.
 
 Major Tom's local persistence is moving behind a GRDB-backed SQLite boundary in staged,
 independently migratable changes. `MajorTomDatabase` owns connection policy, transactions,
@@ -124,10 +124,13 @@ bookmarks, trust, certificate metadata or keys, caches, CloudKit engine state, o
 
 Cloud data lives only in the `MajorTomUserDataV2` private custom zone. Its
 `MTDataModelManifest` gates readers and writers before model records are applied. On an account's
-first new-v2 launch, Major Tom reads the original `MajorTomUserData` zone once, imports supported
-v1 bookmarks, preferences, and certificate metadata, resets the disposable experimental v2 zone,
-publishes the new manifest, and permanently marks that account ready. It never reads or writes v1
-again. Account changes select separate local datasets and outboxes; signing out retains the last
+first new-v2 launch, Major Tom checks the **server** manifest before considering v1 import.
+A compatible manifest prevents a fresh local database from importing stale v1 or resetting
+the existing zone. Initialization of an absent zone imports v1 with an atomic local body/marker,
+then commits the export snapshots and ready marker together before creating the zone.
+An existing zone with an absent or incompatible manifest fails closed; it is not automatically
+erased. Interrupted first publication can resume from a durable pending manifest. The original
+v1 zone is never written or deleted. Account changes select separate local datasets and outboxes; signing out retains the last
 account's local data and offline edits without exposing them to another account.
 
 Trusted capsule identity records use `trusted_server_identities`, one row per host and port.
@@ -165,7 +168,8 @@ the matching Keychain certificate and private-key aliases on the initiating Mac.
 
 `UserDefaults` is an on-disk preferences plist owned by macOS, not a network service. Major Tom
 uses it only for compact preference values, migration markers, a stable device ID, and the small
-last-fetched remote-tabs display cache. Nothing enters CloudKit merely because it is in
+small local configuration. Remote tabs come from account-scoped CloudKit record metadata,
+not a shared defaults cache. Nothing enters CloudKit merely because it is in
 UserDefaults; the CloudKit adapter explicitly constructs the synchronized projections listed
 above. Large collections, cache bodies, security records, and tombstone sets do not use it.
 
@@ -173,6 +177,71 @@ Deletion of synchronized intent creates a durable delete operation in the same t
 the local row deletion. CloudKit records are physically deleted. Delete wins over a concurrent
 edit, and a stale send completion cannot remove a newer outbox generation. Local
 cache/history/session clearing remains physical local deletion because those data never sync.
+
+Reliability migrations v11–v14 add immutable outbox snapshots, independent generation ledgers,
+account-qualified domain keys (including bookmark parent foreign keys), an incoming batch
+journal, and local confirmed-deletion fences. Raw delivered batches are journaled before engine
+state can advance; domain changes, metadata, acknowledgements, and journal removal share one
+transaction. A failed batch remains replayable after restart. A late in-flight create after a
+confirmed deletion queues a compensating delete. These fences are local SQLite bookkeeping,
+not new CloudKit records or a change to the encrypted schema.
+
+Bookmark mutations read current rows under the writer lock. Certificate mutations apply only
+the user's operation to the latest committed catalogue. Neither model replays a delayed
+cloud publication as a new local replacement. Async transport work is fenced by engine session
+before publication; background work can finish only against its captured account. CKRecord
+construction, received-batch archive/reconciliation, and save-result validation run off the main
+actor. A malformed outgoing item pauses the queue visibly rather than being dropped or spun on.
+Certificate mutations, tab writes, startup exports, and JSON checkpoint encoding also run
+off the main actor. The first-account claim drains initialization and accepted local writes,
+briefly prevents new local edits, then binds the models before releasing the claim barrier.
+Certificate approvals are published only after commit and reloaded before identity resolution;
+queued UI actions capture their account before scheduling. Orderly shutdown drains these
+local writes before closing SQLite, without waiting for network propagation.
+Competing journal workers check batch existence inside the writer transaction, so a worker
+that was overtaken cannot reapply an older, already-consumed batch. A newly observed different
+server version rebases pending save intent to a new generation, fencing a delayed success.
+Fetched equality alone never acknowledges a save: an older different save may still be in
+flight. Only its own exact-generation save or equal-conflict result satisfies pending intent.
+Unknown envelope fields and newer stored schema tags survive retries.
+Favicon observations use the existing SQLite timestamp precision: differences of at most
+one millisecond do not manufacture a newer observation and an echo upload.
+
+Only awaited fetch/send operations establish completion, including a debounced confirmation
+round trip after automatic engine activity. Lifecycle callbacks without a success result do
+not prove Up to Date. Journal, zone, engine-state, outbox, accepted-local-write, and in-flight-attempt checks gate
+completion. See `cloud-sync-adversarial-review.md` for counterexamples, tests, and remaining
+validation limits; `Scripts/cloud-sync-diagnostics.sh` reads aggregate durable state without
+printing payloads or record identifiers.
+
+Explicit Sync Now and activation refreshes use a nonautomatically scheduled CKSyncEngine
+for their requested cycle, then restore automatic scheduling. A signed isolated probe on
+macOS 26.6.2 established that an automatically scheduled engine with a clean checkpoint
+can return successfully without database discovery; the same checkpoint with automatic
+scheduling disabled performs that discovery. Changing fetch scope or network priority did
+not fix the automatic case. The handoff invalidates the retiring session, awaits cancellation,
+and drains all already accepted delegate database work before loading the latest durable
+checkpoint. It neither resets opaque state nor introduces a second receive cursor. Only
+the current engine accepts callbacks. The outbox remains authoritative across the handoff;
+errors, journal work, and accepted local writes are not cleared by switching modes. Explicit
+cycles require fresh-fetch proof and cannot complete using the automatic cached-only path.
+Clicks while a cycle/handoff is running coalesce into one subsequent explicit refresh.
+Shutdown drains inter-engine recovery work too. Apple scheduling/retries remain enabled
+outside requested cycles; automatic delivery is still eventually consistent, not instantaneous.
+Network.framework observes offline-to-online edges while the app is running. One such edge
+requests a fresh, nonautomatic round trip and then restores automatic scheduling; repeated
+available observations do nothing. This recovery path does not clear a paused malformed
+payload or persistence failure, so a network reconnection cannot convert a real sync error
+into a false successful status.
+
+Outgoing result handling is per record. A `partialFailure` is unwrapped only for the
+matching record before its conflict policy runs. In an atomic custom-zone batch, collateral
+`batchRequestFailed` results are never acknowledged or presented as the root failure: their
+durable outbox rows remain pending while the actionable record is reconciled. If CloudKit
+reports only atomic collateral failures and supplies no root item, Major Tom performs a
+bounded automatic confirmation retry, then leaves the work pending for CKSyncEngine's own
+retry policy and reports a safe reconciliation state rather than record identifiers or Up to
+date.
 
 Session restoration and exact Back/Forward snapshots live in the standalone
 `BFCache.db` database. Its normalized `browser_windows`, `browser_tabs`, and
