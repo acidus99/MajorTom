@@ -158,19 +158,9 @@ struct BrowserSettingsView: View {
                 TextField("Proxy port", value: Binding(
                     get: { Int(proxy.port) },
                     set: { updateProxy(port: UInt16(clamping: $0)) }
-                ), format: .number)
+                ), format: .number.grouping(.never))
             }
-            Text("""
-            With a proxy set, http:// and https:// links open inside Major Tom: it connects \
-            to the proxy over Gemini and sends the web address as the request, and the proxy \
-            returns the page converted to Gemtext. Without one, web links open in your \
-            default browser.
-
-            Trust is pinned to the proxy's certificate, not the website's — the proxy sees \
-            and rewrites everything it fetches for you.
-
-            Connections require TLS 1.2 or newer and time out after 30 seconds without activity.
-            """)
+            Text("A Gemini proxy converts web pages to Gemtext so web links open inside Major Tom.")
             .font(.callout)
             .foregroundStyle(.secondary)
         }
