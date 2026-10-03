@@ -49,7 +49,7 @@ struct BrowserSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            Section("iCloud") {
+            Section("iCloud Syncing") {
                 LabeledContent("CloudKit Data") {
                     Label(cloud.status.label, systemImage: "icloud")
                         .foregroundStyle(.secondary)
@@ -69,7 +69,7 @@ struct BrowserSettingsView: View {
                         }
                     }
                 }
-                Text("This status covers CloudKit records: bookmarks, certificate approvals, and open-tab titles, URLs, and favicons. General and Quality of Life settings use iCloud separately, and private keys use iCloud Keychain; neither service can confirm that every Mac has received a change. Appearance and Networking settings, the default browser choice, trusted capsule keys, window layout, history, and restored sessions stay on this Mac.")
+                Text("iCloud is used to keep the following data in sync: bookmarks, homepage, search provider, Client certificates and their approved capsules and paths, and All Quality of Life settings. A list of the current open windows and tabs can be viewed from other computers via Major Tom's iCloud Tabs feature.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

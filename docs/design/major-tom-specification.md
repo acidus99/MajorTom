@@ -124,6 +124,8 @@ cloud zone. Missing or incompatible metadata stops sync visibly. No new build wr
 original zone. iCloud accounts have separate local datasets. Signing out keeps local data;
 switching accounts never uploads one account's rows to another.
 
+General settings presents synchronization under “iCloud Syncing,” with a brief description
+of synchronized data and access to other computers’ open windows and tabs through iCloud Tabs.
 The CloudKit Data status is truthful rather than predictive: it reports Up to Date only after
 this Mac has completed a successful fetch/send cycle, has no unresolved CloudKit or local
 persistence error, and its durable CloudKit outbox is empty. It means this Mac has no known
