@@ -76,8 +76,6 @@ public struct SyncedBrowserPreferenceValues: Codable, Equatable, Sendable {
     public var homepage: String
     public var searchProvider: SearchProvider
     public var customSearchEndpoint: String
-    public var contentTheme: ContentTheme
-    public var contentWidth: ContentWidth
     public var automaticallyLoadsSameCapsuleImages: Bool
     public var automaticallyLoadsDataImages: Bool
     public var renderingOptions: HTMLRenderingOptions
@@ -87,8 +85,6 @@ public struct SyncedBrowserPreferenceValues: Codable, Equatable, Sendable {
         homepage = preferences.homepage
         searchProvider = preferences.searchProvider
         customSearchEndpoint = preferences.customSearchEndpoint
-        contentTheme = preferences.contentTheme
-        contentWidth = preferences.contentWidth
         automaticallyLoadsSameCapsuleImages = preferences.automaticallyLoadsSameCapsuleImages
         automaticallyLoadsDataImages = preferences.automaticallyLoadsDataImages
         renderingOptions = preferences.renderingOptions
@@ -100,8 +96,6 @@ public struct SyncedBrowserPreferenceValues: Codable, Equatable, Sendable {
         result.homepage = homepage
         result.searchProvider = searchProvider
         result.customSearchEndpoint = customSearchEndpoint
-        result.contentTheme = contentTheme
-        result.contentWidth = contentWidth
         result.automaticallyLoadsSameCapsuleImages = automaticallyLoadsSameCapsuleImages
         result.automaticallyLoadsDataImages = automaticallyLoadsDataImages
         result.renderingOptions = renderingOptions

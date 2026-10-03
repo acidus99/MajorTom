@@ -129,8 +129,9 @@ this Mac has completed a successful fetch/send cycle, has no unresolved CloudKit
 persistence error, and its durable CloudKit outbox is empty. It means this Mac has no known
 CloudKit work; it does not promise that another Mac is online or has already fetched the
 result. Sync status uses plain-language recovery states and never exposes CloudKit record
-identifiers, server payloads, or raw framework errors. Reading preferences (`NSUbiquitousKeyValueStore`) and private keys (iCloud Keychain)
+identifiers, server payloads, or raw framework errors. General preference values and all Quality of Life settings (`NSUbiquitousKeyValueStore`) and private keys (iCloud Keychain)
 use separate Apple services and are not included in that completion proof.
+Homepage, search provider, custom search endpoint, and every Quality of Life setting synchronize. All Appearance and Networking settings stay local, including content theme and content width. Incoming older preference snapshots never replace those local choices. Default browser registration is a per-Mac macOS action, even though its control appears in General; it does not synchronize. Favorites-bar visibility remains local.
 Sync Now requests a fresh server check, not just completion of the engine's already-known
 work. A click during another sync is coalesced into a subsequent explicit refresh. Automatic
 cross-device delivery may still be delayed by iCloud, network availability, or device sleep;

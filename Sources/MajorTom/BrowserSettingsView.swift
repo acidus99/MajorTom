@@ -69,7 +69,7 @@ struct BrowserSettingsView: View {
                         }
                     }
                 }
-                Text("This status covers CloudKit records: bookmarks, certificate approvals, and open-tab titles, URLs, and favicons. Reading preferences use iCloud separately, and private keys use iCloud Keychain; neither service can confirm that every Mac has received a change. Trusted capsule keys, proxy settings, appearance, window layout, history, and restored sessions stay on this Mac.")
+                Text("This status covers CloudKit records: bookmarks, certificate approvals, and open-tab titles, URLs, and favicons. General and Quality of Life settings use iCloud separately, and private keys use iCloud Keychain; neither service can confirm that every Mac has received a change. Appearance and Networking settings, the default browser choice, trusted capsule keys, window layout, history, and restored sessions stay on this Mac.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

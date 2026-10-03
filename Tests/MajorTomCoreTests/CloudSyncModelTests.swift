@@ -192,6 +192,8 @@ final class CloudSyncModelTests: XCTestCase {
             preferences: BrowserPreferences(
                 homepage: "gemini://remote.example/",
                 applicationAppearance: .dark,
+                contentTheme: .ocean,
+                contentWidth: .full,
                 proxy: GeminiProxyConfiguration(host: "remote-proxy", port: 1_994),
                 showsFavoritesBar: false
             ),
@@ -200,6 +202,8 @@ final class CloudSyncModelTests: XCTestCase {
         let local = BrowserPreferences(
             homepage: "gemini://local.example/",
             applicationAppearance: .light,
+            contentTheme: .creamsicle,
+            contentWidth: .wide,
             proxy: GeminiProxyConfiguration(host: "localhost", port: 1_965),
             showsFavoritesBar: true
         )
@@ -208,6 +212,9 @@ final class CloudSyncModelTests: XCTestCase {
 
         XCTAssertEqual(applied.homepage, "gemini://remote.example/")
         XCTAssertEqual(applied.applicationAppearance, .light)
+        // Prevent a remote width edit from also changing this Mac's reading theme.
+        XCTAssertEqual(applied.contentTheme, local.contentTheme)
+        XCTAssertEqual(applied.contentWidth, local.contentWidth)
         XCTAssertEqual(applied.proxy, GeminiProxyConfiguration(host: "localhost", port: 1_965))
         XCTAssertTrue(applied.showsFavoritesBar)
     }
@@ -220,6 +227,8 @@ final class CloudSyncModelTests: XCTestCase {
         let legacy = LegacyPayload(
             preferences: BrowserPreferences(
                 homepage: "gemini://legacy.example/",
+                contentTheme: .ocean,
+                contentWidth: .full,
                 proxy: GeminiProxyConfiguration(host: "legacy-proxy", port: 1_994)
             ),
             modifiedAt: Date(timeIntervalSince1970: 42)
@@ -229,12 +238,72 @@ final class CloudSyncModelTests: XCTestCase {
             from: JSONEncoder().encode(legacy)
         )
         let local = BrowserPreferences(
+            contentTheme: .sandDunes,
+            contentWidth: .wide,
             proxy: GeminiProxyConfiguration(host: "this-mac", port: 1_965)
         )
 
         let applied = decoded.applying(to: local)
         XCTAssertEqual(applied.homepage, "gemini://legacy.example/")
         XCTAssertEqual(applied.proxy?.host, "this-mac")
+        XCTAssertEqual(applied.contentTheme, local.contentTheme)
+        XCTAssertEqual(applied.contentWidth, local.contentWidth)
+    }
+
+    func testGeneralAndAllQualityOfLifePreferencesRoundTripAcrossMacs() throws {
+        let local = BrowserPreferences()
+        var remote = local
+        remote.homepage = "gemini://other.example/"
+        remote.searchProvider = .custom
+        remote.customSearchEndpoint = "gemini://search.example/query"
+        remote.showsFavicons.toggle()
+        remote.automaticallyLoadsSameCapsuleImages.toggle()
+        remote.automaticallyLoadsDataImages.toggle()
+        remote.renderingOptions.recognizesEmphasis.toggle()
+        remote.renderingOptions.recognizesStrongEmphasis.toggle()
+        remote.renderingOptions.recognizesInlineCode.toggle()
+        remote.renderingOptions.collapsesConsecutiveQuotes.toggle()
+        remote.renderingOptions.showsLinkHints.toggle()
+        remote.renderingOptions.rendersANSIColors.toggle()
+        remote.renderingOptions.rendersANSIBackgroundColors.toggle()
+
+        let snapshot = SyncedBrowserPreferences(preferences: remote, modifiedAt: Date())
+        let decoded = try JSONDecoder().decode(SyncedBrowserPreferences.self,
+                                              from: JSONEncoder().encode(snapshot))
+        XCTAssertEqual(decoded.applying(to: local), remote)
+    }
+
+    func testAppearanceAndNetworkingChangesDoNotChangeSyncedProjection() {
+        let original = BrowserPreferences()
+        var changed = original
+        changed.applicationAppearance = .dark
+        changed.contentTheme = .sandDunes
+        changed.contentWidth = .full
+        changed.proxy = GeminiProxyConfiguration(host: "local-proxy", port: 1_994)
+        changed.showsFavoritesBar.toggle()
+        XCTAssertEqual(SyncedBrowserPreferenceValues(preferences: original),
+                       SyncedBrowserPreferenceValues(preferences: changed))
+    }
+
+    func testOldValuesSnapshotCannotOverwriteLocalThemeOrWidth() throws {
+        // Older releases included Appearance fields in their synchronized snapshot.
+        let remote = SyncedBrowserPreferences(
+            preferences: BrowserPreferences(homepage: "gemini://remote.example/"),
+            modifiedAt: Date()
+        )
+        var payload = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(remote)) as? [String: Any])
+        var values = try XCTUnwrap(payload["values"] as? [String: Any])
+        values["contentTheme"] = ContentTheme.ocean.rawValue
+        values["contentWidth"] = ContentWidth.full.rawValue
+        payload["values"] = values
+        let decoded = try JSONDecoder().decode(SyncedBrowserPreferences.self,
+            from: JSONSerialization.data(withJSONObject: payload))
+        let local = BrowserPreferences(contentTheme: .sandDunes, contentWidth: .wide)
+        let applied = decoded.applying(to: local)
+        XCTAssertEqual(applied.homepage, remote.values.homepage)
+        XCTAssertEqual(applied.contentTheme, local.contentTheme)
+        XCTAssertEqual(applied.contentWidth, local.contentWidth)
     }
 
     func testBookmarkTombstoneWinsOverAnOlderOfflineCopy() {

@@ -128,8 +128,8 @@ final class BrowserSettingsStore: ObservableObject {
         uploadTask?.cancel()
         modifiedAt = snapshot.modifiedAt
         isApplyingRemotePreferences = true
-        // Proxy, application appearance, and Favorites-bar visibility belong to this
-        // Mac. Only overlay the durable reading and navigation preferences from iCloud.
+        // Appearance, Networking, and Favorites-bar visibility belong to this Mac.
+        // Only General and Quality of Life preference values follow the iCloud account.
         preferences = snapshot.applying(to: preferences)
         isApplyingRemotePreferences = false
     }

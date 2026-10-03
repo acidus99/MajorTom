@@ -154,8 +154,8 @@ the matching Keychain certificate and private-key aliases on the initiating Mac.
 | Data | Local authority | Cross-Mac behavior |
 | --- | --- | --- |
 | Bookmarks, folders, order, bookmark favicon snapshot | Account-scoped SQLite bookmark rows | One CloudKit record per item through a transactional outbox |
-| Homepage, search provider, content theme/width, Gemtext rendering options, image-loading choices, favicon visibility | Small coalesced UserDefaults preference snapshot | iCloud Key-Value Store |
-| Application appearance, Gemini proxy, Favorites-bar visibility | Same local preference snapshot | Local to one Mac |
+| General preference values (homepage, search provider and custom endpoint), all Quality of Life settings | Small coalesced UserDefaults preference snapshot | iCloud Key-Value Store |
+| All Appearance settings (application appearance, content theme and width), all Networking settings, Favorites-bar visibility, default browser registration | Local preferences or macOS registration | Local to one Mac |
 | Client-certificate descriptors and capsule/path associations | SQLite per-record sync metadata | CloudKit records; usable identity material follows only through synchronizable Keychain |
 | Client-certificate private keys and certificate identity | Keychain | iCloud Keychain when the identity is marked synchronizable; never CloudKit |
 | User-approved server trust | SQLite endpoint row | Local only |
