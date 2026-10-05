@@ -10,6 +10,7 @@ Major Tom aims to be the best client for browsing [Geminispace](https://geminipr
 
 Video demoing the many features:
 
+https://github.com/user-attachments/assets/7967524a-e630-4578-9ad8-218c08f817d9
 
 Native text rendering and Apple's Emoji:
 ![Screen shot of Major Tom browser](Assets/GitHub/emoji.png)
