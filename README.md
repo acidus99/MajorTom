@@ -6,19 +6,6 @@ Major Tom aims to be the best client for browsing [Geminispace](https://geminipr
 
 ![Screen shot of Major Tom browser](Assets/GitHub/screenshot1.png)
 
-## Gallery
-
-Video demoing the many features:
-
-https://github.com/user-attachments/assets/7967524a-e630-4578-9ad8-218c08f817d9
-
-Native text rendering and Apple's Emoji:
-![Screen shot of Major Tom browser](Assets/GitHub/emoji.png)
-
-Language translation that never leaves your machine using macOS's built in capabilities:
-
-![Screen recording of native translation of French text](Assets/GitHub/native-translate.gif)
-
 ## Features
 
 ### UI
@@ -49,6 +36,19 @@ Language translation that never leaves your machine using macOS's built in capab
 * Supports client-side certificates/identities for interactive Gemini capsules like Station or BBS.
 * Suggestions from [Delorean Time Machine](gemini://kennedy.gemi.dev/archive/) when a capsule or resource is unavailable.
 * Importing bookmarks, client certificates, and other supported data from Lagrange and Alhena.
+
+## Gallery
+
+Video demoing the many features:
+
+https://github.com/user-attachments/assets/7967524a-e630-4578-9ad8-218c08f817d9
+
+Native text rendering and Apple's Emoji:
+![Screen shot of Major Tom browser](Assets/GitHub/emoji.png)
+
+Language translation that never leaves your machine using macOS's built in capabilities:
+
+![Screen recording of native translation of French text](Assets/GitHub/native-translate.gif)
 
 ## Getting Major Tom
 
