@@ -9,13 +9,8 @@ Functionality:
 * More Tabs
 	Safari has a ton of option on close tab, close tab to the right, close all other tabs, etc
 	
-	
-* need a way to set Major Tom as the default for different protocols
-
 * Titan Support
-* Import From Browser 
-	Looks like it detects installed apps (Safari shows Firefox)
-	Goes to a model where you check what you want to import (History, Bookmarks)
+* Import From Browser (Already have 2 clients. Maybe a generic bookmarks import?)
 
 * Add a TOC/Outline view, using headings
 	Maybe as a floating/collapible side panel?
@@ -24,7 +19,6 @@ Functionality:
 
 * store cache internally as WARC? export it?
 * offline mode?
-
 * subscribe to page?
 * feeds view?
 * convert ATOM/RSS to gemlog page
@@ -39,20 +33,14 @@ Functionality:
 	I could have a fun game on no internet connection
 		side scrolling infinite runner, on a planet? duck UFOs, jump of rocks?
 
-
 Reworking/Bugs:
 	
 * clicking on "Manged client certs" if a browser window is not in focus (e.g. looking at settings, or probably about) doesn't work.
 	
-* option "up" doesn't work. Only optin +_ shift + up. One time, in a window even the menu items didn't work to "go up". I think we should override and remove the "option" + up
-
 * Accessibility audit: verify every primary browser action works with the keyboard and VoiceOver, including focus order and meaningful control labels/state.
 
 * Should we show the favorites bar once they have added at least one bookmark? What do web browsers do?
 
-* Double Favicon in tabs and bookmarks
-	If a capsule has a favicon, and a page title starts with that favicon, it looks weird. Lets update this so 
-	
 * only use the hover text in the bottom right to show connections info. Have it disappear once the page is loaded
 	
 * Organization of the "Quality of life improvements" settings is a bit rough
@@ -71,5 +59,3 @@ things to check:
   iCloud Key-Value Store preferences, and Keychain metadata arriving before/after key material.
 
 - If no windows, clicking on the icon in dock opens 2 windows (I think if no windows, I close the app right now)
-
-- When opening a new tab, or new window, or restoring a window, the content theme is not applied until the content is downloaded and shown. So a new tab can be all white, only to then update to showing the dark theme. This is very jarring. You should show a placeholder that just shows the background color of the selected content theme, so there isn't this flash of white or black

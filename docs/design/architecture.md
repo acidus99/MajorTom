@@ -61,6 +61,12 @@ equivalent connected-pill control.
 
 ## Navigation and content flow
 
+The application delegate's single local key monitor routes Command-Option-Up and
+Command-Option-Shift-Up to the same selected-tab commands as History > Up One Level
+and Capsule Root, before the content responder can consume the arrow keys. Routing is
+limited to browser windows without a sheet or modal dialog. Bare Command-Up/Down
+remain native document scrolling commands.
+
 ```text
 User intent
   → tab navigation controller

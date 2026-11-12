@@ -206,12 +206,11 @@ struct MajorTomApp: App {
                 Divider()
                 Button("Home") { NotificationCenter.default.post(name: .majorTomHome, object: nil) }
                     .keyboardShortcut("h", modifiers: [.command, .shift])
-                // Command-Up/Down are the system's document scroll shortcuts, so binding
-                // Up One Level there fought the text system and neither worked reliably.
+                // Keep Command-Up/Down available for native document scrolling.
                 Button("Up One Level") { NotificationCenter.default.post(name: .majorTomUp, object: nil) }
-                    .keyboardShortcut(.upArrow, modifiers: .option)
+                    .keyboardShortcut(.upArrow, modifiers: [.command, .option])
                 Button("Capsule Root") { NotificationCenter.default.post(name: .majorTomRoot, object: nil) }
-                    .keyboardShortcut(.upArrow, modifiers: [.option, .shift])
+                    .keyboardShortcut(.upArrow, modifiers: [.command, .option, .shift])
                 Divider()
                 Button("Show All History") {
                     NotificationCenter.default.post(name: .majorTomShowHistory, object: nil)
@@ -426,11 +425,10 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
     }
 
 
-    /// Safari also navigates with Command-Left/Right. There is no way to express a
-    /// second key equivalent for one SwiftUI command, so this is an application-wide
-    /// monitor that posts the same notification the History menu posts. It lives on
-    /// the delegate rather than on each tab view: a per-view monitor was installed
-    /// once per open window, so every window reacted to one key press.
+    /// Routes browser shortcuts before the content responder can consume them,
+    /// including Safari's alternate Command-Left/Right bindings. It lives on the
+    /// delegate rather than on each tab view: a per-view monitor was installed once
+    /// per open window, so every window reacted to one key press.
     private func installCommandKeyMonitor() {
         commandKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             // Tab overview is AppKit-owned, but Escape is Major Tom's explicit
@@ -477,6 +475,24 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
             let isBrowserWindow = MainActor.assumeIsolated {
                 NSApplication.shared.keyWindow?.tabbingIdentifier
                     == NativeTabCoordinator.tabbingIdentifier
+            }
+            // Option-Up was consumed by native text handling before menu dispatch.
+            // Claim the explicit Command-Option variants here while leaving ordinary
+            // Command-Up/Down scrolling and sheet/dialog text editing untouched.
+            if isBrowserWindow,
+               let shortcut = CapsuleNavigationShortcut(keyCode: keyCode, modifiers: modifiers) {
+                let canNavigate = MainActor.assumeIsolated {
+                    guard let window = NSApplication.shared.keyWindow else { return false }
+                    return window.attachedSheet == nil && window.sheetParent == nil
+                        && NSApplication.shared.modalWindow == nil
+                }
+                if canNavigate {
+                    NotificationCenter.default.post(
+                        name: shortcut == .upOneLevel ? .majorTomUp : .majorTomRoot,
+                        object: nil
+                    )
+                    return nil
+                }
             }
             let hasCommandAndOptionalOption = modifiers.contains(.command)
                 && modifiers.isDisjoint(with: [.shift, .control])
