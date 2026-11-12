@@ -4,16 +4,13 @@ Functionality:
 	French test page: gemini://ploum.net/2026-08-03-offpunk_manifesto.gmi
 	Always Translate Content option?
 	
-
 * Themes as CSS. User supplied themes
-
 
 * More Tabs
 	Safari has a ton of option on close tab, close tab to the right, close all other tabs, etc
 	
 	
 * need a way to set Major Tom as the default for different protocols
-
 
 * Titan Support
 * Import From Browser 
@@ -24,7 +21,6 @@ Functionality:
 	Maybe as a floating/collapible side panel?
 
 * add that capsule structural/tree view 
-
 
 * store cache internally as WARC? export it?
 * offline mode?
