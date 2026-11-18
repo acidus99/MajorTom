@@ -262,6 +262,7 @@ final class CloudSyncModelTests: XCTestCase {
         remote.customSearchEndpoint = "gemini://search.example/query"
         remote.showsFavicons.toggle()
         remote.automaticallyLoadsSameCapsuleImages.toggle()
+        remote.imageRequestInterval = 7
         remote.automaticallyLoadsDataImages.toggle()
         remote.renderingOptions.recognizesEmphasis.toggle()
         remote.renderingOptions.recognizesStrongEmphasis.toggle()
@@ -275,6 +276,19 @@ final class CloudSyncModelTests: XCTestCase {
         let decoded = try JSONDecoder().decode(SyncedBrowserPreferences.self,
                                               from: JSONEncoder().encode(snapshot))
         XCTAssertEqual(decoded.applying(to: local), remote)
+    }
+
+    func testOlderSyncedPreferencesPreserveLocalImageInterval() throws {
+        var payload = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(SyncedBrowserPreferenceValues(preferences: BrowserPreferences()))
+        ) as? [String: Any])
+        payload.removeValue(forKey: "imageRequestInterval")
+        let decoded = try JSONDecoder().decode(
+            SyncedBrowserPreferenceValues.self,
+            from: JSONSerialization.data(withJSONObject: payload)
+        )
+        let applied = decoded.applying(to: BrowserPreferences(imageRequestInterval: 9))
+        XCTAssertEqual(applied.imageRequestInterval, 9)
     }
 
     func testAppearanceAndNetworkingChangesDoNotChangeSyncedProjection() {

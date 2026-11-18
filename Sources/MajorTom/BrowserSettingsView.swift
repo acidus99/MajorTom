@@ -201,6 +201,13 @@ struct BrowserSettingsView: View {
 
 
             Toggle("Automatically display same-capsule images", isOn: store.binding(\.automaticallyLoadsSameCapsuleImages))
+            Stepper(value: store.binding(\.imageRequestInterval), in: 1...60, step: 1) {
+                Text("Image Request Interval: \(Duration.seconds(store.preferences.imageRequestInterval).formatted(.units(allowed: [.seconds], width: .wide)))")
+            }
+            .help("Minimum time between inline image requests to a capsule. Cached images appear immediately.")
+            Text("Cached images appear immediately. Other images wait for this interval, including when a page first opens. Capsules that ask Major Tom to slow down are given progressively longer pauses.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
             Toggle("Display inline data images", isOn: store.binding(\.automaticallyLoadsDataImages))
             Toggle(
                 "Italicize text between *single asterisks*",

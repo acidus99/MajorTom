@@ -77,6 +77,8 @@ public struct SyncedBrowserPreferenceValues: Codable, Equatable, Sendable {
     public var searchProvider: SearchProvider
     public var customSearchEndpoint: String
     public var automaticallyLoadsSameCapsuleImages: Bool
+    // Optional on the wire so snapshots from older Macs remain decodable.
+    public var imageRequestInterval: TimeInterval?
     public var automaticallyLoadsDataImages: Bool
     public var renderingOptions: HTMLRenderingOptions
     public var showsFavicons: Bool
@@ -86,6 +88,7 @@ public struct SyncedBrowserPreferenceValues: Codable, Equatable, Sendable {
         searchProvider = preferences.searchProvider
         customSearchEndpoint = preferences.customSearchEndpoint
         automaticallyLoadsSameCapsuleImages = preferences.automaticallyLoadsSameCapsuleImages
+        imageRequestInterval = preferences.imageRequestInterval
         automaticallyLoadsDataImages = preferences.automaticallyLoadsDataImages
         renderingOptions = preferences.renderingOptions
         showsFavicons = preferences.showsFavicons
@@ -97,6 +100,7 @@ public struct SyncedBrowserPreferenceValues: Codable, Equatable, Sendable {
         result.searchProvider = searchProvider
         result.customSearchEndpoint = customSearchEndpoint
         result.automaticallyLoadsSameCapsuleImages = automaticallyLoadsSameCapsuleImages
+        if let imageRequestInterval { result.imageRequestInterval = imageRequestInterval }
         result.automaticallyLoadsDataImages = automaticallyLoadsDataImages
         result.renderingOptions = renderingOptions
         result.showsFavicons = showsFavicons

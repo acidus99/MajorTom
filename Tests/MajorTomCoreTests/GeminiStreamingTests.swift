@@ -187,6 +187,7 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertEqual(preferences.contentAppearance, .dark)
         XCTAssertEqual(preferences.darkContentTheme, "draculaDark")
         XCTAssertFalse(preferences.automaticallyLoadsSameCapsuleImages)
+        XCTAssertEqual(preferences.imageRequestInterval, 2)
     }
 
     func testInlineEnhancementsAreConservativeAndEscaped() {
@@ -295,6 +296,7 @@ final class GeminiStreamingTests: XCTestCase {
             from: Data("{}".utf8)
         )
         XCTAssertEqual(decoded.contentWidth, .narrow)
+        XCTAssertEqual(decoded.imageRequestInterval, 2)
     }
 
     func testDirectorySaveFilenameUsesDocumentTitle() {

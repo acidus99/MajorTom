@@ -67,6 +67,11 @@ enum SharedContentCache {
     }()
 }
 
+/// Network pacing and capsule backoff must survive navigation and span tabs.
+enum SharedGeminiImageLoader {
+    static let shared = GeminiImageLoader(cache: SharedContentCache.shared)
+}
+
 // PageCompletionState, CachedPage and RestoredTabState now live in MajorTomCore beside
 // NavigationState, which owns the rules that operate on them. They are durable domain
 // records, which the architecture document places in Core rather than in the app shell.

@@ -69,6 +69,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
     public var contentWidth: ContentWidth
     public var proxy: GeminiProxyConfiguration?
     public var automaticallyLoadsSameCapsuleImages: Bool
+    public var imageRequestInterval: TimeInterval
     public var automaticallyLoadsDataImages: Bool
     public var renderingOptions: HTMLRenderingOptions
     /// Shows each capsule's `favicon.txt` emoji beside its address and on its tab.
@@ -87,6 +88,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         contentWidth: ContentWidth = .narrow,
         proxy: GeminiProxyConfiguration? = nil,
         automaticallyLoadsSameCapsuleImages: Bool = false,
+        imageRequestInterval: TimeInterval = 2,
         automaticallyLoadsDataImages: Bool = true,
         renderingOptions: HTMLRenderingOptions = HTMLRenderingOptions(),
         showsFavicons: Bool = true,
@@ -102,6 +104,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         self.contentWidth = contentWidth
         self.proxy = proxy
         self.automaticallyLoadsSameCapsuleImages = automaticallyLoadsSameCapsuleImages
+        self.imageRequestInterval = imageRequestInterval
         self.automaticallyLoadsDataImages = automaticallyLoadsDataImages
         self.renderingOptions = renderingOptions
         self.showsFavicons = showsFavicons
@@ -150,6 +153,8 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
             Bool.self,
             forKey: .automaticallyLoadsSameCapsuleImages
         ) ?? defaults.automaticallyLoadsSameCapsuleImages
+        imageRequestInterval = try container.decodeIfPresent(TimeInterval.self, forKey: .imageRequestInterval)
+            ?? defaults.imageRequestInterval
         automaticallyLoadsDataImages = try container.decodeIfPresent(
             Bool.self,
             forKey: .automaticallyLoadsDataImages

@@ -313,6 +313,20 @@ protocol-neutral streaming framework. The policy can remain a no-op for future p
 until their own reuse rules are justified. Omnibar indexing and purposeful offline browsing
 remain separate future systems.
 
+`GeminiImageLoader` in Core owns inline image retrieval, replacing the presentation
+layer's four-request semaphore and its embedded fetch/cache loop. One app-owned actor
+is shared by all tabs. It returns complete `ContentResponse` bytes to the WebKit resource
+bridge, and reuses the existing transport, trust authorization, 16 MiB response limit,
+and content cache. Each capsule has a FIFO queue and one cancelable worker task; a
+monotonic sleep enforces the page's initial delay, request spacing, and exponential
+`44` backoff without polling or a separate timer. Same-capsule redirect hops also pass
+through pacing. Fresh cache hits bypass the queue, and workers check again after waiting.
+Successful responses are stored before releasing the next request. In-flight duplicates
+share a worker with independently cancelable callers. Page navigation/Stop cancels those
+callers through the tab's existing image tasks; per-capsule cooldown state stays in the
+shared actor. Direct document navigation, favicon retrieval, and downloads keep their
+existing retrieval paths.
+
 ## Presentation boundary
 
 WebKit renders Major Tom-controlled HTML derived from semantic document changes. Capsule text is escaped, destinations are validated, and the browser controls the document shell, stylesheet, and interaction bridge. Capsule content does not supply executable HTML or script.

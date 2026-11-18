@@ -102,8 +102,25 @@ Preformatted blocks may carry ANSI SGR escape sequences, which some capsules use
 
 Reading preferences control application appearance separately from the document theme and width. Changes to appearance-only preferences update open content without another request. Optional enhancements—such as conservative inline formatting and automatic same-capsule images—must be individually controllable, bounded, and fail without disrupting the original document or link. Automatic same-capsule images are off by default; this default is applied once to existing installations too. General settings provides Restore Default Settings, which restores browser preferences but preserves trusted capsule identities and client certificates. General settings also shows whether Major Tom is the default handler for `gemini://` URLs and provides a button to make it the default; the button is disabled and a confirmation label is shown when it already is the default.
 
+Inline Gemini images use a shared background loader. Fresh cached images appear immediately,
+even while network work is waiting. Cache misses enter an ordered queue per capsule, shared
+across tabs, with one transfer at a time. Quality of Life settings provides an Image Request
+Interval of 1–60 seconds, defaulting to two seconds. The first network image waits until that
+interval has elapsed since navigation began, and subsequent request starts are at least one
+interval apart. Images are discovered as the document streams, including below the viewport;
+manual expansions and restored expansions use the same loader. Embedded `data:` images do
+not enter the network queue.
+
+An inline image response of `44 Slow Down` pauses that capsule's image queue and retries the
+same image with exponential backoff: twice the configured interval, then four times, and so
+on, saturating at 24 hours. The response text is not interpreted as a numeric delay. A successful
+network response resets backoff; cache hits do not. Other capsules and cached images remain
+available during the pause. Leaving or stopping a page cancels the work it owns, while the
+capsule's cooldown survives navigation. Concurrent requests for the same image share a transfer;
+canceling one caller does not cancel work still needed by another.
+
 Gemtext rendering choices synchronize between Macs, including embedded `data:` images,
-automatic same-capsule images, and inline rendering enhancements. Application appearance,
+automatic same-capsule images, the image request interval, and inline rendering enhancements. Application appearance,
 proxy configuration, and Favorites-bar visibility remain local to each Mac.
 
 View Source and Save Page As always use the original response body. Caching must preserve response metadata, completion state, and enough source to reproduce a page under changed reading preferences.

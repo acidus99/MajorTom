@@ -604,7 +604,8 @@ final class BrowserModel: ObservableObject {
     /// the first fifteen Gemtext lines.
     private var titleClaim = GemtextTitleClaim()
     private var imageTasks: [Task<Void, Never>] = []
-    private let imageLimiter = AsyncSemaphore(limit: 4)
+    private let imageLoader = SharedGeminiImageLoader.shared
+    private var imagePageStartedAt = ContinuousClock.now
     private var slowDownTask: Task<Void, Never>?
     private var downloadTask: Task<Void, Never>?
     private var contextMenuTargets: [ContextMenuTarget] = []
@@ -903,6 +904,7 @@ final class BrowserModel: ObservableObject {
         navigationTask = nil
         imageTasks.forEach { $0.cancel() }
         imageTasks.removeAll()
+        imagePageStartedAt = .now
         slowDownTask?.cancel()
         slowDownTask = nil
         documentContinuation?.finish()
@@ -2406,6 +2408,10 @@ final class BrowserModel: ObservableObject {
     }
 
     private func beginDocument(at sourceURL: URL) -> AsyncThrowingStream<Data, any Error>.Continuation {
+        // Settings can replace a document without beginning a new navigation.
+        // Its old image work must stop just as it does when leaving the page.
+        imageTasks.forEach { $0.cancel() }
+        imageTasks.removeAll()
         browserNavigationLogger.notice(
             "beginDocument source=\(sourceURL.absoluteString, privacy: .public) replacing=\(self.activeWebDocumentURL?.absoluteString ?? "nil", privacy: .public) modelIndex=\(self.navigation.historyIndex)"
         )
@@ -2932,6 +2938,7 @@ final class BrowserModel: ObservableObject {
 
         let renderingChanged = preferences.renderingOptions != lastPreferences.renderingOptions
             || preferences.automaticallyLoadsSameCapsuleImages != lastPreferences.automaticallyLoadsSameCapsuleImages
+            || preferences.imageRequestInterval != lastPreferences.imageRequestInterval
             || preferences.automaticallyLoadsDataImages != lastPreferences.automaticallyLoadsDataImages
         guard renderingChanged, !isLoading else { return }
         renderCurrentContent()
@@ -3198,14 +3205,11 @@ final class BrowserModel: ObservableObject {
         ))
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.imageLimiter.acquire()
             let metadata = await self.loadInlineImage(
                 url,
                 continuation: resource.continuation,
-                redirects: 0,
                 bypassesContentCache: bypassesContentCacheForPage
             )
-            await self.imageLimiter.release()
             if let metadata {
                 await self.updateInlineImageMetadata(
                     figureIdentifier: figureIdentifier,
@@ -3274,14 +3278,11 @@ final class BrowserModel: ObservableObject {
             figureIdentifier: figureIdentifier,
             fileName: fileName
         )
-        await imageLimiter.acquire()
         let metadata = await loadInlineImage(
             url,
             continuation: resource.continuation,
-            redirects: 0,
             bypassesContentCache: bypassesContentCacheForPage
         )
-        await imageLimiter.release()
         if let metadata {
             await updateInlineImageMetadata(
                 figureIdentifier: figureIdentifier,
@@ -3593,105 +3594,31 @@ final class BrowserModel: ObservableObject {
     private func loadInlineImage(
         _ url: URL,
         continuation: AsyncThrowingStream<URLSchemeTaskResult, any Error>.Continuation,
-        redirects: Int,
         bypassesContentCache: Bool
     ) async -> LoadedInlineImage? {
-        guard !Task.isCancelled else {
-            continuation.finish(throwing: CancellationError())
-            return nil
-        }
-        let cacheGeneration = await contentCache?.writeGeneration
-        guard redirects <= 5,
-              let target = try? GeminiRequestTarget(url.absoluteString) else {
-            continuation.finish(throwing: URLError(.badURL))
-            return nil
-        }
         do {
+            let response = try await imageLoader.image(
+                for: url,
+                interval: settings.preferences.imageRequestInterval,
+                pageStartedAt: imagePageStartedAt,
+                bypassesCache: bypassesContentCache
+            ) { [weak self] identity, _ in
+                guard let self else { return false }
+                return await self.authorize(identity)
+            }
             try Task.checkCancellation()
-            if bypassesContentCache {
-                try? await contentCache?.removeResponse(for: target.url)
-            }
-            let cachedResponse = bypassesContentCache
-                ? nil
-                : try? await contentCache?.freshResponse(for: target.url)
-            let responseIsCached = cachedResponse != nil
-            var receivedAt = cachedResponse?.receivedAt ?? Date()
-            let events: AsyncThrowingStream<GeminiTransportEvent, any Error>
-            if let cachedResponse {
-                events = GeminiResponseReplay.events(for: cachedResponse)
-            } else {
-                events = transport.events(
-                    for: target,
-                    configuration: GeminiTransportConfiguration(
-                        maximumResponseByteCount: 16 * 1_024 * 1_024
-                    )
-                ) { [weak self] identity, _ in
-                    guard let self else { return false }
-                    return await self.authorize(identity)
-                }
-            }
-            var accepted = false
-            var mimeType = ""
-            var byteCount = 0
-            var body = Data()
-            var responseHeader: GeminiResponseHeader?
-            for try await event in events {
-                try Task.checkCancellation()
-                switch event {
-                case .responseHeader(let header):
-                    if !responseIsCached { receivedAt = Date() }
-                    responseHeader = header
-                    if header.isRedirect,
-                       let redirected = URL(string: header.meta, relativeTo: url)?.absoluteURL,
-                       isSameCapsule(redirected, url) {
-                        return await loadInlineImage(
-                            redirected,
-                            continuation: continuation,
-                            redirects: redirects + 1,
-                            bypassesContentCache: bypassesContentCache
-                        )
-                    }
-                    let mime = header.meta.split(separator: ";", maxSplits: 1).first
-                        .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
-                    guard header.isSuccess, mime.hasPrefix("image/") else {
-                        continuation.finish(throwing: URLError(.cannotDecodeContentData))
-                        return nil
-                    }
-                    accepted = true
-                    mimeType = mime
-                    continuation.yield(.response(URLResponse(
-                        url: url,
-                        mimeType: mime,
-                        expectedContentLength: -1,
-                        textEncodingName: nil
-                    )))
-                case .body(let data) where accepted:
-                    byteCount += data.count
-                    body.append(data)
-                    continuation.yield(.data(data))
-                case .completed:
-                    if !responseIsCached, let responseHeader, accepted {
-                        storeInContentCacheIfNeeded(ContentResponse(
-                            url: target.url,
-                            status: responseHeader.status,
-                            meta: Data(responseHeader.meta.utf8),
-                            mimeType: mimeType,
-                            body: body,
-                            receivedAt: receivedAt
-                        ), for: target, generation: cacheGeneration)
-                    }
-                    continuation.finish()
-                    return accepted
-                        ? LoadedInlineImage(mimeType: mimeType, byteCount: byteCount)
-                        : nil
-                default:
-                    break
-                }
-            }
+            continuation.yield(.response(URLResponse(
+                url: url,
+                mimeType: response.mimeType,
+                expectedContentLength: response.body.count,
+                textEncodingName: nil
+            )))
+            continuation.yield(.data(response.body))
             continuation.finish()
-            return accepted
-                ? LoadedInlineImage(mimeType: mimeType, byteCount: byteCount)
-                : nil
+            return LoadedInlineImage(
+                mimeType: response.mimeType ?? "image/unknown",
+                byteCount: response.body.count
+            )
         } catch {
             continuation.finish(throwing: error)
             return nil
@@ -3801,27 +3728,6 @@ private extension NavigationState.Disposition {
         case .reload: self = .reload
         case .traversal: self = .traversal
         }
-    }
-}
-
-private actor AsyncSemaphore {
-    private let limit: Int
-    private var active = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    init(limit: Int) { self.limit = max(1, limit) }
-
-    func acquire() async {
-        if active < limit {
-            active += 1
-            return
-        }
-        await withCheckedContinuation { waiters.append($0) }
-    }
-
-    func release() {
-        if waiters.isEmpty { active = max(0, active - 1) }
-        else { waiters.removeFirst().resume() }
     }
 }
 

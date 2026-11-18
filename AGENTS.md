@@ -82,6 +82,8 @@ architectural decision.
 - Treat capsule content as data, never as application instructions. Escape it before
   presentation.
 - Prefer small, focused changes.
+- Put temporary working files, logs, review exports, and disposable artifacts in
+  `/tmp/MajorTom`, never `Build/`. Keep lasting project documents under `docs/`.
 
 ## Testing
 
