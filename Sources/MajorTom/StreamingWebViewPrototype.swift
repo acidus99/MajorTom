@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import Foundation
+import MajorTomAppKitSupport
 import MajorTomCore
 import os
 import SwiftUI
@@ -369,91 +370,6 @@ private enum InlineImagePresentationScript {
     )
 }
 
-/// Makes only multiline preformatted blocks collapsible.
-///
-/// The document itself contains no executable script. This runs in WebKit's isolated
-/// client world, outside capsule content and its CSP, and progressively enhances the
-/// native details/summary markup as streamed lines arrive.
-@available(macOS 26.0, *)
-@MainActor
-private enum PreformattedBlockPresentationScript {
-    static let userScript = WKUserScript(
-        source: """
-        (() => {
-          const enhance = (block) => {
-            if (!(block instanceof HTMLDetailsElement) || !block.matches('.pre-block')) { return; }
-            const pre = block.querySelector(':scope > pre');
-            if (!pre) { return; }
-            const multiline = block.querySelectorAll('.pre-line').length > 1;
-            block.classList.toggle('multiline', multiline);
-            if (multiline) {
-              pre.tabIndex = 0;
-              pre.setAttribute('role', 'button');
-              pre.setAttribute('aria-label', 'Collapse preformatted text');
-            } else {
-              pre.removeAttribute('tabindex');
-              pre.removeAttribute('role');
-              pre.removeAttribute('aria-label');
-            }
-          };
-
-          const containingBlocks = (node) => {
-            if (!(node instanceof Element)) { return []; }
-            const blocks = Array.from(node.querySelectorAll?.('.pre-block') || []);
-            const containing = node.closest?.('.pre-block');
-            if (containing) { blocks.push(containing); }
-            return blocks;
-          };
-
-          new MutationObserver((records) => {
-            const blocks = new Set();
-            for (const record of records) {
-              containingBlocks(record.target).forEach((block) => blocks.add(block));
-              for (const node of record.addedNodes) {
-                containingBlocks(node).forEach((block) => blocks.add(block));
-              }
-            }
-            blocks.forEach(enhance);
-          }).observe(document, { childList: true, subtree: true });
-
-          document.addEventListener('DOMContentLoaded', () => {
-            document.querySelectorAll('.pre-block').forEach(enhance);
-          });
-
-          const expandedMultilineBlockFor = (target) => {
-            const element = target instanceof Element ? target : target?.parentElement;
-            const pre = element?.closest('pre');
-            const block = pre?.parentElement;
-            return block?.matches('details.pre-block.multiline[open]') ? block : null;
-          };
-
-          const collapse = (block) => {
-            block.open = false;
-            block.querySelector(':scope > summary')?.focus({ preventScroll: true });
-          };
-
-          document.addEventListener('click', (event) => {
-            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) { return; }
-            const block = expandedMultilineBlockFor(event.target);
-            if (!block || !window.getSelection()?.isCollapsed) { return; }
-            collapse(block);
-          }, true);
-
-          document.addEventListener('keydown', (event) => {
-            if (event.key !== 'Enter' && event.key !== ' ') { return; }
-            const block = expandedMultilineBlockFor(event.target);
-            if (!block) { return; }
-            event.preventDefault();
-            collapse(block);
-          }, true);
-        })();
-        """,
-        injectionTime: .atDocumentStart,
-        forMainFrameOnly: true,
-        in: .defaultClient
-    )
-}
-
 @available(macOS 26.0, *)
 @MainActor
 private final class PreformattedBlockStateScriptHandler: NSObject, WKScriptMessageHandler {
@@ -463,8 +379,8 @@ private final class PreformattedBlockStateScriptHandler: NSObject, WKScriptMessa
         source: """
         (() => {
           const report = (block) => {
-            if (!(block instanceof HTMLDetailsElement) || !block.matches('.pre-block.multiline')) { return; }
-            const blocks = Array.from(document.querySelectorAll('.pre-block'));
+            if (!(block instanceof HTMLDetailsElement) || !block.matches('.preformatted.is-multiline')) { return; }
+            const blocks = Array.from(document.querySelectorAll('.preformatted'));
             const index = blocks.indexOf(block);
             if (index < 0) { return; }
             window.webkit.messageHandlers.\(name).postMessage({ index: index + 1, collapsed: !block.open });
@@ -563,7 +479,15 @@ final class BrowserModel: ObservableObject {
 
     @Published var locationText = "gemini://gemi.dev/"
     @Published private(set) var committedURL: URL?
-    @Published private(set) var isLoading = false
+    @Published private(set) var isLoading = false {
+        didSet {
+            if oldValue, !isLoading, themeNeedsANSIRefresh {
+                themeNeedsANSIRefresh = false
+                Task { @MainActor [weak self] in self?.contentThemeChanged() }
+            }
+        }
+    }
+    private var themeNeedsANSIRefresh = false
     @Published private(set) var statusText = "Ready"
     /// Destination of the link under the pointer, or focused by keyboard (spec 18.4).
     @Published private(set) var hoveredLinkURL: String?
@@ -624,16 +548,14 @@ final class BrowserModel: ObservableObject {
     private let router: BrowserNavigationRouter
     private let transport = GeminiTransport()
     private let settings = BrowserSettingsStore.shared
+    private let themes = ContentThemeStore.shared
     private let clientCertificates = ClientCertificateStore.shared
     private let trustPolicy = ServerTrustPolicy()
     private let trustStore: TrustedIdentityStore?
     private let contentCache = SharedContentCache.shared
     private let cacheDecider = GeminiCacheDecider()
-    /// Rebuilt per access rather than stored, so a document rendered after the reader
-    /// changes content theme resolves its ANSI colors against the new background.
-    private var renderer: HTMLDocumentStreamRenderer {
-        HTMLDocumentStreamRenderer(contentPalette: contentPalette)
-    }
+    /// One stateful renderer per active document; beginDocument installs its palette.
+    private var renderer = HTMLDocumentStreamRenderer()
     private var cancellables = Set<AnyCancellable>()
 
     private var navigationTask: Task<Void, Never>?
@@ -820,6 +742,9 @@ final class BrowserModel: ObservableObject {
         router.canOpenInApp = { [weak self] url in
             self?.canOpenInApp(url) ?? false
         }
+        themes.themeDidChange
+            .sink { [weak self] in self?.contentThemeChanged() }
+            .store(in: &cancellables)
         settings.preferencesDidChange
             .sink { [weak self] preferences in self?.preferencesChanged(to: preferences) }
             .store(in: &cancellables)
@@ -837,6 +762,16 @@ final class BrowserModel: ObservableObject {
         guard !hasStarted else { return }
         hasStarted = true
 
+        Task { @MainActor [weak self] in
+            await self?.themes.waitUntilReady()
+            // A location submitted while the first theme was resolving supersedes
+            // launch restoration. Never replace that newer navigation with the homepage.
+            guard let self, navigationTask == nil, activeWebDocumentURL == nil else { return }
+            startInitialNavigation()
+        }
+    }
+
+    private func startInitialNavigation() {
         if let committedURL, let cached = cachedPage(for: committedURL) {
             displayCachedPage(cached)
             return
@@ -1519,16 +1454,14 @@ final class BrowserModel: ObservableObject {
     private func renderSourceDocument(_ bytes: Data, at sourceURL: URL) {
         let source = String(decoding: bytes, as: UTF8.self)
         let continuation = beginDocument(at: sourceURL)
-        continuation.yield(renderer.documentStart(themeCSS: themeCSS, browserGenerated: true))
-        continuation.yield(Data(Self.sourceViewPrologue.utf8))
+        continuation.yield(renderer.documentStart(themeCSS: themeCSS, kind: .source, appearance: themeAppearance))
+        continuation.yield(Data(HTMLDocumentStreamRenderer.sourceStart.utf8))
 
         // Batch lines so a large source is a few dozen scheme-handler writes rather
         // than one per line, while still streaming.
         var batch = ""
         for line in SourceLineSplitter.lines(of: source) {
-            batch += "<div class=\"source-line\"><code>"
-                + HTMLDocumentStreamRenderer.escape(line)
-                + "</code></div>"
+            batch += HTMLDocumentStreamRenderer.sourceLine(line)
             if batch.utf8.count >= 32 * 1_024 {
                 continuation.yield(Data(batch.utf8))
                 batch = ""
@@ -1536,41 +1469,10 @@ final class BrowserModel: ObservableObject {
         }
         if !batch.isEmpty { continuation.yield(Data(batch.utf8)) }
 
-        continuation.yield(Data("</div>".utf8))
+        continuation.yield(Data(HTMLDocumentStreamRenderer.sourceEnd.utf8))
         continuation.yield(renderer.documentEnd())
         continuation.finish()
     }
-
-    /// Safari-style source gutter. The line number is generated content, so it is
-    /// never part of the selection and never lands in the clipboard, and a wrapped
-    /// long line keeps exactly one number.
-    private static let sourceViewPrologue = """
-    <style>
-    .source { counter-reset: source-line; margin-top: 1rem; }
-    .source-line { display: grid; grid-template-columns: 3.5rem 1fr; column-gap: 1rem; }
-    .source-line:hover { background: color-mix(in srgb, CanvasText 6%, transparent); }
-    .source-line::before {
-      counter-increment: source-line;
-      content: counter(source-line);
-      text-align: right;
-      color: SecondaryLabelColor;
-      font: .82rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-      padding: .05rem .75rem 0 0;
-      border-inline-end: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
-      -webkit-user-select: none;
-      user-select: none;
-    }
-    .source-line code {
-      font: .86rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
-      background: transparent;
-      padding: 0;
-      border-radius: 0;
-    }
-    </style>
-    <p class="eyebrow">Page Source</p><div class="source">
-    """
 
     func savePage() async {
         guard canSavePage, let committedURL else { return }
@@ -1946,6 +1848,7 @@ final class BrowserModel: ObservableObject {
         renderAsSource: Bool = false,
         bypassesContentCache: Bool = false
     ) async {
+        await themes.waitUntilReady()
         guard !Task.isCancelled else { return }
         guard redirectCount <= 10, !visited.contains(target.url) else {
             showGeneratedPage(
@@ -2159,10 +2062,12 @@ final class BrowserModel: ObservableObject {
                         documentContinuation = continuation
                         continuation.yield(renderer.documentStart(
                             themeCSS: themeCSS,
-                            baseURL: target.url
+                            baseURL: target.url,
+                            kind: mimeType == "text/gemini" ? .gemtext : .plainText,
+                            appearance: themeAppearance
                         ))
                         if mimeType != "text/gemini" {
-                            continuation.yield(Data("<pre><code>".utf8))
+                            continuation.yield(renderer.beginPlainText())
                         }
                         commit(target.url, disposition: disposition)
                         contentStarted = true
@@ -2184,7 +2089,7 @@ final class BrowserModel: ObservableObject {
                         flushDocument()
                     } else if mimeType.hasPrefix("text/") {
                         let decoded = utf8Decoder.decode(data)
-                        yieldToDocument(Data(HTMLDocumentStreamRenderer.escape(decoded).utf8))
+                        yieldToDocument(renderer.renderPlainTextChunk(decoded))
                         flushDocument()
                     }
 
@@ -2232,8 +2137,8 @@ final class BrowserModel: ObservableObject {
                         finishCurrentDocument()
                     } else if mimeType.hasPrefix("text/") {
                         displayedSuccessfulContent = true
-                        yieldToDocument(Data(HTMLDocumentStreamRenderer.escape(utf8Decoder.finish()).utf8))
-                        yieldToDocument(Data("</code></pre>".utf8))
+                        yieldToDocument(renderer.renderPlainTextChunk(utf8Decoder.finish()))
+                        yieldToDocument(renderer.endPlainText())
                         finishCurrentDocument()
                     } else if mimeType.hasPrefix("image/") {
                         displayedSuccessfulContent = true
@@ -2454,6 +2359,7 @@ final class BrowserModel: ObservableObject {
             "beginDocument source=\(sourceURL.absoluteString, privacy: .public) replacing=\(self.activeWebDocumentURL?.absoluteString ?? "nil", privacy: .public) modelIndex=\(self.navigation.historyIndex)"
         )
         documentContinuation?.finish()
+        renderer = HTMLDocumentStreamRenderer(contentPalette: contentPalette)
         // Whatever was buffered belongs to the document just abandoned. Only a caller
         // that streams sets `documentContinuation` again; the one-shot pages that render
         // straight into their own continuation deliberately leave it nil.
@@ -2553,7 +2459,7 @@ final class BrowserModel: ObservableObject {
                 """
                 (() => {
                   const collapsed = new Set([\(indices)]);
-                  document.querySelectorAll('.pre-block').forEach((block, index) => {
+                  document.querySelectorAll('.preformatted').forEach((block, index) => {
                     if (collapsed.has(index + 1)) { block.open = false; }
                   });
                 })();
@@ -2637,15 +2543,10 @@ final class BrowserModel: ObservableObject {
         continuation.yield(renderer.documentStart(
             themeCSS: themeCSS,
             baseURL: url,
-            browserGenerated: true
+            kind: .message,
+            appearance: themeAppearance
         ))
-        let html = """
-        <p class="eyebrow">Major Tom</p>
-        <h1>\(HTMLDocumentStreamRenderer.escape(title))</h1>
-        <p>\(HTMLDocumentStreamRenderer.escape(message))</p>
-        <div class="details">\(HTMLDocumentStreamRenderer.escape(details))</div>
-        """
-        continuation.yield(Data(html.utf8))
+        continuation.yield(renderer.renderMessage(title: title, message: message, details: details))
         // Rendered through the ordinary link renderer, so it looks and behaves like any
         // other Gemtext link: the navigation decider handles the click with no extra
         // machinery, and it picks up the usual hint glyph.
@@ -2678,23 +2579,9 @@ final class BrowserModel: ObservableObject {
         disposition: HistoryDisposition
     ) {
         let continuation = beginDocument(at: url)
-        continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: url))
-        let source = "data:\(HTMLDocumentStreamRenderer.escapeAttribute(mimeType));base64,\(data.base64EncodedString())"
-        let imageDocument = """
-        <style>
-        body { height: 100vh; box-sizing: border-box; overflow: hidden; }
-        main { box-sizing: border-box; max-width: none; height: 100%; padding: 0; }
-        .image-toggle { position: absolute; opacity: 0; pointer-events: none; }
-        .image-frame { display: flex; box-sizing: border-box; width: 100%; height: 100%; align-items: center; justify-content: center; overflow: hidden; cursor: zoom-in; }
-        .image-frame img { display: block; max-width: 100%; max-height: 100%; width: auto; height: auto; margin: 0; border-radius: 0; }
-        .image-toggle:focus-visible + .image-frame { outline: 3px solid AccentColor; outline-offset: -3px; }
-        .image-toggle:checked + .image-frame { display: block; overflow: auto; cursor: zoom-out; }
-        .image-toggle:checked + .image-frame img { max-width: none; max-height: none; }
-        </style>
-        <input class="image-toggle" type="checkbox" id="image-size" aria-label="Show image at natural size">
-        <label class="image-frame" for="image-size"><img alt="" src="\(source)"></label>
-        """
-        continuation.yield(Data(imageDocument.utf8))
+        continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: url, kind: .image, appearance: themeAppearance))
+        let source = URL(string: "data:\(mimeType);base64,\(data.base64EncodedString())")!
+        continuation.yield(renderer.renderStandaloneImage(source: source))
         continuation.yield(renderer.documentEnd())
         continuation.finish()
         commit(url, disposition: disposition)
@@ -2922,31 +2809,43 @@ final class BrowserModel: ObservableObject {
         return error.localizedDescription
     }
 
-    private var effectiveDarkAppearance: Bool {
-        NSApplication.shared.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+    private var contentPalette: ContentThemePalette {
+        themes.resolved?.palette ?? .fallback
     }
 
-    private var contentPalette: ContentThemePalette {
-        settings.preferences.contentTheme.palette(effectiveDarkAppearance: effectiveDarkAppearance)
+    private var themeAppearance: ContentThemeAppearance {
+        themes.resolved?.appearance ?? .dark
     }
 
     private var themeCSS: String {
-        var theme = settings.preferences.contentTheme.css(
-            effectiveDarkAppearance: effectiveDarkAppearance
-        )
-        if settings.preferences.renderingOptions.collapsesConsecutiveQuotes {
-            theme += HTMLDocumentStreamRenderer.collapsedQuotesCSS
-        }
+        var theme = themes.resolved?.css ?? ContentThemeStylesheets.base + ContentThemeStylesheets.print
         // This style arrives in the document's first HTML chunk, before WebKit can paint
         // its initial y=0 layout. restoreScrollPosition reveals it only after the saved
         // offset has crossed the compositor boundary, avoiding a one-frame top flash.
         if pendingScrollRestoration?.historyIndex == navigation.historyIndex,
            (navigation.currentEntry?.presentation).map(Self.needsPresentationRestoration) == true {
-            theme += "\nhtml { visibility: hidden !important; }"
+            theme += """
+
+            /* A restored document remains hidden until its saved scroll offset is applied. */
+            html {
+              visibility: hidden !important;
+            }
+
+            """
         }
         theme += "\n" + settings.preferences.contentWidth.css
         // Screen-only zoom survives navigation without overriding print's 100% scale.
-        return theme + "\n@media screen { :root { zoom: \(pageZoom); } }"
+        return theme + """
+
+        /* Screen zoom follows the reader's setting while printing stays at its own scale. */
+        @media screen {
+          /* Apply zoom to the complete document. */
+          :root {
+            zoom: \(pageZoom);
+          }
+        }
+
+        """
     }
 
     private func preferencesChanged(to preferences: BrowserPreferences) {
@@ -2967,17 +2866,8 @@ final class BrowserModel: ObservableObject {
 
         guard committedURL != nil else { return }
 
-        if preferences.contentTheme != lastPreferences.contentTheme
-            || preferences.contentWidth != lastPreferences.contentWidth {
-            // An ANSI foreground is resolved against the theme background while the
-            // document is built and written into the markup as an inline color, so a
-            // document carrying one needs rendering again rather than a new stylesheet.
-            if preferences.contentTheme != lastPreferences.contentTheme,
-               usesANSIColors(with: preferences) {
-                renderCurrentContent()
-            } else {
-                applyThemeWithoutReload()
-            }
+        if preferences.contentWidth != lastPreferences.contentWidth {
+            applyThemeWithoutReload()
             return
         }
 
@@ -2988,6 +2878,20 @@ final class BrowserModel: ObservableObject {
             || preferences.automaticallyLoadsDataImages != lastPreferences.automaticallyLoadsDataImages
         guard renderingChanged, !isLoading else { return }
         renderCurrentContent()
+    }
+
+    private func contentThemeChanged() {
+        guard committedURL != nil else { return }
+        if isLoading {
+            // Finish the current stream before rebuilding ANSI runs from source bytes.
+            themeNeedsANSIRefresh = true
+            applyThemeWithoutReload()
+        } else if usesANSIColors(with: settings.preferences) {
+            prepareScrollRestoration(for: navigation.historyIndex)
+            renderCurrentContent()
+        } else {
+            applyThemeWithoutReload()
+        }
     }
 
     /// Whether the document on screen may have ANSI colors baked into it.
@@ -3005,12 +2909,14 @@ final class BrowserModel: ObservableObject {
 
     private func applyThemeWithoutReload() {
         let css = themeCSS
+        let appearance = themeAppearance.rawValue
         guard let cssData = try? JSONEncoder().encode(css),
               let cssLiteral = String(data: cssData, encoding: .utf8) else { return }
         Task {
             _ = try? await page.callJavaScript(
                 """
                 const theme = document.getElementById('majortom-theme');
+                document.documentElement.dataset.appearance = '\(appearance)';
                 if (theme) { theme.textContent = \(cssLiteral); }
                 """
             )
@@ -3039,15 +2945,15 @@ final class BrowserModel: ObservableObject {
             // Set once, before emitting: `emit` writes through this property, and
             // reassigning it inside the loop was routing rather than expressing state.
             documentContinuation = continuation
-            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: committedURL))
+            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: committedURL, appearance: themeAppearance))
             for event in events {
                 emit(event, baseURL: committedURL)
             }
             finishCurrentDocument()
         } else if currentMIMEType.hasPrefix("text/") {
             let continuation = beginDocument(at: committedURL)
-            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: committedURL))
-            continuation.yield(Data("<pre><code>\(HTMLDocumentStreamRenderer.escape(String(decoding: currentSourceBytes, as: UTF8.self)))</code></pre>".utf8))
+            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: committedURL, kind: .plainText, appearance: themeAppearance))
+            continuation.yield(renderer.renderPlainText(String(decoding: currentSourceBytes, as: UTF8.self)))
             continuation.yield(renderer.documentEnd())
             continuation.finish()
         } else if currentMIMEType.hasPrefix("image/") {
@@ -3074,7 +2980,7 @@ final class BrowserModel: ObservableObject {
             """
             (() => {
               const collapsed = new Set([\(collapsed)]);
-              document.querySelectorAll('.pre-block').forEach((block, index) => {
+              document.querySelectorAll('.preformatted').forEach((block, index) => {
                 if (collapsed.has(index + 1)) { block.open = false; }
               });
               window.scrollTo(0, \(entry.presentation.scrollY));
@@ -3084,14 +2990,15 @@ final class BrowserModel: ObservableObject {
     }
 
     private func historySwipeDocument(_ cached: CachedPage?, entry: BackForwardEntry) -> Data {
-        let renderer = HTMLDocumentStreamRenderer()
+        let renderer = HTMLDocumentStreamRenderer(contentPalette: contentPalette)
         guard let cached else {
             var document = renderer.documentStart(
                 themeCSS: themeCSS,
                 baseURL: entry.url,
-                browserGenerated: true
+                kind: .history,
+                appearance: themeAppearance
             )
-            document.append(Data("<p class=\"eyebrow\">History</p><h1>\(HTMLDocumentStreamRenderer.escape(entry.title ?? displayTitle(for: entry.url)))</h1>".utf8))
+            document.append(Data("<h1>\(HTMLDocumentStreamRenderer.escape(entry.title ?? displayTitle(for: entry.url)))</h1>".utf8))
             document.append(renderer.documentEnd())
             return document
         }
@@ -3099,18 +3006,17 @@ final class BrowserModel: ObservableObject {
         var document = renderer.documentStart(
             themeCSS: themeCSS,
             baseURL: cached.url,
-            browserGenerated: ViewSourceURL.isViewSource(cached.url)
+            kind: ViewSourceURL.isViewSource(cached.url) ? .source
+                : cached.mimeType.hasPrefix("image/") ? .image
+                : cached.mimeType == "text/gemini" ? .gemtext : .plainText,
+            appearance: themeAppearance
         )
         if ViewSourceURL.isViewSource(cached.url) {
-            document.append(Data(Self.sourceViewPrologue.utf8))
+            document.append(Data(HTMLDocumentStreamRenderer.sourceStart.utf8))
             for line in SourceLineSplitter.lines(of: String(decoding: cached.body, as: UTF8.self)) {
-                document.append(Data(
-                    ("<div class=\"source-line\"><code>"
-                        + HTMLDocumentStreamRenderer.escape(line)
-                        + "</code></div>").utf8
-                ))
+                document.append(Data(HTMLDocumentStreamRenderer.sourceLine(line).utf8))
             }
-            document.append(Data("</div>".utf8))
+            document.append(Data(HTMLDocumentStreamRenderer.sourceEnd.utf8))
         } else if cached.mimeType == "text/gemini" {
             var decoder = IncrementalUTF8Decoder()
             var parser = IncrementalGemtextParser()
@@ -3123,13 +3029,12 @@ final class BrowserModel: ObservableObject {
                 ))
             }
         } else if cached.mimeType.hasPrefix("text/") {
-            let text = HTMLDocumentStreamRenderer.escape(String(decoding: cached.body, as: UTF8.self))
-            document.append(Data("<pre><code>\(text)</code></pre>".utf8))
+            document.append(renderer.renderPlainText(String(decoding: cached.body, as: UTF8.self)))
         } else if cached.mimeType.hasPrefix("image/") {
-            let source = "data:\(HTMLDocumentStreamRenderer.escapeAttribute(cached.mimeType));base64,\(cached.body.base64EncodedString())"
-            document.append(Data("<img alt=\"\" src=\"\(source)\">".utf8))
+            let source = URL(string: "data:\(cached.mimeType);base64,\(cached.body.base64EncodedString())")!
+            document.append(renderer.renderStandaloneImage(source: source))
         } else {
-            document.append(Data("<p class=\"eyebrow\">History</p><h1>\(HTMLDocumentStreamRenderer.escape(entry.title ?? displayTitle(for: entry.url)))</h1>".utf8))
+            document.append(Data("<h1>\(HTMLDocumentStreamRenderer.escape(entry.title ?? displayTitle(for: entry.url)))</h1>".utf8))
         }
         document.append(renderer.documentEnd())
         return document
@@ -3375,14 +3280,14 @@ final class BrowserModel: ObservableObject {
             altText: fileName,
             figureIdentifier: figureIdentifier,
             fileName: fileName,
-            figureClass: "mt-inline"
+            figureClass: "inline-image"
         ), as: UTF8.self)
         await runScript("""
         (() => {
           const line = document.getElementById(\(jsLiteral(lineIdentifier)));
           if (!line) { return; }
-          line.classList.add('mt-loading');
-          if (!line.nextElementSibling?.classList.contains('mt-inline')) {
+          line.classList.add('is-loading');
+          if (!line.nextElementSibling?.classList.contains('inline-image')) {
             line.insertAdjacentHTML('afterend', \(jsLiteral(figure)));
           }
         })();
@@ -3394,9 +3299,9 @@ final class BrowserModel: ObservableObject {
         (() => {
           const line = document.getElementById(\(jsLiteral(lineIdentifier)));
           if (!line) { return; }
-          line.classList.remove('mt-loading');
+          line.classList.remove('is-loading');
           const figure = line.nextElementSibling;
-          if (figure?.classList.contains('mt-inline')) { figure.remove(); }
+          if (figure?.classList.contains('inline-image')) { figure.remove(); }
         })();
         """)
     }
@@ -3404,7 +3309,7 @@ final class BrowserModel: ObservableObject {
     private func setLineLoading(lineIdentifier: String, isLoading: Bool) async {
         let method = isLoading ? "add" : "remove"
         await runScript(
-            "document.getElementById(\(jsLiteral(lineIdentifier)))?.classList.\(method)('mt-loading');"
+            "document.getElementById(\(jsLiteral(lineIdentifier)))?.classList.\(method)('is-loading');"
         )
     }
 

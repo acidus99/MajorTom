@@ -2042,6 +2042,7 @@ private struct BrowserTabView: View {
     let focusesLocationOnPresentation: Bool
     @ObservedObject private var bookmarks = BookmarksModel.shared
     @ObservedObject private var settings = BrowserSettingsStore.shared
+    @ObservedObject private var themes = ContentThemeStore.shared
     @ObservedObject private var clientCertificates = ClientCertificateStore.shared
     @FocusState private var locationIsFocused: Bool
     @State private var showsFind = false
@@ -2443,13 +2444,7 @@ private struct BrowserTabView: View {
     }
 
     private var contentThemeBackground: Color {
-        let theme = settings.preferences.contentTheme
-        let effectiveDarkAppearance = NSApplication.shared.effectiveAppearance.bestMatch(
-            from: [.darkAqua, .aqua]
-        ) == .darkAqua
-        let background = theme.palette(
-            effectiveDarkAppearance: effectiveDarkAppearance
-        ).background
+        guard let background = themes.resolved?.palette.background else { return Color(nsColor: .textBackgroundColor) }
         return Color(
             red: Double(background.red) / 255,
             green: Double(background.green) / 255,

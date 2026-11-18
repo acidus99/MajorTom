@@ -192,7 +192,7 @@ final class CloudSyncModelTests: XCTestCase {
             preferences: BrowserPreferences(
                 homepage: "gemini://remote.example/",
                 applicationAppearance: .dark,
-                contentTheme: .ocean,
+                darkContentTheme: "ocean",
                 contentWidth: .full,
                 proxy: GeminiProxyConfiguration(host: "remote-proxy", port: 1_994),
                 showsFavoritesBar: false
@@ -202,7 +202,7 @@ final class CloudSyncModelTests: XCTestCase {
         let local = BrowserPreferences(
             homepage: "gemini://local.example/",
             applicationAppearance: .light,
-            contentTheme: .creamsicle,
+            lightContentTheme: "creamsicle",
             contentWidth: .wide,
             proxy: GeminiProxyConfiguration(host: "localhost", port: 1_965),
             showsFavoritesBar: true
@@ -213,7 +213,9 @@ final class CloudSyncModelTests: XCTestCase {
         XCTAssertEqual(applied.homepage, "gemini://remote.example/")
         XCTAssertEqual(applied.applicationAppearance, .light)
         // Prevent a remote width edit from also changing this Mac's reading theme.
-        XCTAssertEqual(applied.contentTheme, local.contentTheme)
+        XCTAssertEqual(applied.contentAppearance, local.contentAppearance)
+        XCTAssertEqual(applied.lightContentTheme, local.lightContentTheme)
+        XCTAssertEqual(applied.darkContentTheme, local.darkContentTheme)
         XCTAssertEqual(applied.contentWidth, local.contentWidth)
         XCTAssertEqual(applied.proxy, GeminiProxyConfiguration(host: "localhost", port: 1_965))
         XCTAssertTrue(applied.showsFavoritesBar)
@@ -227,7 +229,7 @@ final class CloudSyncModelTests: XCTestCase {
         let legacy = LegacyPayload(
             preferences: BrowserPreferences(
                 homepage: "gemini://legacy.example/",
-                contentTheme: .ocean,
+                darkContentTheme: "ocean",
                 contentWidth: .full,
                 proxy: GeminiProxyConfiguration(host: "legacy-proxy", port: 1_994)
             ),
@@ -238,7 +240,7 @@ final class CloudSyncModelTests: XCTestCase {
             from: JSONEncoder().encode(legacy)
         )
         let local = BrowserPreferences(
-            contentTheme: .sandDunes,
+            lightContentTheme: "sandDunes",
             contentWidth: .wide,
             proxy: GeminiProxyConfiguration(host: "this-mac", port: 1_965)
         )
@@ -246,7 +248,9 @@ final class CloudSyncModelTests: XCTestCase {
         let applied = decoded.applying(to: local)
         XCTAssertEqual(applied.homepage, "gemini://legacy.example/")
         XCTAssertEqual(applied.proxy?.host, "this-mac")
-        XCTAssertEqual(applied.contentTheme, local.contentTheme)
+        XCTAssertEqual(applied.contentAppearance, local.contentAppearance)
+        XCTAssertEqual(applied.lightContentTheme, local.lightContentTheme)
+        XCTAssertEqual(applied.darkContentTheme, local.darkContentTheme)
         XCTAssertEqual(applied.contentWidth, local.contentWidth)
     }
 
@@ -277,7 +281,9 @@ final class CloudSyncModelTests: XCTestCase {
         let original = BrowserPreferences()
         var changed = original
         changed.applicationAppearance = .dark
-        changed.contentTheme = .sandDunes
+        changed.contentAppearance = .system
+        changed.lightContentTheme = "sandDunes"
+        changed.darkContentTheme = "custom:Evening.css"
         changed.contentWidth = .full
         changed.proxy = GeminiProxyConfiguration(host: "local-proxy", port: 1_994)
         changed.showsFavoritesBar.toggle()
@@ -294,15 +300,17 @@ final class CloudSyncModelTests: XCTestCase {
         var payload = try XCTUnwrap(JSONSerialization.jsonObject(
             with: JSONEncoder().encode(remote)) as? [String: Any])
         var values = try XCTUnwrap(payload["values"] as? [String: Any])
-        values["contentTheme"] = ContentTheme.ocean.rawValue
+        values["contentTheme"] = "ocean"
         values["contentWidth"] = ContentWidth.full.rawValue
         payload["values"] = values
         let decoded = try JSONDecoder().decode(SyncedBrowserPreferences.self,
             from: JSONSerialization.data(withJSONObject: payload))
-        let local = BrowserPreferences(contentTheme: .sandDunes, contentWidth: .wide)
+        let local = BrowserPreferences(lightContentTheme: "sandDunes", contentWidth: .wide)
         let applied = decoded.applying(to: local)
         XCTAssertEqual(applied.homepage, remote.values.homepage)
-        XCTAssertEqual(applied.contentTheme, local.contentTheme)
+        XCTAssertEqual(applied.contentAppearance, local.contentAppearance)
+        XCTAssertEqual(applied.lightContentTheme, local.lightContentTheme)
+        XCTAssertEqual(applied.darkContentTheme, local.darkContentTheme)
         XCTAssertEqual(applied.contentWidth, local.contentWidth)
     }
 

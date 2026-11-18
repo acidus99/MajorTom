@@ -4,7 +4,7 @@ Functionality:
 	French test page: gemini://ploum.net/2026-08-03-offpunk_manifesto.gmi
 	Always Translate Content option?
 	
-* Themes as CSS. User supplied themes
+* CSS theme management: import, duplicate, and live sample previews (file-based themes implemented).
 
 * More Tabs
 	Safari has a ton of option on close tab, close tab to the right, close all other tabs, etc

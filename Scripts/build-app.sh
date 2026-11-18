@@ -53,6 +53,9 @@ executable="$project_root/.build/$swift_configuration/MajorTom"
 rm -rf "$app" "$legacy_app"
 mkdir -p "$contents/MacOS" "$contents/Resources"
 cp "$executable" "$contents/MacOS/MajorTom"
+# SwiftPM's generated resource accessor searches beside the executable and at the
+# main bundle's resource root. Ship the CSS resource bundle in the latter location.
+cp -R "$project_root/.build/$swift_configuration/MajorTom_MajorTomCore.bundle" "$contents/Resources/"
 cp "$project_root/Resources/Info.plist" "$contents/Info.plist"
 cp "$project_root/Resources/AppIcon.icns" "$contents/Resources/AppIcon.icns"
 cp "$project_root/Resources/funpack.dat" "$contents/Resources/funpack.dat"

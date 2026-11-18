@@ -1,0 +1,105 @@
+/* Printed documents use an economical light palette. */
+@media print {
+  /* Print colors and typography replace the selected screen palette. */
+  :root {
+    --background: #ffffff;
+    --foreground: #000000;
+    --surface: #f2f2f2;
+    --caption: #444444;
+    --quote-border: #777777;
+    color-scheme: light;
+    font-size: 11pt;
+    zoom: 1 !important;
+  }
+
+  /* Printed pages have no native navigation inset or dark document canvas. */
+  body {
+    padding-top: 0 !important;
+    color: var(--foreground) !important;
+    background: var(--background) !important;
+  }
+
+  /* The reading column expands to the printable page width. */
+  main {
+    max-width: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  /* Headings, emphasis, links, and code remain dark on paper. */
+  h1, h2, h3, a, strong, em, code, pre, blockquote {
+    color: var(--foreground) !important;
+  }
+
+  /* Printed links remain distinguishable through their underline. */
+  a {
+    text-decoration: underline;
+  }
+
+  /* Quotations keep a neutral border and an unfilled background. */
+  blockquote {
+    border-color: var(--quote-border) !important;
+    background: transparent !important;
+  }
+
+  /* Code and technical details use a light surface. */
+  pre, code {
+    background: var(--surface) !important;
+  }
+
+  /* ANSI-styled runs use ordinary ink without their authored screen backgrounds. */
+  pre > span {
+    color: var(--foreground) !important;
+    background: transparent !important;
+  }
+
+  /* Native list bullets print in the ordinary text color. */
+  ul > li::marker {
+    color: var(--foreground) !important;
+  }
+
+  /* Captions, source line numbers, and decorative link hints use supporting ink. */
+  figcaption, .source-lines > li::marker, .link-hint {
+    color: var(--caption) !important;
+  }
+
+  /* Preformatted disclosure captions are unnecessary when all text is printed. */
+  .preformatted > summary {
+    display: none !important;
+  }
+
+  /* Collapsed preformatted text is included in the printed document. */
+  .preformatted:not([open]) > pre {
+    display: block !important;
+  }
+
+  /* Headings stay with the content they introduce. */
+  h1, h2, h3 {
+    break-after: avoid-page;
+  }
+
+  /* Short quotations, figures, and preformatted blocks stay together when possible. */
+  pre, blockquote, figure {
+    break-inside: avoid-page;
+  }
+
+  /* A wrapped source line stays on one printed page. */
+  .source-lines > li {
+    break-inside: avoid-page;
+  }
+
+  /* Source hover highlighting has no printed meaning. */
+  .source-lines > li:hover {
+    background: transparent !important;
+  }
+
+  /* Incomplete-response notices use a neutral printed border. */
+  .incomplete {
+    border-color: var(--quote-border) !important;
+  }
+}
+
+/* Page margins leave room around the printed document. */
+@page {
+  margin: 0.65in;
+}

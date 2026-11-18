@@ -168,7 +168,7 @@ public struct ResolvedANSIStyle: Equatable, Sendable {
 /// Turns the ANSI attributes an author wrote into colors that stay readable on the
 /// reader's own content theme.
 ///
-/// Two rules do the work, both taken from Lagrange:
+/// Two rules preserve readable authored colors:
 ///
 /// - A foreground is adapted to the theme background, so a capsule cannot produce
 ///   text the reader cannot see.

@@ -27,7 +27,26 @@ The unified address field accepts Gemini locations and searches. A submitted exp
 
 A location Major Tom is asked to open by the rest of the system opens the same way a location typed into the address field does: a `gemini://` link activated in another application, and a Gemtext or plain-text document opened from the Finder, each become a new selected tab of the frontmost window, or the first window when none is open. A launch caused by one of these shows it alongside any restored session rather than behind the homepage. Opening a location never creates a window the reader cannot see.
 
-Document themes are independent of application appearance. Dracula Dark is the default document theme. On first launch, Major Tom opens `gemini://gemi.dev/major-tom/` as its homepage.
+Document themes are independent of application appearance. Content appearance can be
+System, Light, or Dark, with separate light and dark theme selections. System follows
+macOS directly, independently of the application appearance setting. Dark content with
+Dracula Dark remains the default; the default light selection is Dracula Light. Existing
+fixed theme selections migrate without changing their appearance. Theme menus display
+the name followed by its supported appearance (Light, Dark, or Light and Dark).
+
+Themes are CSS files cascading over the bundled base stylesheet. Built-in themes remain
+inside the signed app bundle. Users can add UTF-8 `.css` files to the local Application
+Support Themes directory using Settings > Appearance > Open Custom Themes in Finder.
+The leading CSS comment must contain `@name` and `@appearance light`, `dark`, or `both`.
+Both-appearance themes are available in either picker; Major Tom supplies the selected
+content appearance to the stylesheet. New files and saved edits update the menus and
+open documents automatically, without fetching the capsule again. Invalid metadata or
+unreadable files are reported in Appearance settings; a missing or incompatible selection
+uses the corresponding default theme without forgetting the saved choice. Theme files
+and selections remain local. Import, duplication, and preview interfaces are deferred.
+See [Content themes](content-themes.md) for the authoring contract.
+
+On first launch, Major Tom opens `gemini://gemi.dev/major-tom/` as its homepage.
 
 When a visited capsule provides a valid favicon, its full-color emoji appears on the Page Information control and the tab. Without a favicon, the Page Information control uses the standard information-in-a-circle symbol. Major Tom remembers both valid favicons and confirmed absence for 30 days; failed or interrupted favicon checks are tried again later.
 
@@ -54,6 +73,28 @@ A qualifying two-finger swipe moves exactly one history entry, follows the reade
 ## Progressive, faithful content
 
 Major Tom begins presenting safe displayable content while it is still arriving. Readers can select, scroll, and use already available links without disruptive layout or scroll jumps. Partial, stopped, and failed responses remain distinguishable from complete content.
+
+Gemtext lists use native unordered lists and browser-supplied markers. With consecutive
+quotation grouping enabled, a quotation uses one blockquote with paragraphs separated by
+empty quoted lines. Blank Gemtext lines separate content groups and retain their visible spacing through
+ordinary line breaks, without hidden spacer elements. Preformatted art is direct preformatted text; ANSI styling uses spans only for
+styled runs. Inline emphasis retains the original markers inside semantic emphasis/code
+elements. View Source presents the original escaped lines in a native numbered list.
+
+Default content typography uses the 16-pixel macOS system font (San Francisco) with 1.4 line spacing,
+32/28/22-pixel H1/H2/H3 headings, and a 24-pixel top inset below navigation at 100% zoom.
+H2 headings use semibold weight (600).
+Source blank lines provide their full line-by-line separation. Headings, quotations,
+and preformatted blocks add modest spacing only when directly adjacent to other content
+without a source blank line; those gaps never stack with explicit blank-line spacing.
+The default reading column is 60ch wide with responsive side gutters. Wide uses 80ch,
+and Full fills the window. Reading-width choices continue to apply independently of themes. Preformatted text uses the macOS system monospace font (SF Mono),
+with system fallback for unsupported characters, at 14 pixels with 1.4 line spacing.
+Themes can override these CSS defaults through shared typography and width variables.
+Bundled themes keep captions and source numbers at a minimum 4.5:1 contrast, including
+source-line hover surfaces. Dracula Classic retains the official palette; its readable
+captions blend the foreground and comment colors instead of using the low-contrast comment
+color directly.
 
 Gemtext receives a polished semantic reading presentation. Other text remains selectable and faithful to its line structure; images display directly; unsupported content explains what happened and offers appropriate user-initiated actions.
 

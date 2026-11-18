@@ -232,9 +232,8 @@ public struct ANSITextRun: Equatable, Sendable {
 /// Deliberately not a terminal emulator. A Gemini response is a static document, so
 /// there is no cursor for a movement or erase sequence to act on; those sequences are
 /// recognized only well enough to be removed from the text. Attributes do not carry
-/// across lines either — each call starts from the default style, which is both what
-/// Lagrange does and what ANSI art needs, because authors set the color afresh on
-/// every line rather than trusting a client to hold state.
+/// across lines either: each call starts from the default style, keeping each line
+/// independent when authors set its colors explicitly.
 public enum ANSISGRParser {
     private static let escape: Unicode.Scalar = "\u{1B}"
 

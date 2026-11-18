@@ -1,0 +1,487 @@
+/* Default document colors, with related roles inheriting from the main palette. */
+:root {
+  --background: Canvas;
+  --foreground: CanvasText;
+  --surface: color-mix(in srgb, var(--foreground) 8%, var(--background));
+  --muted: GrayText;
+  --accent: AccentColor;
+  --heading: var(--foreground);
+  --link: LinkText;
+  --link-hover: var(--link);
+  --strong: var(--foreground);
+  --emphasis: var(--foreground);
+  --code: var(--foreground);
+  --caption: color-mix(in srgb, var(--foreground) 40%, var(--muted));
+  --list-marker: var(--accent);
+  --blockquote: var(--foreground);
+  --quote-border: var(--accent);
+  --quote-surface: transparent;
+  --selection: Highlight;
+  --selection-foreground: HighlightText;
+  --danger: var(--accent);
+
+  /* Shared typography: themes can adjust these without replacing selector rules. */
+  --body-font: -apple-system, BlinkMacSystemFont, sans-serif;
+  --body-size: 16px;
+  --body-leading: 1.4;
+  --mono-font: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mono-size: 0.875rem;
+  --mono-leading: 1.4;
+  --h1-size: 2rem;
+  --h2-size: 1.75rem;
+  --h3-size: 1.375rem;
+  --heading-leading: 1.25;
+  --caption-size: 0.82rem;
+  --reading-width: 60ch;
+  --wide-reading-width: 80ch;
+  --page-gutter: clamp(1rem, 3vw, 2rem);
+
+  /* The system face follows macOS, independently of the content color theme. */
+  color-scheme: light dark;
+  font: var(--body-size) / var(--body-leading) var(--body-font);
+  --navigation-height: 7.25rem;
+  --quote-radius: 0;
+}
+
+/* Page layout */
+
+/* The document canvas extends beneath the app's native navigation controls. */
+body {
+  margin: 0;
+  padding-top: var(--navigation-height);
+  color: var(--foreground);
+  background: var(--background);
+}
+
+/* The reading column centers content and leaves comfortable page margins. */
+main {
+  box-sizing: border-box;
+  max-width: calc(var(--reading-width) + 2 * var(--page-gutter));
+  margin: 0 auto;
+  padding: 1.5rem var(--page-gutter) 4rem;
+  overflow-wrap: anywhere;
+}
+
+/* Selected text uses the theme's selection colors. */
+::selection {
+  color: var(--selection-foreground);
+  background: var(--selection);
+}
+
+/* Headings and paragraphs */
+
+/* Headings share compact line spacing; source blank lines supply their outer spacing. */
+h1, h2, h3 {
+  color: var(--heading);
+  line-height: var(--heading-leading);
+  margin: 0;
+}
+
+/* First-level headings establish the page's main sections. */
+h1 {
+  font-size: var(--h1-size);
+}
+
+/* Semibold second-level headings introduce subsections with a lighter visual weight. */
+h2 {
+  font-size: var(--h2-size);
+  font-weight: 600;
+}
+
+/* Third-level headings introduce smaller groups of content. */
+h3 {
+  font-size: var(--h3-size);
+}
+
+/* Headings following content without a source blank line still have a clear section gap. */
+main > :is(p, ul, blockquote, .preformatted, pre, figure) + :is(h1, h2, h3) {
+  margin-block-start: 0.75lh;
+}
+
+/* Adjacent headings remain distinct even in compactly authored Gemtext. */
+main > :is(h1, h2, h3) + :is(h1, h2, h3) {
+  margin-block-start: 0.5lh;
+}
+
+/* Text directly following a heading has a small gap; an intervening br supplies its own. */
+main > :is(h1, h2, h3) + :is(p, ul, blockquote, .preformatted, pre, figure) {
+  margin-block-start: 0.5lh;
+}
+
+/* Quotes and art get separation when the preceding content has no blank line. */
+main > :is(p, ul, blockquote, .preformatted, pre, figure) + :is(blockquote, .preformatted, pre) {
+  margin-block-start: 0.5lh;
+}
+
+/* Content following a quote or art has a gap unless a source break already separates it. */
+main > :is(blockquote, .preformatted, pre) + :is(p, ul, figure) {
+  margin-block-start: 0.5lh;
+}
+
+/* The first content block begins at the reading column's top padding. */
+main > :first-child {
+  margin-top: 0;
+}
+
+/* Consecutive text lines stay together; source blank lines already supply a break. */
+p {
+  margin: 0;
+}
+
+/* Strong emphasis retains the author's characters and uses the theme's strong color. */
+strong {
+  color: var(--strong);
+}
+
+/* Italic emphasis uses the theme's emphasis color. */
+em {
+  color: var(--emphasis);
+}
+
+/* Inline code has a monospace face and a small tinted background. */
+code {
+  color: var(--code);
+  font-family: var(--mono-font);
+  font-size: 0.92em;
+  background: var(--surface);
+  border-radius: 0.25rem;
+  padding: 0.08em 0.28em;
+}
+
+/* Links */
+
+/* Links use the theme's link color with a slightly separated underline. */
+a {
+  color: var(--link);
+  text-underline-offset: 0.15em;
+}
+
+/* Hovered and focused links use the theme's alternate link color. */
+a:hover, a:focus {
+  color: var(--link-hover);
+}
+
+/* Keyboard-focused links have a visible outline. */
+a:focus-visible {
+  outline: 2px solid var(--heading);
+  outline-offset: 2px;
+}
+
+/* Standalone Gemtext links have closer spacing than ordinary paragraphs. */
+.link-line {
+  margin: 0.15rem 0;
+}
+
+/* Links with a destination hint align their labels in a shared text column. */
+.link-line.has-hint {
+  display: grid;
+  grid-template-columns: 1.6rem minmax(0, 1fr);
+  align-items: baseline;
+}
+
+/* A link's hit area stops at its visible label rather than filling its grid cell. */
+.link-line.has-hint > a {
+  justify-self: start;
+  min-inline-size: 0;
+  max-inline-size: 100%;
+}
+
+/* Decorative destination hints stay outside text selection and VoiceOver reading. */
+.link-hint {
+  color: var(--caption);
+  font-size: 0.9em;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* A pending image expansion shows a spinner immediately after its link label. */
+.link-line.is-loading > a::after {
+  content: "";
+  display: inline-block;
+  width: 0.72em;
+  height: 0.72em;
+  margin-left: 0.45em;
+  border: 0.12em solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: image-loading 0.75s linear infinite;
+  vertical-align: -0.08em;
+}
+
+/* The image-loading indicator rotates while a linked image is being fetched. */
+@keyframes image-loading {
+  /* One full turn completes a spinner cycle. */
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Lists and quotations */
+
+/* Consecutive Gemtext list items form a native unordered list. */
+ul {
+  margin: 0;
+  padding-inline-start: 1.5rem;
+}
+
+/* Native list items follow the same line rhythm as consecutive text lines. */
+ul > li {
+  margin: 0;
+}
+
+/* The browser's own bullet marker uses the theme's marker color. */
+ul > li::marker {
+  color: var(--list-marker);
+}
+
+/* A quotation groups its paragraphs inside one border and optional tinted surface. */
+blockquote {
+  margin: 0;
+  padding: 0.25rem 0.75rem;
+  border-inline-start: 0.25rem solid var(--quote-border);
+  border-radius: var(--quote-radius);
+  color: var(--blockquote);
+  background: var(--quote-surface);
+  font-style: italic;
+}
+
+/* Quotation paragraphs need no extra space against the enclosing border. */
+blockquote > p:first-child {
+  margin-top: 0;
+}
+
+/* Empty source quote lines separate paragraphs by one ordinary text line. */
+blockquote > p + p {
+  margin-top: 1lh;
+}
+
+/* The last quotation paragraph meets the quotation's own bottom padding. */
+blockquote > p:last-child {
+  margin-bottom: 0;
+}
+
+/* Preformatted text */
+
+/* ASCII art and plain-text responses preserve their spaces and line endings. */
+pre {
+  overflow-x: auto;
+  overflow-wrap: normal;
+  margin: 0;
+  padding: 0.75rem;
+  border-radius: 0.4rem;
+  color: var(--foreground);
+  background: var(--surface);
+  font: var(--mono-size) / var(--mono-leading) var(--mono-font);
+  font-kerning: none;
+  font-variant-ligatures: none;
+  letter-spacing: 0;
+  tab-size: 8;
+}
+
+/* A preformatted disclosure groups its caption with the original text. */
+.preformatted {
+  margin: 0;
+}
+
+/* Collapsed preformatted blocks show their descriptive caption as a disclosure control. */
+.preformatted > summary {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.1rem 0;
+  color: var(--caption);
+  font-size: var(--caption-size);
+  cursor: pointer;
+  list-style: none;
+}
+
+/* Expanded preformatted blocks show the text instead of repeating its caption. */
+.preformatted[open] > summary {
+  display: none;
+}
+
+/* The caption supplies its own disclosure triangle in place of WebKit's marker. */
+.preformatted > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* A small triangle identifies the collapsed preformatted disclosure. */
+.preformatted > summary::before {
+  content: "\25B8";
+  font-size: 0.8em;
+  line-height: 1;
+}
+
+/* A fallback caption is italic when the capsule supplied no description. */
+.preformatted > summary.is-unlabelled {
+  font-style: italic;
+}
+
+/* Hovered preformatted captions use the ordinary text color. */
+.preformatted > summary:hover {
+  color: var(--foreground);
+}
+
+/* The disclosure supplies the outer margin for its preformatted text. */
+.preformatted > pre {
+  margin: 0;
+}
+
+/* Expanded multiline art indicates that a click can collapse the block. */
+.preformatted.is-multiline[open] > pre {
+  cursor: pointer;
+}
+
+/* Keyboard-focused multiline art has a visible collapse-control outline. */
+.preformatted.is-multiline[open] > pre:focus-visible {
+  outline: 3px solid var(--heading);
+  outline-offset: 2px;
+}
+
+/* Images */
+
+/* Images fit within the reading column while preserving their aspect ratio. */
+img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1rem 0;
+  border-radius: 0.5rem;
+}
+
+/* An inline image and its caption form one semantic figure. */
+figure {
+  margin: 1rem 0;
+}
+
+/* Linked figures keep their clickable area within the visible image. */
+figure > a {
+  display: inline-block;
+  max-width: 100%;
+}
+
+/* A figure's image leaves a small gap before its caption. */
+figure img {
+  margin-bottom: 0.35rem;
+}
+
+/* Image captions use smaller supporting text. */
+figcaption {
+  color: var(--caption);
+  font-size: var(--caption-size);
+}
+
+/* Messages and source views */
+
+/* An interrupted response ends with a status notice below the received content. */
+.incomplete {
+  margin-top: 2rem;
+  padding: 0.8rem 1rem;
+  border: 1px solid var(--danger);
+  border-radius: 0.6rem;
+}
+
+/* Browser-generated messages use a slightly narrower reading column. */
+.message-page > main {
+  max-width: 44rem;
+}
+
+/* Error headings use the danger color without affecting other page headings. */
+.message-page h1 {
+  color: var(--danger);
+}
+
+/* Technical error details preserve line breaks and wrap long addresses. */
+.message-details {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* View Source presents the original lines as a native numbered list. */
+.source-lines {
+  margin: 1rem 0;
+  padding-inline-start: 3.5rem;
+  font: var(--mono-size) / 1.5 var(--mono-font);
+}
+
+/* Source lines preserve whitespace, wrap long lines, and give empty lines their height. */
+.source-lines > li {
+  min-height: 1.5em;
+  padding-inline-start: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Native source line numbers use the theme's supporting text color. */
+.source-lines > li::marker {
+  color: var(--caption);
+}
+
+/* Hovering a source line highlights the line being inspected. */
+.source-lines > li:hover {
+  background: var(--surface);
+}
+
+/* Standalone image pages */
+
+/* An image document fills the viewport below the native navigation controls. */
+.image-page {
+  box-sizing: border-box;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* The standalone image's main region fills its available viewport. */
+.image-page > main {
+  max-width: none;
+  height: 100%;
+  padding: 0;
+}
+
+/* The native checkbox stores image zoom state while its label supplies the hit target. */
+.image-toggle {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* A fitted image is centered and offers a click to show its natural size. */
+.image-frame {
+  display: flex;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  cursor: zoom-in;
+}
+
+/* A standalone image fits the viewport without document-image margins or rounding. */
+.image-frame > img {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  margin: 0;
+  border-radius: 0;
+}
+
+/* Keyboard focus on the image zoom control outlines the visible image region. */
+.image-toggle:focus-visible + .image-frame {
+  outline: 3px solid var(--heading);
+  outline-offset: -3px;
+}
+
+/* At natural size, the image region scrolls and offers a click to fit again. */
+.image-toggle:checked + .image-frame {
+  display: block;
+  overflow: auto;
+  cursor: zoom-out;
+}
+
+/* Natural-size images are free of viewport fitting constraints. */
+.image-toggle:checked + .image-frame > img {
+  max-width: none;
+  max-height: none;
+}

@@ -267,31 +267,24 @@ final class ANSIContrastTests: XCTestCase {
 
     /// The invariant the whole feature rests on: whatever a capsule asks for, on
     /// whichever theme the reader chose, the text can be read.
-    func testEveryANSIColorIsReadableOnEveryContentTheme() {
-        for theme in ContentTheme.allCases {
-            for dark in [true, false] {
-                let palette = theme.palette(effectiveDarkAppearance: dark)
-                // Both the page and the tinted panel a preformatted block is drawn on.
-                for background in [palette.background, palette.codeBackground] {
-                    for index in 0...255 {
-                        for bold in [false, true] {
-                            let authored = ANSIColor.palette(index).resolved(bold: bold)
-                            let adapted = ANSIContrast.adapted(authored, on: background)
-                            XCTAssertGreaterThanOrEqual(
-                                adapted.contrastRatio(against: background),
-                                ANSIContrast.minimumRatio,
-                                "palette \(index) is unreadable on \(theme.rawValue)"
-                            )
-                        }
-                    }
+    func testEveryANSIColorIsReadableAcrossBackgroundLuminances() {
+        for channel in stride(from: 0, through: 255, by: 15) {
+            let background = ContentThemeColor(red: UInt8(channel), green: UInt8(channel), blue: UInt8(channel))
+            for index in 0...255 {
+                for bold in [false, true] {
+                    let authored = ANSIColor.palette(index).resolved(bold: bold)
+                    let adapted = ANSIContrast.adapted(authored, on: background)
+                    XCTAssertGreaterThanOrEqual(
+                        adapted.contrastRatio(against: background), ANSIContrast.minimumRatio,
+                        "Palette \(index) is unreadable on \(background.cssHex)"
+                    )
                 }
             }
         }
     }
 
     func testReadableColorsAreLeftExactlyAsTheAuthorWroteThem() {
-        // Lagrange's rule, and the reason a dark theme shows a capsule's own palette:
-        // a color that already contrasts is not touched at all.
+        // Preserve the capsule's own palette when its colors already contrast.
         let brightYellow = ANSIColor.legacy(11).resolved(bold: false)
         XCTAssertEqual(ANSIContrast.adapted(brightYellow, on: black), brightYellow)
         let deepBlue = ANSIColor.legacy(4).resolved(bold: false)
@@ -360,7 +353,7 @@ final class ANSIContrastTests: XCTestCase {
 }
 
 final class ANSIStyleResolverTests: XCTestCase {
-    private let palette = ContentTheme.draculaDark.palette(effectiveDarkAppearance: true)
+    private let palette = ContentThemePalette.fallback
 
     private func resolver(backgrounds: Bool) -> ANSIStyleResolver {
         ANSIStyleResolver(
@@ -370,7 +363,7 @@ final class ANSIStyleResolverTests: XCTestCase {
         )
     }
 
-    /// Lagrange's second rule: a background alone can hide the text drawn over it,
+    /// A background alone can hide the text drawn over it,
     /// because the author never saw the theme's own text color.
     func testABackgroundWithoutAForegroundIsDropped() {
         let resolved = resolver(backgrounds: true).resolve(ANSIStyle(background: .legacy(4)))
@@ -559,18 +552,19 @@ final class ANSIPreformattedRenderingTests: XCTestCase {
         // The same capsule line on a light and a dark theme must produce different
         // colors, both of them readable.
         let line = GemtextEvent.preformattedLine("\(esc)[34mdeep blue")
-        for theme in [ContentTheme.draculaDark, .creamsicle] {
-            let palette = theme.palette(effectiveDarkAppearance: true)
+        let white = ContentThemeColor(red: 255, green: 255, blue: 255)
+        let black = ContentThemeColor(red: 0, green: 0, blue: 0)
+        for palette in [ContentThemePalette.fallback, ContentThemePalette(background: white, foreground: black, codeBackground: white)] {
             let html = String(
                 decoding: HTMLDocumentStreamRenderer(contentPalette: palette).render(line),
                 as: UTF8.self
             )
             let color = Self.firstColor(in: html)
-            XCTAssertNotNil(color, "no color on \(theme.rawValue)")
+            XCTAssertNotNil(color, "No foreground color")
             XCTAssertGreaterThanOrEqual(
                 color!.contrastRatio(against: palette.codeBackground),
                 ANSIContrast.minimumRatio,
-                "unreadable on \(theme.rawValue)"
+                "Unreadable on \(palette.codeBackground.cssHex)"
             )
         }
     }

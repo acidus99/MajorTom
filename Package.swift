@@ -19,9 +19,10 @@ let package = Package(
             name: "MajorTomCore",
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift")
-            ]
+            ],
+            resources: [.copy("Resources/Base.css"), .copy("Resources/Print.css"), .copy("Resources/Themes")]
         ),
-        .target(name: "MajorTomAppKitSupport"),
+        .target(name: "MajorTomAppKitSupport", dependencies: ["MajorTomCore"]),
         .executableTarget(
             name: "MajorTom",
             dependencies: ["MajorTomCore", "MajorTomAppKitSupport"]
@@ -32,7 +33,7 @@ let package = Package(
         ),
         .testTarget(
             name: "MajorTomAppKitTests",
-            dependencies: ["MajorTomAppKitSupport"]
+            dependencies: ["MajorTomAppKitSupport", "MajorTomCore"]
         )
     ]
 )

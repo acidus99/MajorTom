@@ -6,6 +6,7 @@ import SwiftUI
 struct BrowserSettingsView: View {
     @ObservedObject private var store = BrowserSettingsStore.shared
     @ObservedObject private var cloud = ICloudSyncStore.shared
+    @ObservedObject private var themes = ContentThemeStore.shared
     @State private var faviconCacheCleared = false
     @State private var isDefaultGeminiBrowser = false
     @State private var defaultBrowserError: String?
@@ -126,14 +127,22 @@ struct BrowserSettingsView: View {
                 Text("Light").tag(ApplicationAppearance.light)
                 Text("Dark").tag(ApplicationAppearance.dark)
             }
-            Picker("Content theme", selection: store.binding(\.contentTheme)) {
-                Text("Dracula Light").tag(ContentTheme.draculaLight)
-                Text("Dracula Dark").tag(ContentTheme.draculaDark)
-                Text("Dracula Classic").tag(ContentTheme.draculaClassic)
-                Text("Ocean").tag(ContentTheme.ocean)
-                Text("Forest").tag(ContentTheme.forest)
-                Text("Creamsicle").tag(ContentTheme.creamsicle)
-                Text("Sand Dunes").tag(ContentTheme.sandDunes)
+            Picker("Content appearance", selection: store.binding(\.contentAppearance)) {
+                Text("System").tag(ContentAppearance.system)
+                Text("Light").tag(ContentAppearance.light)
+                Text("Dark").tag(ContentAppearance.dark)
+            }
+            .help("Choose whether content uses the light theme, the dark theme, or follows macOS appearance.")
+            contentThemePicker("Light content theme", appearance: .light, selection: \.lightContentTheme)
+            contentThemePicker("Dark content theme", appearance: .dark, selection: \.darkContentTheme)
+            Button("Open Custom Themes in Finder") { themes.openCustomThemesInFinder() }
+                .help("Open the folder for custom CSS themes. Saved changes apply automatically.")
+            if let error = themes.error {
+                Text(error)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .help(error)
             }
             Picker("Content width", selection: store.binding(\.contentWidth)) {
                 Text("Narrow").tag(ContentWidth.narrow)
@@ -145,6 +154,23 @@ struct BrowserSettingsView: View {
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
+    }
+
+    private func contentThemePicker(
+        _ title: String, appearance: ContentThemeAppearance,
+        selection: WritableKeyPath<BrowserPreferences, String>
+    ) -> some View {
+        let available = themes.themes.filter { $0.appearance.supports(appearance) }
+        let selected = store.preferences[keyPath: selection]
+        return Picker(title, selection: store.binding(selection)) {
+            ForEach(available) { theme in
+                Text(theme.label).tag(theme.id)
+            }
+            if !available.contains(where: { $0.id == selected }) {
+                Text("Unavailable Theme (Using Dracula \(appearance.label))").tag(selected)
+            }
+        }
+        .help("Select the theme for \(appearance.label.lowercased()) content. Each name shows its supported appearances.")
     }
 
     private var networking: some View {

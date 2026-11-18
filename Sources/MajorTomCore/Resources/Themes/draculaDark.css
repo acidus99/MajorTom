@@ -1,0 +1,15 @@
+/*
+@name Dracula Dark
+@appearance dark
+*/
+
+/* Document colors and component roles supplied by this theme. */
+:root {
+  --background: #282a36;
+  --foreground: #f8f8f2;
+  --muted: #6272a4;
+  --accent: #bd93f9;
+  --link: #8be9fd;
+  --blockquote: #f1fa8c;
+  --surface: #343746;
+}

@@ -1,0 +1,28 @@
+/*
+@name Sand Dunes
+@appearance light
+*/
+
+/* Document colors and component roles supplied by this theme. */
+:root {
+  --background: #f6e7c8;
+  --surface: #e8cf9f;
+  --foreground: #34281d;
+  --muted: #6e5b47;
+  --heading: #a84e32;
+  --link: #006b6b;
+  --link-hover: #7b3e24;
+  --accent: #c66a42;
+  --strong: #8b451f;
+  --emphasis: #6d5a00;
+  --code: #27624c;
+  --danger: #a83232;
+  --selection: #dabf8d;
+  --blockquote: var(--foreground);
+  --quote-surface: var(--surface);
+  --quote-border: var(--muted);
+  --quote-radius: 0 .4rem .4rem 0;
+  --caption: color-mix(in srgb, var(--foreground) 40%, var(--muted));
+  --list-marker: var(--accent);
+  --selection-foreground: var(--foreground);
+}

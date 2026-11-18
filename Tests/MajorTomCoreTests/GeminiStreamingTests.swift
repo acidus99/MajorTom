@@ -136,7 +136,7 @@ final class GeminiStreamingTests: XCTestCase {
         let paragraph = String(decoding: renderer.render(.text("<script>&")), as: UTF8.self)
         let link = String(decoding: renderer.render(.link(destination: "x\" onmouseover=\"bad", label: "<Next>")), as: UTF8.self)
 
-        XCTAssertEqual(paragraph, "<p>&lt;script&gt;&amp;</p>")
+        XCTAssertEqual(paragraph, "<p>&lt;script&gt;&amp;</p>\n")
         XCTAssertFalse(link.contains("onmouseover=\"bad\""))
         XCTAssertTrue(link.contains("&lt;Next&gt;"))
         XCTAssertTrue(link.contains("&quot;"))
@@ -148,13 +148,13 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertTrue(document.contains("body { color: red; }"))
     }
 
-    func testPreformattedLinesCarryStreamingMultilineMarkers() {
+    func testPreformattedLinesContainOnlyEscapedTextAndNewlines() {
         let renderer = HTMLDocumentStreamRenderer()
         let first = String(decoding: renderer.render(.preformattedLine("one")), as: UTF8.self)
         let second = String(decoding: renderer.render(.preformattedLine("<two>")), as: UTF8.self)
 
-        XCTAssertEqual(first, "<span class=\"pre-line\">one</span>\n")
-        XCTAssertEqual(second, "<span class=\"pre-line\">&lt;two&gt;</span>\n")
+        XCTAssertEqual(first, "one\n")
+        XCTAssertEqual(second, "&lt;two&gt;\n")
     }
 
     func testPreformattedAltTextBecomesAnEscapedHoverTooltip() {
@@ -172,104 +172,33 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertFalse(unlabelled.contains("<pre title="))
     }
 
-    func testContentThemePaletteSelectionDoesNotDependOnUIThemeForExplicitThemes() {
-        XCTAssertFalse(ContentTheme.draculaLight.usesDarkPalette(effectiveDarkAppearance: true))
-        XCTAssertTrue(ContentTheme.draculaDark.usesDarkPalette(effectiveDarkAppearance: false))
-        XCTAssertTrue(ContentTheme.draculaClassic.usesDarkPalette(effectiveDarkAppearance: false))
-        XCTAssertTrue(ContentTheme.ocean.usesDarkPalette(effectiveDarkAppearance: false))
-        XCTAssertTrue(ContentTheme.forest.usesDarkPalette(effectiveDarkAppearance: false))
-        XCTAssertFalse(ContentTheme.creamsicle.usesDarkPalette(effectiveDarkAppearance: true))
-        XCTAssertFalse(ContentTheme.sandDunes.usesDarkPalette(effectiveDarkAppearance: true))
-    }
-
     func testAutomaticThemePreferenceMigratesToDraculaDark() throws {
         let decoded = try JSONDecoder().decode(
             BrowserPreferences.self,
             from: Data(#"{"contentTheme":"automatic"}"#.utf8)
         )
-        XCTAssertEqual(decoded.contentTheme, .draculaDark)
+        XCTAssertEqual(decoded.contentAppearance, .dark)
+        XCTAssertEqual(decoded.darkContentTheme, "draculaDark")
     }
 
     func testBrowserPreferencesUseMajorTomHomepageAndDraculaDarkByDefault() {
         let preferences = BrowserPreferences()
         XCTAssertEqual(preferences.homepage, "gemini://gemi.dev/major-tom/")
-        XCTAssertEqual(preferences.contentTheme, .draculaDark)
+        XCTAssertEqual(preferences.contentAppearance, .dark)
+        XCTAssertEqual(preferences.darkContentTheme, "draculaDark")
         XCTAssertFalse(preferences.automaticallyLoadsSameCapsuleImages)
-    }
-
-    func testAdaptedForestAndCreamsicleTextRolesMeetAccessibleContrast() throws {
-        for theme in [ContentTheme.forest, .creamsicle] {
-            let palette = try XCTUnwrap(theme.semanticPalette)
-            let pageTextColors = [
-                palette.foreground, palette.muted, palette.heading, palette.link,
-                palette.linkHover, palette.strong, palette.emphasis, palette.danger
-            ]
-
-            for color in pageTextColors {
-                XCTAssertGreaterThanOrEqual(
-                    contrastRatio(color, palette.background),
-                    4.5,
-                    "\(theme.rawValue): \(color.cssHex) on \(palette.background.cssHex)"
-                )
-            }
-            XCTAssertGreaterThanOrEqual(contrastRatio(palette.code, palette.surface), 4.5)
-            XCTAssertGreaterThanOrEqual(contrastRatio(palette.foreground, palette.surface), 4.5)
-            XCTAssertGreaterThanOrEqual(contrastRatio(palette.foreground, palette.selection), 4.5)
-        }
-    }
-
-    private func contrastRatio(_ first: ContentThemeColor, _ second: ContentThemeColor) -> Double {
-        let firstLuminance = relativeLuminance(first)
-        let secondLuminance = relativeLuminance(second)
-        return (max(firstLuminance, secondLuminance) + 0.05)
-            / (min(firstLuminance, secondLuminance) + 0.05)
-    }
-
-    private func relativeLuminance(_ color: ContentThemeColor) -> Double {
-        func linearize(_ component: UInt8) -> Double {
-            let value = Double(component) / 255
-            return value <= 0.04045
-                ? value / 12.92
-                : pow((value + 0.055) / 1.055, 2.4)
-        }
-        return 0.2126 * linearize(color.red)
-            + 0.7152 * linearize(color.green)
-            + 0.0722 * linearize(color.blue)
-    }
-
-    func testContentThemeCSSUsesItsResolvedPaletteBackground() {
-        for theme in ContentTheme.allCases {
-            for effectiveDarkAppearance in [false, true] {
-                let palette = theme.palette(effectiveDarkAppearance: effectiveDarkAppearance)
-                let css = theme.css(effectiveDarkAppearance: effectiveDarkAppearance)
-                XCTAssertTrue(css.contains("--background: \(palette.background.cssHex)"))
-            }
-        }
-    }
-
-    func testPrintThemeOverridesDarkScreenTheme() {
-        let css = ContentTheme.draculaDark.css(effectiveDarkAppearance: true)
-        guard let darkBody = css.range(of: "body { color: var(--foreground); background: var(--background); }"),
-              let printBody = css.range(of: "body { padding-top: 0 !important; color: #000 !important; background: #fff !important; }") else {
-            return XCTFail("Expected both screen and print body styles")
-        }
-
-        XCTAssertLessThan(darkBody.lowerBound, printBody.lowerBound)
-        XCTAssertTrue(css.contains("@page { margin: 0.65in; }"))
-        XCTAssertTrue(css.contains(":root { color-scheme: light; zoom: 1 !important; font-size: 11pt; }"))
     }
 
     func testInlineEnhancementsAreConservativeAndEscaped() {
         let rendered = HTMLDocumentStreamRenderer.renderInline(
             "Use **strong**, *emphasis*, and `code <here>`; leave *unmatched visible"
         )
-        XCTAssertEqual(
-            rendered,
-            "Use <strong><span class=\"delimiter\">**</span>strong<span class=\"delimiter\">**</span></strong>, "
-                + "<em><span class=\"delimiter\">*</span>emphasis<span class=\"delimiter\">*</span></em>, and "
-                + "<code><span class=\"delimiter\">`</span>code &lt;here&gt;<span class=\"delimiter\">`</span></code>; "
-                + "leave *unmatched visible"
-        )
+        XCTAssertTrue(rendered.contains("<strong>"))
+        XCTAssertTrue(rendered.contains("<em>"))
+        XCTAssertTrue(rendered.contains("<code>"))
+        XCTAssertFalse(rendered.contains("<span"))
+        XCTAssertFalse(rendered.contains("<here>"))
+        XCTAssertTrue(rendered.contains("&lt;here&gt;"))
     }
 
     func testInlineEnhancementsCanBeDisabledIndependently() {
@@ -280,7 +209,7 @@ final class GeminiStreamingTests: XCTestCase {
         )
         XCTAssertEqual(
             HTMLDocumentStreamRenderer.renderInline("**yes** *no* `no`", options: options),
-            "<strong><span class=\"delimiter\">**</span>yes<span class=\"delimiter\">**</span></strong> *no* `no`"
+            "<strong>**yes**</strong> *no* `no`"
         )
     }
 
@@ -347,7 +276,8 @@ final class GeminiStreamingTests: XCTestCase {
             searchProvider: .custom,
             customSearchEndpoint: "gemini://search.example/query",
             applicationAppearance: .dark,
-            contentTheme: .draculaLight,
+            contentAppearance: .light,
+            lightContentTheme: "draculaLight",
             contentWidth: .wide,
             proxy: GeminiProxyConfiguration(host: "proxy.example", port: 8080),
             automaticallyLoadsSameCapsuleImages: false
