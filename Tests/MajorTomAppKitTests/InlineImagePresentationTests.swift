@@ -6,9 +6,10 @@ import XCTest
 
 final class InlineImagePresentationTests: XCTestCase {
     @MainActor
-    func testAllSubmitsEveryStreamedLinkOnceAndOffWaitsForClick() async throws {
+    func testVisibleLinksAreSubmittedOnceAndOffWaitsForClick() async throws {
         let document = ImageTestDocument()
-        try await document.load(document.html(mode: .all, count: 3))
+        try await document.load(document.html(mode: .whenVisible, count: 3))
+        try await document.renderFrame()
         try await document.wait { document.messages.count == 3 }
         XCTAssertEqual(document.messages.compactMap { $0["id"] }, ["image-0", "image-1", "image-2"])
         _ = try await document.js("document.body.append(document.querySelector('main'))")
@@ -51,7 +52,7 @@ final class InlineImagePresentationTests: XCTestCase {
     func testPendingClockAndActiveSpinnerInBothAppearances() async throws {
         for theme in ContentTheme.bundled.filter({ ["draculaLight", "draculaDark"].contains($0.id) }) {
             let document = ImageTestDocument()
-            try await document.load(document.html(mode: .all, count: 1, theme: theme))
+            try await document.load(document.html(mode: .whenVisible, count: 1, theme: theme))
             let original = try await document.js("document.querySelector('.link-line > a').textContent") as? String
             for state in [GeminiImageLoader.State.pending, .requesting, .idle] {
                 _ = try await document.js("window.majorTomSetImageState('image-0', '\(state.rawValue)')")
@@ -132,7 +133,8 @@ final class InlineImagePresentationTests: XCTestCase {
         // Stopping an image used to leave its expanded placeholder behind, so the
         // next click merely collapsed it instead of retrying the request.
         let document = ImageTestDocument()
-        try await document.load(document.html(mode: .all, count: 3))
+        try await document.load(document.html(mode: .whenVisible, count: 3))
+        try await document.renderFrame()
         try await document.wait { document.messages.count == 3 }
         _ = try await document.js("""
         for (let index = 0; index < 3; index++) {
@@ -180,7 +182,8 @@ final class InlineImagePresentationTests: XCTestCase {
         XCTAssertEqual(document.messages.last?["action"], "click")
         // A new document starts with automatic loading enabled again.
         let reloaded = ImageTestDocument()
-        try await reloaded.load(reloaded.html(mode: .all, count: 1))
+        try await reloaded.load(reloaded.html(mode: .whenVisible, count: 1))
+        try await reloaded.renderFrame()
         try await reloaded.wait { reloaded.messages.count == 1 }
         XCTAssertEqual(reloaded.messages.first?["action"], "load")
     }

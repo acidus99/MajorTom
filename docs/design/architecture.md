@@ -334,8 +334,8 @@ shared actor. Direct document navigation, favicon retrieval, and downloads retai
 existing retrieval paths.
 
 `InlineImagePresentationScript` in AppKitSupport owns image-link discovery, visibility,
-interaction, annotations, and captions in WebKit's isolated client world. All submits
-parsed eligible links; When Visible uses one `IntersectionObserver` per document, with
+interaction, annotations, and captions in WebKit's isolated client world. Automatic loading
+uses one `IntersectionObserver` per document, with
 the navigation inset excluded from its root. Hidden documents cannot submit visibility
 loads. The existing mutation observer registers streamed links, and each link is unobserved
 after its first submission. Scrolling does not poll or measure link geometry in Swift.

@@ -60,8 +60,18 @@ public struct GeminiProxyConfiguration: Equatable, Codable, Sendable {
 
 public enum SameCapsuleImageLoading: String, CaseIterable, Codable, Sendable {
     case off
-    case all
     case whenVisible
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        let value = try container.decode(String.self)
+        // Former All selections retain automatic loading with the visible-link policy.
+        if value == "all" { self = .whenVisible; return }
+        guard let mode = Self(rawValue: value) else {
+            throw DecodingError.dataCorruptedError(in: container, debugDescription: "Unknown image loading mode: \(value)")
+        }
+        self = mode
+    }
 }
 
 public struct BrowserPreferences: Equatable, Codable, Sendable {
@@ -78,7 +88,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
     /// Compatibility with the former on/off preference and older sync clients.
     public var automaticallyLoadsSameCapsuleImages: Bool {
         get { sameCapsuleImageLoading != .off }
-        set { sameCapsuleImageLoading = newValue ? .all : .off }
+        set { sameCapsuleImageLoading = newValue ? .whenVisible : .off }
     }
     public var imageRequestInterval: TimeInterval
     public var automaticallyLoadsDataImages: Bool
@@ -115,7 +125,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         self.darkContentTheme = darkContentTheme
         self.contentWidth = contentWidth
         self.proxy = proxy
-        self.sameCapsuleImageLoading = sameCapsuleImageLoading ?? (automaticallyLoadsSameCapsuleImages ? .all : .off)
+        self.sameCapsuleImageLoading = sameCapsuleImageLoading ?? (automaticallyLoadsSameCapsuleImages ? .whenVisible : .off)
         self.imageRequestInterval = imageRequestInterval
         self.automaticallyLoadsDataImages = automaticallyLoadsDataImages
         self.renderingOptions = renderingOptions
@@ -165,7 +175,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
             .decodeIfPresent(Bool.self, forKey: .automaticallyLoadsSameCapsuleImages) ?? false
         sameCapsuleImageLoading = try container.decodeIfPresent(
             SameCapsuleImageLoading.self, forKey: .sameCapsuleImageLoading
-        ) ?? (legacyImages ? .all : .off)
+        ) ?? (legacyImages ? .whenVisible : .off)
         imageRequestInterval = try container.decodeIfPresent(TimeInterval.self, forKey: .imageRequestInterval)
             ?? defaults.imageRequestInterval
         automaticallyLoadsDataImages = try container.decodeIfPresent(

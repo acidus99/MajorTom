@@ -103,10 +103,11 @@ Preformatted blocks may carry ANSI SGR escape sequences, which some capsules use
 Reading preferences control application appearance separately from the document theme and width. Changes to appearance-only preferences update open content without another request. Optional enhancements—such as conservative inline formatting and automatic same-capsule images—must be individually controllable, bounded, and fail without disrupting the original document or link. Automatic same-capsule images are off by default; this default is applied once to existing installations too. General settings provides Restore Default Settings, which restores browser preferences but preserves trusted capsule identities and client certificates. General settings also shows whether Major Tom is the default handler for `gemini://` URLs and provides a button to make it the default; the button is disabled and a confirmation label is shown when it already is the default.
 
 Inline Gemini images use a shared background loader. Quality of Life settings offers
-Automatically Load Same-Capsule Images with Off, All, and When Visible choices. Off is the
-default. Existing enabled toggles migrate to All; disabled toggles migrate to Off. All
-submits eligible links as the document streams. When Visible submits each link once when it
-first enters the displayed content viewport, excluding navigation overlays and hidden tabs.
+Automatically Load Same-Capsule Images with Off and When Visible choices. Off is the
+default. Former All selections and enabled toggles migrate to When Visible; disabled toggles
+remain Off. When Visible acts as an automatic activation of an individual image link: it
+submits the link once when it first enters the displayed content viewport, excluding navigation
+overlays and hidden tabs. Images elsewhere on the page are not submitted in advance.
 Once submitted, a request remains queued even if the reader scrolls away. Embedded `data:`
 images remain independently configurable and never enter the network queue.
 

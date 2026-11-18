@@ -119,8 +119,7 @@ public enum InlineImagePresentationScript {
             if (!line.id) { return; }
             updateLine(line);
             if (submitted.has(line.id) || automaticLoadingStopped) { return; }
-            if (line.dataset.mtImageAuto === 'all') { send(line, 'load'); }
-            else if (line.dataset.mtImageAuto === 'whenVisible' && !observed.has(line)) {
+            if (line.dataset.mtImageAuto === 'whenVisible' && !observed.has(line)) {
               observed.add(line);
               if (!observer) {
                 topInset ??= parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--mt-content-top-inset')) || 0;

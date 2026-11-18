@@ -101,7 +101,7 @@ public struct SyncedBrowserPreferenceValues: Codable, Equatable, Sendable {
         result.homepage = homepage
         result.searchProvider = searchProvider
         result.customSearchEndpoint = customSearchEndpoint
-        result.sameCapsuleImageLoading = sameCapsuleImageLoading ?? (automaticallyLoadsSameCapsuleImages ? .all : .off)
+        result.sameCapsuleImageLoading = sameCapsuleImageLoading ?? (automaticallyLoadsSameCapsuleImages ? .whenVisible : .off)
         if let imageRequestInterval { result.imageRequestInterval = imageRequestInterval }
         result.automaticallyLoadsDataImages = automaticallyLoadsDataImages
         result.renderingOptions = renderingOptions

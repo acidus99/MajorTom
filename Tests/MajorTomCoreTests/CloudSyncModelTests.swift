@@ -291,7 +291,7 @@ final class CloudSyncModelTests: XCTestCase {
         XCTAssertEqual(applied.imageRequestInterval, 9)
     }
 
-    func testOlderSyncedImageToggleMapsToAllOrOff() throws {
+    func testOlderSyncedImageToggleMapsToWhenVisibleOrOff() throws {
         for enabled in [false, true] {
             var preferences = BrowserPreferences()
             preferences.automaticallyLoadsSameCapsuleImages = enabled
@@ -301,8 +301,22 @@ final class CloudSyncModelTests: XCTestCase {
             payload.removeValue(forKey: "sameCapsuleImageLoading")
             let decoded = try JSONDecoder().decode(SyncedBrowserPreferenceValues.self,
                 from: JSONSerialization.data(withJSONObject: payload))
-            XCTAssertEqual(decoded.applying(to: BrowserPreferences()).sameCapsuleImageLoading, enabled ? .all : .off)
+            XCTAssertEqual(decoded.applying(to: BrowserPreferences()).sameCapsuleImageLoading, enabled ? .whenVisible : .off)
         }
+    }
+
+    func testFormerAllImageModeFromAnotherMacMigratesToWhenVisible() throws {
+        let preferences = BrowserPreferences(homepage: "gemini://saved.example/")
+        var payload = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(SyncedBrowserPreferenceValues(preferences: preferences))
+        ) as? [String: Any])
+        payload["sameCapsuleImageLoading"] = "all"
+        payload["automaticallyLoadsSameCapsuleImages"] = true
+        let decoded = try JSONDecoder().decode(SyncedBrowserPreferenceValues.self,
+            from: JSONSerialization.data(withJSONObject: payload))
+        let applied = decoded.applying(to: BrowserPreferences())
+        XCTAssertEqual(applied.sameCapsuleImageLoading, .whenVisible)
+        XCTAssertEqual(applied.homepage, preferences.homepage)
     }
 
     func testAppearanceAndNetworkingChangesDoNotChangeSyncedProjection() {
