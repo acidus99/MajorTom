@@ -43,7 +43,11 @@ private final class ContextMenuScriptHandler: NSObject, WKScriptMessageHandler {
                 return;
             }
             event.preventDefault();
-            window.webkit.messageHandlers.\(name).postMessage(anchor?.href ?? '');
+            const imageLine = anchor?.closest('.link-line[data-mt-expandable]') ||
+              anchor?.closest('figure')?.previousElementSibling;
+            window.webkit.messageHandlers.\(name).postMessage({
+              href: anchor?.href ?? '', imageLine: imageLine?.matches('.link-line') ? imageLine.id : ''
+            });
         }, true);
         """,
         injectionTime: .atDocumentStart,
@@ -57,9 +61,12 @@ private final class ContextMenuScriptHandler: NSObject, WKScriptMessageHandler {
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        let href = message.body as? String
+        let body = message.body as? [String: String]
+        let link = body?["href"].flatMap { $0.isEmpty ? nil : URL(string: $0) }
         Task { @MainActor [weak browser] in
-            browser?.showPendingContextMenu(link: href.flatMap(URL.init(string:)))
+            browser?.showPendingContextMenu(
+                link: link, imageLine: body?["imageLine"]
+            )
         }
     }
 }
@@ -278,26 +285,6 @@ private final class LinkActivationScriptHandler: NSObject, WKScriptMessageHandle
 private final class InlineImageScriptHandler: NSObject, WKScriptMessageHandler {
     static let name = "majorTomInlineImage"
 
-    static let userScript = WKUserScript(
-        source: """
-        document.addEventListener('click', (event) => {
-            if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) { return; }
-            if (event.button !== 0) { return; }
-            const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-            const anchor = target?.closest('a[href]');
-            if (!anchor) { return; }
-            const line = anchor.closest('.link-line[data-mt-expandable]');
-            if (!line || !line.id) { return; }
-            event.preventDefault();
-            event.stopPropagation();
-            window.webkit.messageHandlers.\(name).postMessage({ id: line.id, href: anchor.href });
-        }, true);
-        """,
-        injectionTime: .atDocumentStart,
-        forMainFrameOnly: true,
-        in: .defaultClient
-    )
-
     weak var browser: BrowserModel?
 
     func userContentController(
@@ -307,67 +294,16 @@ private final class InlineImageScriptHandler: NSObject, WKScriptMessageHandler {
         guard let body = message.body as? [String: Any],
               let identifier = body["id"] as? String,
               let href = body["href"] as? String,
-              let url = URL(string: href) else { return }
+              let url = URL(string: href),
+              let action = body["action"] as? String,
+              let document = body["documentURL"] as? String,
+              let documentURL = URL(string: document) else { return }
         Task { @MainActor [weak browser] in
-            browser?.toggleInlineImage(lineIdentifier: identifier, url: url)
+            browser?.handleInlineImageMessage(
+                lineIdentifier: identifier, url: url, action: action, documentURL: documentURL
+            )
         }
     }
-}
-
-/// Enriches inline-image captions once WebKit has decoded the image and therefore knows
-/// its intrinsic dimensions. Metadata supplied after a streamed Gemini response finishes
-/// can call the same function, and the resize observer keeps the `scaled` marker accurate
-/// when the window changes size.
-@available(macOS 26.0, *)
-@MainActor
-private enum InlineImagePresentationScript {
-    static let userScript = WKUserScript(
-        source: """
-        (() => {
-          const enhance = (image) => {
-            if (!(image instanceof HTMLImageElement) || !image.matches('[data-mt-inline-image]')) { return; }
-            const figure = image.closest('figure');
-            const caption = figure?.querySelector('figcaption');
-            if (!figure || !caption) { return; }
-
-            const update = () => {
-              if (!image.naturalWidth || !image.naturalHeight) { return; }
-              const parts = [image.dataset.mtFilename || image.alt || 'Image'];
-              if (image.dataset.mtMime) { parts.push(image.dataset.mtMime); }
-              if (image.dataset.mtSize) { parts.push(image.dataset.mtSize); }
-              parts.push(`${image.naturalWidth} x ${image.naturalHeight}`);
-              const rendered = image.getBoundingClientRect();
-              if (rendered.width + 0.5 < image.naturalWidth || rendered.height + 0.5 < image.naturalHeight) {
-                parts.push('scaled');
-              }
-              caption.textContent = parts.join(' - ');
-            };
-
-            if (image.complete) { update(); }
-            image.decode?.().then(update).catch(() => {});
-            if (!image._majorTomResizeObserver && typeof ResizeObserver !== 'undefined') {
-              image._majorTomResizeObserver = new ResizeObserver(update);
-              image._majorTomResizeObserver.observe(image);
-            }
-          };
-
-          window.majorTomEnhanceInlineImage = enhance;
-          document.addEventListener('load', (event) => enhance(event.target), true);
-          new MutationObserver((records) => {
-            for (const record of records) {
-              for (const node of record.addedNodes) {
-                if (!(node instanceof Element)) { continue; }
-                if (node.matches?.('[data-mt-inline-image]')) { enhance(node); }
-                node.querySelectorAll?.('[data-mt-inline-image]').forEach(enhance);
-              }
-            }
-          }).observe(document, { childList: true, subtree: true });
-        })();
-        """,
-        injectionTime: .atDocumentStart,
-        forMainFrameOnly: true,
-        in: .defaultClient
-    )
 }
 
 @available(macOS 26.0, *)
@@ -572,7 +508,6 @@ final class BrowserModel: ObservableObject {
     private var backForwardDebounceTask: Task<Void, Never>?
     private var backForwardWriteTask: Task<Void, Never>?
     private var contentCacheWriteTask: Task<Void, Never>?
-    private var bypassesContentCacheForPage = false
     private var browsingDataGeneration: UInt64 = 0
     private var isClearingBrowsingData = false
     private var currentResponseCanBeCached = true
@@ -603,7 +538,10 @@ final class BrowserModel: ObservableObject {
     /// in. A heading can replace an earlier preformatted caption; discovery is limited to
     /// the first fifteen Gemtext lines.
     private var titleClaim = GemtextTitleClaim()
-    private var imageTasks: [Task<Void, Never>] = []
+    @Published private var imageTasks: [String: Task<Void, Never>] = [:]
+    private var automaticImagesPaused = false
+    private var inlineImageURLs: [String: URL] = [:]
+    private var imageViewportTopInset: CGFloat = 0
     private let imageLoader = SharedGeminiImageLoader.shared
     private var imagePageStartedAt = ContinuousClock.now
     private var slowDownTask: Task<Void, Never>?
@@ -663,7 +601,6 @@ final class BrowserModel: ObservableObject {
             contentWorld: .defaultClient,
             name: LinkActivationScriptHandler.name
         )
-        userContentController.addUserScript(InlineImageScriptHandler.userScript)
         userContentController.add(
             inlineImageScriptHandler,
             contentWorld: .defaultClient,
@@ -764,6 +701,8 @@ final class BrowserModel: ObservableObject {
     var canReload: Bool {
         !isLoading && committedURL != nil && (retryNotBefore.map { Date() >= $0 } ?? true)
     }
+
+    var canStop: Bool { isLoading || !imageTasks.isEmpty }
 
     func start() {
         guard !hasStarted else { return }
@@ -902,8 +841,9 @@ final class BrowserModel: ObservableObject {
 
         navigationTask?.cancel()
         navigationTask = nil
-        imageTasks.forEach { $0.cancel() }
+        imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
+        automaticImagesPaused = false
         imagePageStartedAt = .now
         slowDownTask?.cancel()
         slowDownTask = nil
@@ -933,7 +873,6 @@ final class BrowserModel: ObservableObject {
         responseMeta = ""
         responseWasCached = nil
         responseReceivedAt = nil
-        bypassesContentCacheForPage = false
         // The document is going away, so its hover state is stale.
         hoveredLinkURL = nil
         if !keepsFavicon { favicon = nil }
@@ -1014,6 +953,9 @@ final class BrowserModel: ObservableObject {
 
     func stop() {
         let wasLoading = isLoading
+        let stoppedImages = Array(imageTasks.keys)
+        let documentURL = activeWebDocumentURL
+        automaticImagesPaused = true
         // A document continuation only exists while a response is actively streaming
         // into the view, which is what distinguishes "stopped partway" from "stopped
         // before anything committed".
@@ -1023,8 +965,24 @@ final class BrowserModel: ObservableObject {
         // work, and spec 9.2 requires that to cancel the network work it owns.
         navigationTask?.cancel()
         navigationTask = nil
-        imageTasks.forEach { $0.cancel() }
+        imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
+        expandedInlineImages.subtract(stoppedImages)
+        for identifier in stoppedImages {
+            if let url = inlineImageURLs[identifier] { navigation.setImage(url, expanded: false) }
+        }
+        pendingRestoredInlineImageCount = 0
+        pendingInlineImageScrollCorrection = nil
+        if !stoppedImages.isEmpty { scheduleBackForwardPersistence() }
+        if let documentURL {
+            Task {
+                guard activeWebDocumentURL == documentURL else { return }
+                _ = try? await page.callJavaScript(
+                    InlineImagePresentationScript.stopScript(identifiers: stoppedImages, documentURL: documentURL),
+                    contentWorld: .defaultClient
+                )
+            }
+        }
         slowDownTask?.cancel()
         slowDownTask = nil
         trustContinuation?.resume(returning: false)
@@ -1370,7 +1328,11 @@ final class BrowserModel: ObservableObject {
         addContextMenuItem("Back", systemImage: BrowserMenuIcon.back, enabled: canGoBack, to: menu) { [weak self] in self?.goBack() }
         addContextMenuItem("Forward", systemImage: BrowserMenuIcon.forward, enabled: canGoForward, to: menu) { [weak self] in self?.goForward() }
         menu.addItem(.separator())
-        addContextMenuItem("Reload Page", systemImage: BrowserMenuIcon.reload, enabled: canReload, to: menu) { [weak self] in self?.reload() }
+        if canStop {
+            addContextMenuItem("Stop Loading", systemImage: "xmark", enabled: true, to: menu) { [weak self] in self?.stop() }
+        } else {
+            addContextMenuItem("Reload Page", systemImage: BrowserMenuIcon.reload, enabled: canReload, to: menu) { [weak self] in self?.reload() }
+        }
         menu.addItem(.separator())
         addContextMenuItem("Show Page Source", systemImage: BrowserMenuIcon.showSource, enabled: canShowSource, to: menu) { [weak self] in self?.showPageSource() }
         addContextMenuItem("Check for Previous Versions", systemImage: BrowserMenuIcon.archive, enabled: canCheckArchive, to: menu) { [weak self] in self?.openArchive() }
@@ -1384,23 +1346,30 @@ final class BrowserModel: ObservableObject {
         pendingContextMenuView = view
     }
 
-    fileprivate func showPendingContextMenu(link: URL?) {
+    fileprivate func showPendingContextMenu(link: URL?, imageLine: String?) {
         guard let location = pendingContextMenuLocation,
               let view = pendingContextMenuView else { return }
         pendingContextMenuLocation = nil
         pendingContextMenuView = nil
         if let link {
-            showLinkContextMenu(for: link, at: location, in: view)
+            showLinkContextMenu(for: link, imageLine: imageLine, at: location, in: view)
         } else {
             showPageContextMenu(at: location, in: view)
         }
     }
 
-    private func showLinkContextMenu(for url: URL, at location: NSPoint, in view: NSView?) {
+    private func showLinkContextMenu(for url: URL, imageLine: String?, at location: NSPoint, in view: NSView?) {
         let menu = NSMenu()
         menu.autoenablesItems = false
         contextMenuTargets.removeAll()
         let opensInApp = canOpenInApp(url)
+        if let imageLine, inlineImageURLs[imageLine] == url {
+            let expanded = expandedInlineImages.contains(imageLine) && imageTasks[imageLine] == nil
+            addContextMenuItem(expanded ? "Collapse Image" : "Load Image", systemImage: "photo", enabled: true, to: menu) { [weak self] in
+                self?.toggleInlineImage(lineIdentifier: imageLine, url: url)
+            }
+            menu.addItem(.separator())
+        }
         addContextMenuItem("Open Link in New Tab", systemImage: BrowserMenuIcon.newTab, enabled: opensInApp, to: menu) { [weak self] in
             self?.openInNewTab?(url, true)
         }
@@ -1872,7 +1841,6 @@ final class BrowserModel: ObservableObject {
         let staysWithinCapsule = CapsuleEndpoint(url: target.url)
             == committedURL.flatMap(CapsuleEndpoint.init(url:))
         beginNavigation(disposition: disposition, keepsFavicon: staysWithinCapsule)
-        bypassesContentCacheForPage = disposition == .reload
 
         isLoading = true
         statusText = "Connecting to \(target.endpoint.host)…"
@@ -2410,7 +2378,7 @@ final class BrowserModel: ObservableObject {
     private func beginDocument(at sourceURL: URL) -> AsyncThrowingStream<Data, any Error>.Continuation {
         // Settings can replace a document without beginning a new navigation.
         // Its old image work must stop just as it does when leaving the page.
-        imageTasks.forEach { $0.cancel() }
+        imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
         browserNavigationLogger.notice(
             "beginDocument source=\(sourceURL.absoluteString, privacy: .public) replacing=\(self.activeWebDocumentURL?.absoluteString ?? "nil", privacy: .public) modelIndex=\(self.navigation.historyIndex)"
@@ -2426,6 +2394,7 @@ final class BrowserModel: ObservableObject {
         linkSequence = 0
         expandedInlineImages.removeAll()
         expandableImageLines.removeAll()
+        inlineImageURLs.removeAll()
         let document = documentStore.createDocument()
         activeWebDocumentURL = document.url
         browserNavigationLogger.notice(
@@ -2529,15 +2498,7 @@ final class BrowserModel: ObservableObject {
                   !expandedInlineImages.contains(lineIdentifier) else { continue }
             expandedInlineImages.insert(lineIdentifier)
             restoredImageCount += 1
-            let task = Task { [weak self] in
-                guard let self else { return }
-                await self.expandInlineImage(
-                    lineIdentifier: lineIdentifier,
-                    url: url,
-                    completesScrollRestoration: true
-                )
-            }
-            imageTasks.append(task)
+            startInlineImage(lineIdentifier: lineIdentifier, url: url, restoresScroll: true)
         }
         pendingRestoredInlineImageCount = restoredImageCount
         return restoredImageCount
@@ -2897,6 +2858,7 @@ final class BrowserModel: ObservableObject {
             """
         }
         theme += "\n" + settings.preferences.contentWidth.css
+        theme += "\n:root { --mt-content-top-inset: \(imageViewportTopInset)px; --mt-image-pending-icon: \(InlineImagePresentationScript.pendingIconCSS); }"
         // Screen-only zoom survives navigation without overriding print's 100% scale.
         return theme + """
 
@@ -2937,7 +2899,7 @@ final class BrowserModel: ObservableObject {
         guard canSavePage else { return }
 
         let renderingChanged = preferences.renderingOptions != lastPreferences.renderingOptions
-            || preferences.automaticallyLoadsSameCapsuleImages != lastPreferences.automaticallyLoadsSameCapsuleImages
+            || preferences.sameCapsuleImageLoading != lastPreferences.sameCapsuleImageLoading
             || preferences.imageRequestInterval != lastPreferences.imageRequestInterval
             || preferences.automaticallyLoadsDataImages != lastPreferences.automaticallyLoadsDataImages
         guard renderingChanged, !isLoading else { return }
@@ -3151,111 +3113,103 @@ final class BrowserModel: ObservableObject {
         }
         var linkIdentifier: String?
         var isExpandableImage = false
+        var imageLoading: SameCapsuleImageLoading = .off
         if case .link(let destination, _) = event {
             linkSequence += 1
             linkIdentifier = "mt-link-\(linkSequence)"
-            // Offered only where automatic loading will not already have inlined the
-            // image, so a single link is never both auto-inlined and click-expandable.
-            isExpandableImage = !willAutoInline(destination: destination, baseURL: baseURL)
-                && GemtextLinkHint.isInlineImageCandidate(destination: destination, relativeTo: baseURL)
+            isExpandableImage = GemtextLinkHint.isInlineImageCandidate(destination: destination, relativeTo: baseURL)
             if isExpandableImage,
-               let absolute = URL(string: destination, relativeTo: baseURL)?.absoluteURL,
+               let url = URL(string: destination, relativeTo: baseURL)?.absoluteURL,
                let linkIdentifier {
-                expandableImageLines[absolute] = linkIdentifier
+                expandableImageLines[url] = linkIdentifier
+                inlineImageURLs[linkIdentifier] = url
+                if !automaticImagesPaused, isSameCapsule(url, baseURL) {
+                    imageLoading = settings.preferences.sameCapsuleImageLoading
+                }
             }
         }
-
         yieldToDocument(renderer.render(
             event,
             options: settings.preferences.renderingOptions,
             baseURL: baseURL,
             linkIdentifier: linkIdentifier,
-            isExpandableImage: isExpandableImage
+            isExpandableImage: isExpandableImage,
+            imageLoading: imageLoading
         ))
+        // Network images are submitted by the page after their link has been parsed.
+        // Data images already contain their bytes and never enter the requestor.
         guard case .link(let destination, let label) = event,
-              willAutoInline(destination: destination, baseURL: baseURL) else { return }
+              settings.preferences.automaticallyLoadsDataImages,
+              destination.lowercased().hasPrefix("data:image/"),
+              let dataURL = URL(string: destination) else { return }
+        let fileName = label ?? "Inline image"
+        let metadata = inlineDataImageMetadata(destination)
+        yieldToDocument(renderer.renderInlineImage(
+            resourceURL: dataURL,
+            linkURL: dataURL,
+            altText: fileName,
+            figureIdentifier: "mt-inline-\(linkIdentifier ?? String(linkSequence))",
+            fileName: fileName,
+            mimeType: metadata?.mimeType,
+            sizeDescription: metadata.map { formattedByteCount($0.byteCount) }
+        ))
+    }
 
-        if destination.lowercased().hasPrefix("data:image/"),
-           let dataURL = URL(string: destination) {
-            let fileName = label ?? "Inline image"
-            let metadata = inlineDataImageMetadata(destination)
-            yieldToDocument(renderer.renderInlineImage(
-                resourceURL: dataURL,
-                linkURL: dataURL,
-                altText: fileName,
-                figureIdentifier: "mt-inline-\(linkIdentifier ?? String(linkSequence))",
-                fileName: fileName,
-                mimeType: metadata?.mimeType,
-                sizeDescription: metadata.map { formattedByteCount($0.byteCount) }
-            ))
+    func handleInlineImageMessage(lineIdentifier: String, url: URL, action: String, documentURL: URL) {
+        guard activeWebDocumentURL == documentURL, inlineImageURLs[lineIdentifier] == url else { return }
+        if action == "click" {
+            toggleInlineImage(lineIdentifier: lineIdentifier, url: url)
+        } else if action == "load", !automaticImagesPaused, settings.preferences.sameCapsuleImageLoading != .off,
+                  let committedURL, isSameCapsule(url, committedURL),
+                  !expandedInlineImages.contains(lineIdentifier) {
+            startInlineImage(lineIdentifier: lineIdentifier, url: url)
+        }
+    }
+
+    /// A click promotes pending work or joins its active transfer. A displayed manual
+    /// expansion still toggles closed on a second click.
+    func toggleInlineImage(lineIdentifier: String, url: URL) {
+        if imageTasks[lineIdentifier] != nil {
+            Task { await imageLoader.prioritize(url) }
             return
         }
-
-        guard let url = URL(string: destination, relativeTo: baseURL)?.absoluteURL else { return }
-
-        let figureIdentifier = "mt-inline-\(linkIdentifier ?? String(linkSequence))"
-        let fileName = inlineImageFileName(for: url, fallback: label)
-        let resource = resourceStore.createResource()
-        yieldToDocument(renderer.renderInlineImage(
-            resourceURL: resource.url,
-            linkURL: url,
-            altText: label ?? fileName,
-            figureIdentifier: figureIdentifier,
-            fileName: fileName
-        ))
-        let task = Task { [weak self] in
-            guard let self else { return }
-            let metadata = await self.loadInlineImage(
-                url,
-                continuation: resource.continuation,
-                bypassesContentCache: bypassesContentCacheForPage
-            )
-            if let metadata {
-                await self.updateInlineImageMetadata(
-                    figureIdentifier: figureIdentifier,
-                    metadata: metadata
-                )
-            }
-        }
-        imageTasks.append(task)
-    }
-
-    /// Whether this link's image will be loaded automatically, per the two Quality of
-    /// Life preferences.
-    ///
-    /// Click-to-expand consults the same predicate, so the two features can never both
-    /// claim the same link and stack two copies of one image.
-    private func willAutoInline(destination: String, baseURL: URL) -> Bool {
-        if destination.lowercased().hasPrefix("data:image/") {
-            return settings.preferences.automaticallyLoadsDataImages
-        }
-        guard settings.preferences.automaticallyLoadsSameCapsuleImages,
-              let url = URL(string: destination, relativeTo: baseURL)?.absoluteURL else {
-            return false
-        }
-        return isProbableImage(url) && isSameCapsule(url, baseURL)
-    }
-
-    /// Expands the image linked from one line beneath it, or collapses it again.
-    ///
-    /// Clicking the link a second time removes the image, which makes the gesture its own
-    /// undo and keeps a long page of image links from growing without bound.
-    func toggleInlineImage(lineIdentifier: String, url: URL) {
         if expandedInlineImages.remove(lineIdentifier) != nil {
             navigation.setImage(url, expanded: false)
             scheduleBackForwardPersistence()
             Task { await removeInlineImage(lineIdentifier: lineIdentifier) }
             return
         }
-
-        expandedInlineImages.insert(lineIdentifier)
         navigation.setImage(url, expanded: true)
         scheduleBackForwardPersistence()
-        let task = Task { [weak self] in
-            guard let self else { return }
-            await self.expandInlineImage(lineIdentifier: lineIdentifier, url: url)
+        startInlineImage(lineIdentifier: lineIdentifier, url: url, prioritize: true)
+    }
+
+    private func startInlineImage(
+        lineIdentifier: String, url: URL, prioritize: Bool = false, restoresScroll: Bool = false
+    ) {
+        guard imageTasks[lineIdentifier] == nil else { return }
+        expandedInlineImages.insert(lineIdentifier)
+        let documentURL = activeWebDocumentURL
+        imageTasks[lineIdentifier] = Task { [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            await self.expandInlineImage(
+                lineIdentifier: lineIdentifier, url: url,
+                completesScrollRestoration: restoresScroll, prioritize: prioritize
+            )
+            if !Task.isCancelled, self.activeWebDocumentURL == documentURL {
+                self.imageTasks[lineIdentifier] = nil
+            }
         }
-        imageTasks.append(task)
+    }
+
+    func updateImageViewportTopInset(_ inset: CGFloat) {
+        guard imageViewportTopInset != inset else { return }
+        imageViewportTopInset = inset
+        Task {
+            _ = try? await page.callJavaScript(
+                "window.majorTomSetImageViewport?.(\(inset));", contentWorld: .defaultClient
+            )
+        }
     }
 
     /// Restored image links need a second scroll correction after their layout completes.
@@ -3264,8 +3218,10 @@ final class BrowserModel: ObservableObject {
     private func expandInlineImage(
         lineIdentifier: String,
         url: URL,
-        completesScrollRestoration: Bool = false
+        completesScrollRestoration: Bool = false,
+        prioritize: Bool = false
     ) async {
+        let documentURL = activeWebDocumentURL
         let figureIdentifier = "mt-inline-\(lineIdentifier)"
         let fileName = inlineImageFileName(for: url, fallback: nil)
         let resource = resourceStore.createResource()
@@ -3280,16 +3236,21 @@ final class BrowserModel: ObservableObject {
         )
         let metadata = await loadInlineImage(
             url,
-            continuation: resource.continuation,
-            bypassesContentCache: bypassesContentCacheForPage
+            lineIdentifier: lineIdentifier,
+            prioritize: prioritize,
+            continuation: resource.continuation
         )
+        guard !Task.isCancelled, activeWebDocumentURL == documentURL else { return }
         if let metadata {
             await updateInlineImageMetadata(
                 figureIdentifier: figureIdentifier,
                 metadata: metadata
             )
         }
-        await setLineLoading(lineIdentifier: lineIdentifier, isLoading: false)
+        if metadata == nil, !Task.isCancelled {
+            expandedInlineImages.remove(lineIdentifier)
+            await removeInlineImage(lineIdentifier: lineIdentifier)
+        }
         if completesScrollRestoration {
             await restoredInlineImageDidFinishLoading()
         }
@@ -3344,7 +3305,6 @@ final class BrowserModel: ObservableObject {
         (() => {
           const line = document.getElementById(\(jsLiteral(lineIdentifier)));
           if (!line) { return; }
-          line.classList.add('is-loading');
           if (!line.nextElementSibling?.classList.contains('inline-image')) {
             line.insertAdjacentHTML('afterend', \(jsLiteral(figure)));
           }
@@ -3364,10 +3324,11 @@ final class BrowserModel: ObservableObject {
         """)
     }
 
-    private func setLineLoading(lineIdentifier: String, isLoading: Bool) async {
-        let method = isLoading ? "add" : "remove"
-        await runScript(
-            "document.getElementById(\(jsLiteral(lineIdentifier)))?.classList.\(method)('is-loading');"
+    private func setImageState(lineIdentifier: String, state: GeminiImageLoader.State, documentURL: URL) async {
+        guard activeWebDocumentURL == documentURL else { return }
+        _ = try? await page.callJavaScript(
+            InlineImagePresentationScript.stateUpdateScript(identifier: lineIdentifier, state: state, documentURL: documentURL),
+            contentWorld: .defaultClient
         )
     }
 
@@ -3383,6 +3344,8 @@ final class BrowserModel: ObservableObject {
           if (!image) { return; }
           image.dataset.mtMime = \(jsLiteral(metadata.mimeType));
           image.dataset.mtSize = \(jsLiteral(size));
+          const line = image.closest('figure')?.previousElementSibling;
+          if (line?.matches('.link-line')) { line.dataset.mtImageLoaded = 'true'; }
           window.majorTomEnhanceInlineImage?.(image);
         })();
         """)
@@ -3421,7 +3384,7 @@ final class BrowserModel: ObservableObject {
     }
 
     private func runScript(_ source: String) async {
-        _ = try? await page.callJavaScript(source)
+        _ = try? await page.callJavaScript(source, contentWorld: .defaultClient)
     }
 
     /// Encodes a Swift string as a JavaScript string literal, so page content can never
@@ -3593,18 +3556,38 @@ final class BrowserModel: ObservableObject {
 
     private func loadInlineImage(
         _ url: URL,
-        continuation: AsyncThrowingStream<URLSchemeTaskResult, any Error>.Continuation,
-        bypassesContentCache: Bool
+        lineIdentifier: String,
+        prioritize: Bool,
+        continuation: AsyncThrowingStream<URLSchemeTaskResult, any Error>.Continuation
     ) async -> LoadedInlineImage? {
+        let documentURL = activeWebDocumentURL
+        // Preserve the loader's event order while crossing to the main actor. The
+        // stream closes on every exit, including cancellation during queue/backoff.
+        let activity = AsyncStream<GeminiImageLoader.State>.makeStream()
+        defer { activity.continuation.finish() }
+        let activityTask = Task { [weak self] in
+            for await state in activity.stream {
+                guard !Task.isCancelled else { return }
+                guard let self, let documentURL else { continue }
+                await self.setImageState(
+                    lineIdentifier: lineIdentifier, state: state, documentURL: documentURL
+                )
+            }
+        }
         do {
-            let response = try await imageLoader.image(
-                for: url,
-                interval: settings.preferences.imageRequestInterval,
-                pageStartedAt: imagePageStartedAt,
-                bypassesCache: bypassesContentCache
-            ) { [weak self] identity, _ in
-                guard let self else { return false }
-                return await self.authorize(identity)
+            let response = try await withTaskCancellationHandler {
+                try await imageLoader.image(
+                    for: url,
+                    interval: settings.preferences.imageRequestInterval,
+                    pageStartedAt: imagePageStartedAt,
+                    prioritize: prioritize,
+                    stateChanged: { activity.continuation.yield($0) }
+                ) { [weak self] identity, _ in
+                    guard let self else { return false }
+                    return await self.authorize(identity)
+                }
+            } onCancel: {
+                activityTask.cancel()
             }
             try Task.checkCancellation()
             continuation.yield(.response(URLResponse(
@@ -3620,6 +3603,7 @@ final class BrowserModel: ObservableObject {
                 byteCount: response.body.count
             )
         } catch {
+            if Task.isCancelled { activityTask.cancel() }
             continuation.finish(throwing: error)
             return nil
         }
@@ -3791,6 +3775,9 @@ struct StreamingWebViewPrototype: View {
             }
             .clipped()
             .background(WebViewScrollerInsetAccessor(browser: browser, topInset: scrollerTopInset))
+            .onChange(of: scrollerTopInset, initial: true) { _, inset in
+                browser.updateImageViewportTopInset(inset)
+            }
         }
     }
 }

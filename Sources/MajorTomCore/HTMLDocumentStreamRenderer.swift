@@ -132,7 +132,8 @@ public final class HTMLDocumentStreamRenderer {
         options: HTMLRenderingOptions = HTMLRenderingOptions(),
         baseURL: URL? = nil,
         linkIdentifier: String? = nil,
-        isExpandableImage: Bool = false
+        isExpandableImage: Bool = false,
+        imageLoading: SameCapsuleImageLoading = .off
     ) -> Data {
         var prefix = ""
         switch event {
@@ -172,6 +173,9 @@ public final class HTMLDocumentStreamRenderer {
             }
             if isExpandableImage {
                 attributes += " data-mt-expandable=\"1\""
+                if imageLoading != .off {
+                    attributes += " data-mt-image-auto=\"\(imageLoading.rawValue)\""
+                }
             }
             html = "<p \(attributes)>\(hintMarkup)<a href=\"\(Self.escapeAttribute(destination))\">\(Self.renderInline(visibleText, options: options))</a></p>"
         case .listItem(let text):

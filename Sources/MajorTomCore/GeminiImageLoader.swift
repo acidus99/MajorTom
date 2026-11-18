@@ -3,19 +3,30 @@ import Foundation
 /// Shared by tabs. Only cache misses enter the per-capsule network queues; the
 /// cache remains a passive store and WebKit never owns retrieval policy.
 public actor GeminiImageLoader {
+    public enum State: String, Sendable {
+        case idle
+        case pending
+        case requesting
+    }
+
     typealias Fetch = @Sendable (
         GeminiRequestTarget, @escaping GeminiTransport.TrustAuthorization
     ) async throws -> ContentResponse
+
+    private struct Waiter {
+        let continuation: CheckedContinuation<ContentResponse, any Error>
+        let stateChanged: @Sendable (State) -> Void
+    }
 
     private struct Request {
         let id = UUID()
         let target: GeminiRequestTarget
         let interval: TimeInterval
         let notBefore: ContinuousClock.Instant
-        let bypassesCache: Bool
         let cacheGeneration: UInt64?
         let authorize: GeminiTransport.TrustAuthorization
-        var waiters: [UUID: CheckedContinuation<ContentResponse, any Error>]
+        var state: State = .pending
+        var waiters: [UUID: Waiter]
     }
 
     private struct Cooldown {
@@ -28,6 +39,7 @@ public actor GeminiImageLoader {
     private let fetch: Fetch
     private var queues: [CapsuleEndpoint: [Request]] = [:]
     private var workers: [CapsuleEndpoint: Task<Void, Never>] = [:]
+    private var workerIDs: [CapsuleEndpoint: UUID] = [:]
     private var cooldowns: [CapsuleEndpoint: Cooldown] = [:]
 
     public init(cache: ContentCache?, transport: GeminiTransport = GeminiTransport()) {
@@ -48,15 +60,14 @@ public actor GeminiImageLoader {
         for url: URL,
         interval: TimeInterval,
         pageStartedAt: ContinuousClock.Instant,
-        bypassesCache: Bool = false,
+        prioritize: Bool = false,
+        stateChanged: @escaping @Sendable (State) -> Void = { _ in },
         authorize: @escaping GeminiTransport.TrustAuthorization
     ) async throws -> ContentResponse {
         let cacheGeneration = await cache?.writeGeneration
         let target = try GeminiRequestTarget(url.absoluteString)
         try Task.checkCancellation()
-        if bypassesCache {
-            try? await cache?.removeResponse(for: target.url)
-        } else if let cached = try? await cache?.freshResponse(for: target.url) {
+        if let cached = try? await cache?.freshResponse(for: target.url) {
             try Task.checkCancellation()
             return cached
         }
@@ -67,21 +78,26 @@ public actor GeminiImageLoader {
             return try await withCheckedThrowingContinuation { continuation in
                 let endpoint = target.endpoint
                 if let index = queues[endpoint]?.firstIndex(where: {
-                    $0.target.url == target.url && $0.cacheGeneration == cacheGeneration && $0.bypassesCache == bypassesCache
+                    $0.target.url == target.url && $0.cacheGeneration == cacheGeneration
                         && $0.interval == interval
                 }) {
-                    queues[endpoint]![index].waiters[waiter] = continuation
+                    queues[endpoint]![index].waiters[waiter] = Waiter(
+                        continuation: continuation, stateChanged: stateChanged
+                    )
                 } else {
                     queues[endpoint, default: []].append(Request(
                         target: target,
                         interval: interval,
                         notBefore: pageStartedAt.advanced(by: .seconds(interval)),
-                        bypassesCache: bypassesCache,
                         cacheGeneration: cacheGeneration,
                         authorize: authorize,
-                        waiters: [waiter: continuation]
+                        waiters: [waiter: Waiter(continuation: continuation, stateChanged: stateChanged)]
                     ))
                 }
+                if let joined = queues[endpoint]?.first(where: { $0.waiters[waiter] != nil }) {
+                    stateChanged(joined.state)
+                }
+                if prioritize { promote(target) }
                 startNext(for: endpoint)
             }
         } onCancel: {
@@ -89,41 +105,77 @@ public actor GeminiImageLoader {
         }
     }
 
+    /// A click changes order, never the capsule's cooldown or an active transfer.
+    public func prioritize(_ url: URL) {
+        guard let target = try? GeminiRequestTarget(url.absoluteString) else { return }
+        promote(target)
+    }
+
+    private func promote(_ target: GeminiRequestTarget) {
+        let endpoint = target.endpoint
+        guard let index = queues[endpoint]?.firstIndex(where: { $0.target.url == target.url }),
+              index > 0 else { return }
+        let active = queues[endpoint]!.first!.state != .pending
+        let request = queues[endpoint]!.remove(at: index)
+        queues[endpoint]!.insert(request, at: active ? 1 : 0)
+        if !active {
+            workerIDs[endpoint] = nil
+            workers.removeValue(forKey: endpoint)?.cancel()
+            startNext(for: endpoint)
+        }
+    }
+
     private func startNext(for endpoint: CapsuleEndpoint) {
         guard workers[endpoint] == nil, let request = queues[endpoint]?.first else { return }
+        let workerID = UUID()
+        workerIDs[endpoint] = workerID
         workers[endpoint] = Task {
             do {
                 let response = try await retrieve(request)
-                finish(request, result: .success(response))
+                finish(request, result: .success(response), workerID: workerID)
             } catch {
-                finish(request, result: .failure(error))
+                finish(request, result: .failure(error), workerID: workerID)
             }
         }
     }
 
     private func cancel(waiter: UUID, endpoint: CapsuleEndpoint) {
         guard let index = queues[endpoint]?.firstIndex(where: { $0.waiters[waiter] != nil }),
-              let continuation = queues[endpoint]![index].waiters.removeValue(forKey: waiter)
+              let removed = queues[endpoint]![index].waiters.removeValue(forKey: waiter)
         else { return }
-        continuation.resume(throwing: CancellationError())
+        removed.stateChanged(.idle)
+        removed.continuation.resume(throwing: CancellationError())
         guard queues[endpoint]![index].waiters.isEmpty else { return }
         queues[endpoint]!.remove(at: index)
         if index == 0 {
+            workerIDs[endpoint] = nil
             workers.removeValue(forKey: endpoint)?.cancel()
             startNext(for: endpoint)
         }
         if queues[endpoint]?.isEmpty == true { queues[endpoint] = nil }
     }
 
-    private func finish(_ request: Request, result: Result<ContentResponse, any Error>) {
+    private func finish(_ request: Request, result: Result<ContentResponse, any Error>, workerID: UUID) {
         let endpoint = request.target.endpoint
         // A canceled worker may finish after its replacement has already started.
-        guard queues[endpoint]?.first?.id == request.id else { return }
+        guard workerIDs[endpoint] == workerID, queues[endpoint]?.first?.id == request.id else { return }
         let finished = queues[endpoint]!.removeFirst()
         workers[endpoint] = nil
-        for continuation in finished.waiters.values { continuation.resume(with: result) }
+        workerIDs[endpoint] = nil
+        for waiter in finished.waiters.values {
+            if finished.state != .idle { waiter.stateChanged(.idle) }
+            waiter.continuation.resume(with: result)
+        }
         startNext(for: endpoint)
         if queues[endpoint]?.isEmpty == true { queues[endpoint] = nil }
+    }
+
+    private func setState(_ state: State, for request: Request) {
+        let endpoint = request.target.endpoint
+        guard queues[endpoint]?.first?.id == request.id else { return }
+        guard queues[endpoint]![0].state != state else { return }
+        queues[endpoint]![0].state = state
+        for waiter in queues[endpoint]![0].waiters.values { waiter.stateChanged(state) }
     }
 
     private func retrieve(_ request: Request) async throws -> ContentResponse {
@@ -131,8 +183,7 @@ public actor GeminiImageLoader {
         var redirects = 0
         while true {
             try Task.checkCancellation()
-            if !request.bypassesCache,
-               let cached = try? await cache?.freshResponse(for: target.url) {
+            if let cached = try? await cache?.freshResponse(for: target.url) {
                 try Task.checkCancellation()
                 return cached
             }
@@ -148,14 +199,21 @@ public actor GeminiImageLoader {
             try Task.checkCancellation()
             // A different tab or direct image navigation may have filled the cache
             // during the wait. Such a hit does not consume a network slot.
-            if !request.bypassesCache,
-               let cached = try? await cache?.freshResponse(for: target.url) {
+            if let cached = try? await cache?.freshResponse(for: target.url) {
                 try Task.checkCancellation()
                 return cached
             }
             try Task.checkCancellation()
             cooldowns[target.endpoint, default: Cooldown()].lastStarted = .now
-            let response = try await fetch(target, request.authorize)
+            setState(.requesting, for: request)
+            let response: ContentResponse
+            do {
+                response = try await fetch(target, request.authorize)
+            } catch {
+                setState(.idle, for: request)
+                throw error
+            }
+            setState(response.status == 44 || response.status.map { $0 / 10 == 3 } == true ? .pending : .idle, for: request)
             try Task.checkCancellation()
             if response.status == 44 {
                 var cooldown = cooldowns[target.endpoint] ?? Cooldown()
@@ -178,7 +236,6 @@ public actor GeminiImageLoader {
                     throw URLError(.badServerResponse)
                 }
                 target = try GeminiRequestTarget(url.absoluteString)
-                if request.bypassesCache { try? await cache?.removeResponse(for: target.url) }
                 redirects += 1
                 continue
             }

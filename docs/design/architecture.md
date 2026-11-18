@@ -284,8 +284,10 @@ Gemini cache policy is deliberately small. Completed successful image responses 
 Gemini URLs are reusable for 24 hours. A capsule's completed `/favicon.txt` response is first
 validated by the favicon feature; valid responses and synthetic `51 NOT FOUND` responses for
 all completed unacceptable answers are retained for 30 days. Incomplete or failed favicon
-requests create no entry. Reload skips the content cache for the page and its inline images
-and removes any matching stored response before requesting it again. Cache writes are ordered
+requests create no entry. Reload skips the content cache for the main response and removes
+any matching stored main response before requesting it again. Inline images always consult the
+cache first, including on Reload; their loader has no cache-bypass option. Missing or expired
+images enter its paced queue. Cache writes are ordered
 off the UI path, then flushed before orderly termination; the database is checkpointed and
 closed like the Back/Forward database.
 
@@ -313,19 +315,42 @@ protocol-neutral streaming framework. The policy can remain a no-op for future p
 until their own reuse rules are justified. Omnibar indexing and purposeful offline browsing
 remain separate future systems.
 
-`GeminiImageLoader` in Core owns inline image retrieval, replacing the presentation
-layer's four-request semaphore and its embedded fetch/cache loop. One app-owned actor
-is shared by all tabs. It returns complete `ContentResponse` bytes to the WebKit resource
-bridge, and reuses the existing transport, trust authorization, 16 MiB response limit,
-and content cache. Each capsule has a FIFO queue and one cancelable worker task; a
-monotonic sleep enforces the page's initial delay, request spacing, and exponential
-`44` backoff without polling or a separate timer. Same-capsule redirect hops also pass
-through pacing. Fresh cache hits bypass the queue, and workers check again after waiting.
-Successful responses are stored before releasing the next request. In-flight duplicates
-share a worker with independently cancelable callers. Page navigation/Stop cancels those
-callers through the tab's existing image tasks; per-capsule cooldown state stays in the
-shared actor. Direct document navigation, favicon retrieval, and downloads keep their
+`GeminiImageLoader` in Core owns inline image retrieval. One app-owned actor is shared by
+all tabs and returns complete `ContentResponse` bytes to the WebKit resource bridge. It
+reuses the existing transport, trust authorization, 16 MiB response limit, and content cache.
+Each capsule has an ordered queue and one cancelable worker. A monotonic sleep enforces the
+initial delay, request spacing, and exponential `44` backoff. Same-capsule redirect hops
+also pass through pacing. Fresh cache hits bypass the queue, and workers recheck after
+waiting. Successful responses are stored before releasing the next request. Duplicates
+share a worker with independently cancelable callers. Clicks promote waiting work; a
+sleeping worker can be replaced without changing the cooldown, while an active transfer
+finishes first. Worker identities fence results from canceled/replaced workers.
+
+The loader reports idle, pending, and requesting state to each caller. The presentation
+bridge consumes ordered state events to update the original link's static system-clock
+annotation, spinner, tooltip, and accessibility state. Document identities fence late events.
+Navigation/Stop cancels each page's image tasks, while per-capsule cooldown stays in the
+shared actor. Direct document navigation, favicon retrieval, and downloads retain their
 existing retrieval paths.
+
+`InlineImagePresentationScript` in AppKitSupport owns image-link discovery, visibility,
+interaction, annotations, and captions in WebKit's isolated client world. All submits
+parsed eligible links; When Visible uses one `IntersectionObserver` per document, with
+the navigation inset excluded from its root. Hidden documents cannot submit visibility
+loads. The existing mutation observer registers streamed links, and each link is unobserved
+after its first submission. Scrolling does not poll or measure link geometry in Swift.
+Window resizing is handled by WebKit; navigation-inset changes update the observer root.
+Messages include the document URL and line ID and are validated against the tab's link map.
+Automatic loads start only after WebKit has parsed their links, avoiding state updates
+racing initial document creation. Received source bytes remain untouched.
+
+The tab publishes its image-task collection so the existing Reload/Stop control reflects
+image work without changing the main-response `isLoading` state. Stop cancels those tasks,
+clears unfinished expansion/history state, and sends a document-fenced cleanup command to
+the page script. That command removes only unfinished placeholders and annotations and
+disconnects automatic discovery for the visit. Swift also rejects late automatic submissions;
+navigation resets the pause. Canceling a load cancels its state-event consumer so a stale
+idle callback cannot overwrite the state of an immediate manual retry.
 
 ## Presentation boundary
 

@@ -102,14 +102,44 @@ Preformatted blocks may carry ANSI SGR escape sequences, which some capsules use
 
 Reading preferences control application appearance separately from the document theme and width. Changes to appearance-only preferences update open content without another request. Optional enhancements—such as conservative inline formatting and automatic same-capsule images—must be individually controllable, bounded, and fail without disrupting the original document or link. Automatic same-capsule images are off by default; this default is applied once to existing installations too. General settings provides Restore Default Settings, which restores browser preferences but preserves trusted capsule identities and client certificates. General settings also shows whether Major Tom is the default handler for `gemini://` URLs and provides a button to make it the default; the button is disabled and a confirmation label is shown when it already is the default.
 
-Inline Gemini images use a shared background loader. Fresh cached images appear immediately,
-even while network work is waiting. Cache misses enter an ordered queue per capsule, shared
-across tabs, with one transfer at a time. Quality of Life settings provides an Image Request
-Interval of 1–60 seconds, defaulting to two seconds. The first network image waits until that
-interval has elapsed since navigation began, and subsequent request starts are at least one
-interval apart. Images are discovered as the document streams, including below the viewport;
-manual expansions and restored expansions use the same loader. Embedded `data:` images do
-not enter the network queue.
+Inline Gemini images use a shared background loader. Quality of Life settings offers
+Automatically Load Same-Capsule Images with Off, All, and When Visible choices. Off is the
+default. Existing enabled toggles migrate to All; disabled toggles migrate to Off. All
+submits eligible links as the document streams. When Visible submits each link once when it
+first enters the displayed content viewport, excluding navigation overlays and hidden tabs.
+Once submitted, a request remains queued even if the reader scrolls away. Embedded `data:`
+images remain independently configurable and never enter the network queue.
+
+Fresh cached images appear immediately when submitted, without a pending icon or spinner.
+Cache misses enter an ordered queue per capsule, shared across tabs, with one transfer at a
+time. Image Request Interval is configurable from 1–60 seconds and defaults to two seconds.
+The first network image waits until that interval has elapsed since navigation began;
+subsequent request starts are at least one interval apart. Automatic, manually expanded,
+and restored images use the same loader.
+
+An image link is normal when not queued or after completion. Pending requests show a static
+system clock symbol with an Auto Load Pending tooltip (Image Pending for manual requests),
+including cooldown and backoff waits. Only an active network request shows the existing
+spinner. Each response, failure, or cancellation clears the active state. Links expose
+pending/requesting descriptions and active-request busy state to accessibility.
+
+Clicking a queued link promotes its image ahead of other waiting images, respects cooldown
+and backoff, and lets an active transfer finish. Clicking an active request shares that
+transfer. Clicking a not-yet-submitted image loads it inline with the same priority. A second
+click on a displayed manual expansion collapses it; a completed automatic image's original
+link remains normal navigation. Command-click and other modified clicks retain normal browser
+behavior. Failures leave the original link available for another attempt.
+Image links also offer Load Image or Collapse Image in their context menu; ordinary
+keyboard link activation uses the same prioritization behavior as a click.
+
+The navigation bar's Reload control becomes Stop Loading while the main page or any inline
+image work is pending, including queue, cooldown, and backoff waits. Stop Loading (also
+available in the page context menu and through the existing menu command and Command-Period)
+cancels this tab's pending and active image loads. Unfinished image placeholders and link
+indicators are removed, while the page and completed images remain. A stopped image link can
+be clicked once to retry through the requestor. Further automatic submissions are paused for
+the current visit, including links that become visible later; explicit image clicks remain
+available. Reload or a new navigation resumes the selected automatic-loading mode.
 
 An inline image response of `44 Slow Down` pauses that capsule's image queue and retries the
 same image with exponential backoff: twice the configured interval, then four times, and so
@@ -120,16 +150,18 @@ capsule's cooldown survives navigation. Concurrent requests for the same image s
 canceling one caller does not cancel work still needed by another.
 
 Gemtext rendering choices synchronize between Macs, including embedded `data:` images,
-automatic same-capsule images, the image request interval, and inline rendering enhancements. Application appearance,
+the same-capsule image loading mode, the image request interval, and inline rendering enhancements. Application appearance,
 proxy configuration, and Favorites-bar visibility remain local to each Mac.
 
 View Source and Save Page As always use the original response body. Caching must preserve response metadata, completion state, and enough source to reproduce a page under changed reading preferences.
 
 Major Tom avoids repeated Gemini image transfers with a local response cache. A completed,
 successful Gemini image may be reused for 24 hours whether it was first displayed inline,
-opened directly, or fetched for a user action. Reload always requests the page and its inline
-images again instead of consulting that cache. Cache reuse never initiates a request itself,
-and cached responses follow the same parsing and presentation path as live responses. Page
+opened directly, or fetched for a user action. Reload requests the main page again but reuses
+fresh cached inline images immediately. Only missing or expired inline images enter the paced
+network queue. Empty Caches removes reusable image responses when a fresh transfer is wanted.
+Reloading a standalone image requests that main response afresh. Cache reuse never initiates
+a request itself, and cached responses follow the same parsing and presentation path as live responses. Page
 Information identifies content as Live or Cached and shows when the response was originally
 received. This cache remains on one Mac and does not synchronize.
 

@@ -58,6 +58,12 @@ public struct GeminiProxyConfiguration: Equatable, Codable, Sendable {
     }
 }
 
+public enum SameCapsuleImageLoading: String, CaseIterable, Codable, Sendable {
+    case off
+    case all
+    case whenVisible
+}
+
 public struct BrowserPreferences: Equatable, Codable, Sendable {
     public var homepage: String
     public var searchProvider: SearchProvider
@@ -68,7 +74,12 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
     public var darkContentTheme: String
     public var contentWidth: ContentWidth
     public var proxy: GeminiProxyConfiguration?
-    public var automaticallyLoadsSameCapsuleImages: Bool
+    public var sameCapsuleImageLoading: SameCapsuleImageLoading
+    /// Compatibility with the former on/off preference and older sync clients.
+    public var automaticallyLoadsSameCapsuleImages: Bool {
+        get { sameCapsuleImageLoading != .off }
+        set { sameCapsuleImageLoading = newValue ? .all : .off }
+    }
     public var imageRequestInterval: TimeInterval
     public var automaticallyLoadsDataImages: Bool
     public var renderingOptions: HTMLRenderingOptions
@@ -88,6 +99,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         contentWidth: ContentWidth = .narrow,
         proxy: GeminiProxyConfiguration? = nil,
         automaticallyLoadsSameCapsuleImages: Bool = false,
+        sameCapsuleImageLoading: SameCapsuleImageLoading? = nil,
         imageRequestInterval: TimeInterval = 2,
         automaticallyLoadsDataImages: Bool = true,
         renderingOptions: HTMLRenderingOptions = HTMLRenderingOptions(),
@@ -103,7 +115,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         self.darkContentTheme = darkContentTheme
         self.contentWidth = contentWidth
         self.proxy = proxy
-        self.automaticallyLoadsSameCapsuleImages = automaticallyLoadsSameCapsuleImages
+        self.sameCapsuleImageLoading = sameCapsuleImageLoading ?? (automaticallyLoadsSameCapsuleImages ? .all : .off)
         self.imageRequestInterval = imageRequestInterval
         self.automaticallyLoadsDataImages = automaticallyLoadsDataImages
         self.renderingOptions = renderingOptions
@@ -111,7 +123,7 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         self.showsFavoritesBar = showsFavoritesBar
     }
 
-    private enum LegacyCodingKeys: String, CodingKey { case contentTheme }
+    private enum LegacyCodingKeys: String, CodingKey { case contentTheme, automaticallyLoadsSameCapsuleImages }
 
     /// Decodes leniently, key by key, so that adding a preference cannot discard the
     /// ones already stored.
@@ -149,10 +161,11 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
             ?? defaults.contentWidth
         // Genuinely optional: absent and "no proxy" are the same thing.
         proxy = try container.decodeIfPresent(GeminiProxyConfiguration.self, forKey: .proxy)
-        automaticallyLoadsSameCapsuleImages = try container.decodeIfPresent(
-            Bool.self,
-            forKey: .automaticallyLoadsSameCapsuleImages
-        ) ?? defaults.automaticallyLoadsSameCapsuleImages
+        let legacyImages = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            .decodeIfPresent(Bool.self, forKey: .automaticallyLoadsSameCapsuleImages) ?? false
+        sameCapsuleImageLoading = try container.decodeIfPresent(
+            SameCapsuleImageLoading.self, forKey: .sameCapsuleImageLoading
+        ) ?? (legacyImages ? .all : .off)
         imageRequestInterval = try container.decodeIfPresent(TimeInterval.self, forKey: .imageRequestInterval)
             ?? defaults.imageRequestInterval
         automaticallyLoadsDataImages = try container.decodeIfPresent(

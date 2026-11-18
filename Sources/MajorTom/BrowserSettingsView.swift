@@ -200,7 +200,12 @@ struct BrowserSettingsView: View {
                 .foregroundStyle(.secondary)
 
 
-            Toggle("Automatically display same-capsule images", isOn: store.binding(\.automaticallyLoadsSameCapsuleImages))
+            Picker("Automatically Load Same-Capsule Images", selection: store.binding(\.sameCapsuleImageLoading)) {
+                Text("Off").tag(SameCapsuleImageLoading.off)
+                Text("All").tag(SameCapsuleImageLoading.all)
+                Text("When Visible").tag(SameCapsuleImageLoading.whenVisible)
+            }
+            .help("Load all same-capsule images, or wait until each link becomes visible. You can always click an image link to load it.")
             Stepper(value: store.binding(\.imageRequestInterval), in: 1...60, step: 1) {
                 Text("Image Request Interval: \(Duration.seconds(store.preferences.imageRequestInterval).formatted(.units(allowed: [.seconds], width: .wide)))")
             }

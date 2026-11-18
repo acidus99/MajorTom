@@ -299,6 +299,19 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertEqual(decoded.imageRequestInterval, 2)
     }
 
+    func testImageLoadingModesMigrateTheOldToggleAndRoundTrip() throws {
+        for enabled in [false, true] {
+            let data = try JSONSerialization.data(withJSONObject: ["automaticallyLoadsSameCapsuleImages": enabled])
+            let preferences = try JSONDecoder().decode(BrowserPreferences.self, from: data)
+            XCTAssertEqual(preferences.sameCapsuleImageLoading, enabled ? .all : .off)
+        }
+        for mode in SameCapsuleImageLoading.allCases {
+            let preferences = BrowserPreferences(sameCapsuleImageLoading: mode)
+            let decoded = try JSONDecoder().decode(BrowserPreferences.self, from: JSONEncoder().encode(preferences))
+            XCTAssertEqual(decoded.sameCapsuleImageLoading, mode)
+        }
+    }
+
     func testDirectorySaveFilenameUsesDocumentTitle() {
         XCTAssertEqual(
             BrowserFilenameSuggestion.make(

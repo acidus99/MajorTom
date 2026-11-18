@@ -194,7 +194,19 @@ a:focus-visible {
   user-select: none;
 }
 
-/* A pending image expansion shows a spinner immediately after its link label. */
+/* A queued image uses the system clock symbol, tinted with the link's color. */
+.link-line.is-image-pending > a::after {
+  content: "";
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  margin-left: 0.45em;
+  background-color: currentColor;
+  mask: var(--mt-image-pending-icon) center / contain no-repeat;
+  vertical-align: -0.1em;
+}
+
+/* Only an active network request spins. */
 .link-line.is-loading > a::after {
   content: "";
   display: inline-block;

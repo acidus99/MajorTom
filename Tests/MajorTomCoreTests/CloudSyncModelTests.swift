@@ -261,7 +261,7 @@ final class CloudSyncModelTests: XCTestCase {
         remote.searchProvider = .custom
         remote.customSearchEndpoint = "gemini://search.example/query"
         remote.showsFavicons.toggle()
-        remote.automaticallyLoadsSameCapsuleImages.toggle()
+        remote.sameCapsuleImageLoading = .whenVisible
         remote.imageRequestInterval = 7
         remote.automaticallyLoadsDataImages.toggle()
         remote.renderingOptions.recognizesEmphasis.toggle()
@@ -289,6 +289,20 @@ final class CloudSyncModelTests: XCTestCase {
         )
         let applied = decoded.applying(to: BrowserPreferences(imageRequestInterval: 9))
         XCTAssertEqual(applied.imageRequestInterval, 9)
+    }
+
+    func testOlderSyncedImageToggleMapsToAllOrOff() throws {
+        for enabled in [false, true] {
+            var preferences = BrowserPreferences()
+            preferences.automaticallyLoadsSameCapsuleImages = enabled
+            var payload = try XCTUnwrap(JSONSerialization.jsonObject(
+                with: JSONEncoder().encode(SyncedBrowserPreferenceValues(preferences: preferences))
+            ) as? [String: Any])
+            payload.removeValue(forKey: "sameCapsuleImageLoading")
+            let decoded = try JSONDecoder().decode(SyncedBrowserPreferenceValues.self,
+                from: JSONSerialization.data(withJSONObject: payload))
+            XCTAssertEqual(decoded.applying(to: BrowserPreferences()).sameCapsuleImageLoading, enabled ? .all : .off)
+        }
     }
 
     func testAppearanceAndNetworkingChangesDoNotChangeSyncedProjection() {

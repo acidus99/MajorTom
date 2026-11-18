@@ -25,8 +25,12 @@ final class GeminiImageLoaderTests: XCTestCase {
             try await loader.image(for: uncachedURL, interval: 60, pageStartedAt: .now, authorize: authorize)
         }
         let returned = expectation(description: "Cached image bypasses network cooldown")
+        let activity = ImageActivity()
         let hit = Task { [url, authorize] in
-            let result = try await loader.image(for: url, interval: 60, pageStartedAt: .now, authorize: authorize)
+            let result = try await loader.image(
+                for: url, interval: 60, pageStartedAt: .now,
+                stateChanged: { activity.record($0) }, authorize: authorize
+            )
             returned.fulfill()
             return result
         }
@@ -38,14 +42,17 @@ final class GeminiImageLoaderTests: XCTestCase {
         _ = try? await waiting.value
         let starts = await probe.starts
         XCTAssertTrue(starts.isEmpty)
+        XCTAssertTrue(activity.values.isEmpty, "A cache hit must never signal an active network request")
     }
 
-    func testNetworkRequestsAreSpacedAndSuccessfulResponseIsCached() async throws {
+    func testCachedImagesAreImmediateOnNewVisitsAndCacheMissesArePaced() async throws {
         let cache = try makeCache()
         let probe = ImageFetchProbe()
         let loader = GeminiImageLoader(cache: cache, fetch: { target, authorize in try await probe.fetch(target, authorize: authorize) })
         let opened = ContinuousClock.now.advanced(by: .seconds(-60))
         let first = try await loader.image(for: url, interval: 1, pageStartedAt: opened, authorize: authorize)
+        // Reload previously bypassed cached inline images and unnecessarily restarted
+        // the network cooldown. A new page visit must reuse the completed response.
         let hit = try await loader.image(for: url, interval: 60, pageStartedAt: .now, authorize: authorize)
         XCTAssertEqual(hit, first)
         let nextURL = URL(string: "gemini://images.example/two.png")!
@@ -79,9 +86,13 @@ final class GeminiImageLoaderTests: XCTestCase {
 
     func testSlowDownDoublesDelayAndSuccessResetsIt() async throws {
         let probe = ImageFetchProbe(statuses: [44, 44, 20, 20])
+        let activity = ImageActivity()
         let loader = GeminiImageLoader(cache: nil, fetch: { target, authorize in try await probe.fetch(target, authorize: authorize) })
         let opened = ContinuousClock.now.advanced(by: .seconds(-60))
-        _ = try await loader.image(for: url, interval: 1, pageStartedAt: opened, authorize: authorize)
+        _ = try await loader.image(
+            for: url, interval: 1, pageStartedAt: opened,
+            stateChanged: { activity.record($0) }, authorize: authorize
+        )
         let nextURL = URL(string: "gemini://images.example/two.png")!
         _ = try await loader.image(for: nextURL, interval: 1, pageStartedAt: opened, authorize: authorize)
         let starts = await probe.starts
@@ -93,6 +104,8 @@ final class GeminiImageLoaderTests: XCTestCase {
         // META is "0": treating it as a numeric delay would bypass backoff.
         // A reset must also allow the next image before the old four-second delay.
         XCTAssertLessThan(gaps[2], gaps[1])
+        // Prevents queue/backoff waits being presented as active network transfers.
+        XCTAssertEqual(activity.values, [.pending, .requesting, .pending, .requesting, .pending, .requesting, .idle])
     }
 
     func testSlowDownSurvivesCancellationAndDoesNotBlockOtherCapsules() async throws {
@@ -115,9 +128,13 @@ final class GeminiImageLoaderTests: XCTestCase {
 
     func testCancelingOnlyQueuedRequestDoesNotBlockNextPage() async throws {
         let probe = ImageFetchProbe()
+        let activity = ImageActivity()
         let loader = GeminiImageLoader(cache: nil, fetch: { target, authorize in try await probe.fetch(target, authorize: authorize) })
         let waiting = Task { [url, authorize] in
-            try await loader.image(for: url, interval: 60, pageStartedAt: .now, authorize: authorize)
+            try await loader.image(
+                for: url, interval: 60, pageStartedAt: .now,
+                stateChanged: { activity.record($0) }, authorize: authorize
+            )
         }
         try await Task.sleep(for: .milliseconds(50))
         waiting.cancel()
@@ -125,25 +142,10 @@ final class GeminiImageLoaderTests: XCTestCase {
             _ = try await waiting.value
             XCTFail("Cancellation must release a queued request")
         } catch is CancellationError {}
+        XCTAssertEqual(activity.values, [.pending, .idle], "Canceled queued work must never report a transfer")
         _ = try await loader.image(
             for: url, interval: 1, pageStartedAt: .now.advanced(by: .seconds(-60)), authorize: authorize
         )
-        let starts = await probe.starts
-        XCTAssertEqual(starts.count, 1)
-    }
-
-    func testReloadBypassesAndReplacesCachedResponse() async throws {
-        let cache = try makeCache()
-        try await cache.store(response(url: url, body: Data([9])), resourceType: .image, lifetime: 60)
-        let probe = ImageFetchProbe()
-        let loader = GeminiImageLoader(cache: cache, fetch: { target, authorize in try await probe.fetch(target, authorize: authorize) })
-        let result = try await loader.image(
-            for: url, interval: 1, pageStartedAt: .now.advanced(by: .seconds(-60)),
-            bypassesCache: true, authorize: authorize
-        )
-        XCTAssertEqual(result.body, Data([1, 2, 3]))
-        let stored = try await cache.freshResponse(for: url)
-        XCTAssertEqual(stored, result)
         let starts = await probe.starts
         XCTAssertEqual(starts.count, 1)
     }
@@ -155,10 +157,15 @@ final class GeminiImageLoaderTests: XCTestCase {
             try await probe.fetch(target, authorize: authorize)
         })
         let opened = ContinuousClock.now.advanced(by: .seconds(-60))
+        let activity = ImageActivity()
         let active = Task { [url, authorize] in
-            try await loader.image(for: url, interval: 1, pageStartedAt: opened, authorize: authorize)
+            try await loader.image(
+                for: url, interval: 1, pageStartedAt: opened,
+                stateChanged: { activity.record($0) }, authorize: authorize
+            )
         }
         await probe.waitForStarts(1)
+        XCTAssertEqual(activity.values, [.pending, .requesting])
         let nextURL = URL(string: "gemini://images.example/two.png")!
         let queued = Task { [authorize] in
             try await loader.image(for: nextURL, interval: 60, pageStartedAt: .now, authorize: authorize)
@@ -168,6 +175,7 @@ final class GeminiImageLoaderTests: XCTestCase {
         try await cache.store(cached, resourceType: .image, lifetime: 60)
         active.cancel()
         _ = try? await active.value
+        XCTAssertEqual(activity.values, [.pending, .requesting, .idle], "Canceling an active caller must clear its indicator")
         let returned = expectation(description: "Queued image checks cache before waiting for a network slot")
         let result = Task {
             let image = try await queued.value
@@ -224,9 +232,80 @@ final class GeminiImageLoaderTests: XCTestCase {
         ContentCache(database: try ContentCacheDatabase(inMemory: ()))
     }
 
+    func testClickPromotesAnImageDuringInitialCooldown() async throws {
+        let probe = ImageFetchProbe()
+        let loader = GeminiImageLoader(cache: nil, fetch: { target, authorize in
+            try await probe.fetch(target, authorize: authorize)
+        })
+        let opened = ContinuousClock.now
+        let secondURL = URL(string: "gemini://images.example/second.png")!
+        let firstQueued = expectation(description: "First image queued")
+        let first = Task { [url, authorize] in
+            try await loader.image(for: url, interval: 1, pageStartedAt: opened,
+                stateChanged: { if $0 == .pending { firstQueued.fulfill() } }, authorize: authorize)
+        }
+        await fulfillment(of: [firstQueued], timeout: 2)
+        let secondQueued = expectation(description: "Clicked image queued")
+        let second = Task { [authorize] in
+            try await loader.image(for: secondURL, interval: 1, pageStartedAt: opened,
+                stateChanged: { if $0 == .pending { secondQueued.fulfill() } }, authorize: authorize)
+        }
+        await fulfillment(of: [secondQueued], timeout: 2)
+        await loader.prioritize(secondURL)
+        _ = try await second.value
+        _ = try await first.value
+        let starts = await probe.starts
+        XCTAssertEqual(starts.map(\.url), [secondURL, url])
+        XCTAssertGreaterThanOrEqual(opened.duration(to: starts[0].time), .seconds(1))
+        XCTAssertGreaterThanOrEqual(starts[0].time.duration(to: starts[1].time), .seconds(1))
+    }
+
+    func testClickWaitsForActiveTransferThenGoesBeforeOtherQueuedImages() async throws {
+        let probe = ImageFetchProbe(blocksFirstRequest: true)
+        let loader = GeminiImageLoader(cache: nil, fetch: { target, authorize in
+            try await probe.fetch(target, authorize: authorize)
+        })
+        let opened = ContinuousClock.now.advanced(by: .seconds(-60))
+        let active = Task { [url, authorize] in
+            try await loader.image(for: url, interval: 1, pageStartedAt: opened, authorize: authorize)
+        }
+        await probe.waitForStarts(1)
+        let secondURL = URL(string: "gemini://images.example/second.png")!
+        let secondQueued = expectation(description: "Second image queued")
+        let second = Task { [authorize] in
+            try await loader.image(for: secondURL, interval: 1, pageStartedAt: opened,
+                stateChanged: { if $0 == .pending { secondQueued.fulfill() } }, authorize: authorize)
+        }
+        await fulfillment(of: [secondQueued], timeout: 2)
+        let clickedURL = URL(string: "gemini://images.example/clicked.png")!
+        let clickedQueued = expectation(description: "Clicked image queued")
+        let clicked = Task { [authorize] in
+            try await loader.image(for: clickedURL, interval: 1, pageStartedAt: opened, prioritize: true,
+                stateChanged: { if $0 == .pending { clickedQueued.fulfill() } }, authorize: authorize)
+        }
+        await fulfillment(of: [clickedQueued], timeout: 2)
+        let beforeRelease = await probe.starts
+        XCTAssertEqual(beforeRelease.map(\.url), [url], "A click must not interrupt an active transfer")
+        await probe.releaseFirst()
+        _ = try await active.value
+        _ = try await clicked.value
+        _ = try await second.value
+        let starts = await probe.starts
+        XCTAssertEqual(starts.map(\.url), [url, clickedURL, secondURL])
+        XCTAssertGreaterThanOrEqual(starts[0].time.duration(to: starts[1].time), .seconds(1))
+        XCTAssertGreaterThanOrEqual(starts[1].time.duration(to: starts[2].time), .seconds(1))
+    }
+
     private func response(url: URL, body: Data = Data([1, 2, 3])) -> ContentResponse {
         ContentResponse(url: url, status: 20, meta: Data("image/png".utf8), mimeType: "image/png", body: body, receivedAt: Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down)))
     }
+}
+
+private final class ImageActivity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [GeminiImageLoader.State] = []
+    var values: [GeminiImageLoader.State] { lock.withLock { recorded } }
+    func record(_ value: GeminiImageLoader.State) { lock.withLock { recorded.append(value) } }
 }
 
 private actor ImageFetchProbe {
@@ -239,6 +318,7 @@ private actor ImageFetchProbe {
     private var statuses: [Int]
     private let blocksFirstRequest: Bool
     private let redirect: String
+    private var firstGate: AsyncStream<Void>.Continuation?
     private var observers: [(Int, CheckedContinuation<Void, Never>)] = []
 
     init(statuses: [Int] = [], blocksFirstRequest: Bool = false, redirect: String = "/two.png") {
@@ -252,7 +332,13 @@ private actor ImageFetchProbe {
         let ready = observers.filter { starts.count >= $0.0 }
         observers.removeAll { starts.count >= $0.0 }
         for (_, observer) in ready { observer.resume() }
-        if blocksFirstRequest, starts.count == 1 { try await Task.sleep(for: .seconds(60)) }
+        if blocksFirstRequest, starts.count == 1 {
+            let gate = AsyncStream<Void>.makeStream()
+            firstGate = gate.continuation
+            for await _ in gate.stream {}
+            firstGate = nil
+            try Task.checkCancellation()
+        }
         let status = statuses.isEmpty ? 20 : statuses.removeFirst()
         return ContentResponse(
             url: target.url, status: status,
@@ -261,6 +347,8 @@ private actor ImageFetchProbe {
             body: status == 20 ? Data([1, 2, 3]) : Data(), receivedAt: Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down))
         )
     }
+
+    func releaseFirst() { firstGate?.finish() }
 
     func waitForStarts(_ count: Int) async {
         if starts.count >= count { return }

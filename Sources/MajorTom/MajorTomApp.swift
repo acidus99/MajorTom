@@ -2269,7 +2269,7 @@ private struct BrowserTabView: View {
                     }
                     .accessibilityLabel("Address and search")
 
-                if browser.isLoading {
+                if browser.canStop {
                     BrowserToolbarButton(
                         title: "Stop Loading",
                         systemImage: "xmark",
