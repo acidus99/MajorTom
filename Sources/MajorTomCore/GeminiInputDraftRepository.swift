@@ -75,9 +75,13 @@ public struct GeminiInputDraftRepository: Sendable {
         }
     }
 
-    public func removeAll() throws {
+    public func removeAll(since cutoff: Date? = nil) throws {
         try database.write { db in
-            try db.execute(sql: "DELETE FROM gemini_input_drafts")
+            if let cutoff {
+                try db.execute(sql: "DELETE FROM gemini_input_drafts WHERE updated_at >= ?", arguments: [cutoff])
+            } else {
+                try db.execute(sql: "DELETE FROM gemini_input_drafts")
+            }
         }
     }
 

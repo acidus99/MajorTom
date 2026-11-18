@@ -28,6 +28,7 @@ struct MajorTomApp: App {
     /// Favourites-bar toggle.
     @ObservedObject private var bookmarks = BookmarksModel.shared
     @ObservedObject private var settings = BrowserSettingsStore.shared
+    @ObservedObject private var browsingData = BrowsingDataController.shared
 
     var body: some Scene {
         WindowGroup(for: BrowserWindowDestination.self) { destination in
@@ -217,6 +218,18 @@ struct MajorTomApp: App {
                 }
                 .keyboardShortcut("y", modifiers: .command)
                 Button("iCloud Tabs…") { openWindow(id: "icloud-tabs") }
+                Divider()
+                Button("Clear Browsing Data…", role: .destructive) {
+                    browsingData.action = .clearBrowsingData
+                    openWindow(id: "browsing-data")
+                }
+                .disabled(browsingData.isClearing)
+                Button("Empty Caches…", role: .destructive) {
+                    browsingData.action = .emptyCaches
+                    openWindow(id: "browsing-data")
+                }
+                .keyboardShortcut("e", modifiers: [.command, .option])
+                .disabled(browsingData.isClearing)
             }
         }
 
@@ -224,6 +237,12 @@ struct MajorTomApp: App {
             ICloudTabsView()
         }
         .defaultSize(width: 620, height: 480)
+
+        Window("Browsing Data", id: "browsing-data") {
+            BrowsingDataView()
+        }
+        .windowResizability(.contentSize)
+        .restorationBehavior(.disabled)
 
         Settings {
             BrowserSettingsView()
@@ -902,7 +921,22 @@ final class NativeTabCoordinator {
         NSAnimationContext.endGrouping()
     }
 
+    var browsingDataModels: [BrowserModel] {
+        var seen = Set<ObjectIdentifier>()
+        return registeredTabs.values.filter { $0.window != nil }.compactMap {
+            seen.insert(ObjectIdentifier($0.browser)).inserted ? $0.browser : nil
+        }
+    }
+
     func persistSession() {
+        SessionRestorationStore.shared.saveApplication(applicationSessionSnapshot())
+    }
+
+    func persistSessionAfterClearing() throws {
+        try SessionRestorationStore.shared.saveApplicationAfterClearing(applicationSessionSnapshot())
+    }
+
+    private func applicationSessionSnapshot() -> RestoredApplicationState {
         let liveTabs = registeredTabs.filter { $0.value.window != nil }
         registeredTabs = liveTabs
 
@@ -945,10 +979,7 @@ final class NativeTabCoordinator {
             window.tabGroup.map(ObjectIdentifier.init) ?? ObjectIdentifier(window)
         }
         let keyWindowIndex = keyGroup.flatMap { groupKeys.firstIndex(of: $0) } ?? 0
-        SessionRestorationStore.shared.saveApplication(RestoredApplicationState(
-            windows: windows,
-            keyWindowIndex: keyWindowIndex
-        ))
+        return RestoredApplicationState(windows: windows, keyWindowIndex: keyWindowIndex)
     }
 
     func prepareForTermination() async {
@@ -2383,7 +2414,7 @@ private struct BrowserTabView: View {
                 case .cancel(let draft):
                     browser.cancelInput(draft: draft)
                 case .dismissed(let draft):
-                    browser.preserveInputDraft(draft, for: prompt.target)
+                    browser.preserveInputDraft(draft, for: prompt)
                 }
             }
         }

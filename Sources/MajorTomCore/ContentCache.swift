@@ -38,6 +38,7 @@ public enum ResourceType: String, Equatable, Sendable {
 public enum ContentCacheStoreResult: Equatable, Sendable {
     case stored
     case tooLarge
+    case discarded
 }
 
 /// The standalone SQLite file containing reusable network responses.
@@ -162,6 +163,7 @@ public actor ContentCache {
     private let database: ContentCacheDatabase
     private let maximumEntryBytes: Int
     private let maximumTotalBytes: Int
+    public private(set) var writeGeneration: UInt64 = 0
 
     public init(
         database: ContentCacheDatabase,
@@ -205,8 +207,10 @@ public actor ContentCache {
         _ response: ContentResponse,
         resourceType: ResourceType,
         lifetime: TimeInterval,
-        now: Date = Date()
+        now: Date = Date(),
+        generation: UInt64? = nil
     ) throws -> ContentCacheStoreResult {
+        if let generation, generation != writeGeneration { return .discarded }
         let key = Self.key(for: response.url)
         guard response.body.count <= maximumEntryBytes else {
             try database.write {
@@ -245,6 +249,20 @@ public actor ContentCache {
             )
         }
         return .stored
+    }
+
+    public func removeResponses(since cutoff: Date?) throws {
+        writeGeneration &+= 1
+        try database.write { db in
+            if let cutoff {
+                try db.execute(
+                    sql: "DELETE FROM content_cache WHERE received_at >= ? OR last_accessed_at >= ?",
+                    arguments: [cutoff, cutoff]
+                )
+            } else {
+                try db.execute(sql: "DELETE FROM content_cache")
+            }
+        }
     }
 
     public func removeResponse(for url: URL) throws {

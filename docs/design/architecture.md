@@ -98,8 +98,10 @@ stores remain authoritative until the migration for their particular data class 
 and been verified, so installing an intermediate build never performs a partial user-data move.
 
 Global history and Gemini input drafts are the first domain records behind this boundary.
-`history_entries` upserts by canonical URL and stores the most recently observed title,
-last-visited time and a visit count; it is pruned to one year. The native `about:history`
+`history_visits` records individual visit dates and titles so time-limited deletion can preserve
+older visits to the same URL. `history_entries` remains its URL-level summary for presentation:
+last observed title, last visit and count, pruned to one year. Migration v15 seeds existing
+aggregate counts at their only known (last-visit) date; it does not invent earlier timestamps. The native `about:history`
 table observes this repository-backed global list directly; sorting and filtering are
 presentation concerns, while deletion remains a repository transaction. Only completed,
 displayable new navigations and reloads reach the recorder. `gemini_input_drafts` keys
@@ -286,6 +288,24 @@ requests create no entry. Reload skips the content cache for the page and its in
 and removes any matching stored response before requesting it again. Cache writes are ordered
 off the UI path, then flushed before orderly termination; the database is checkpointed and
 closed like the Back/Forward database.
+
+Browsing-data clearing is coordinated by `BrowsingDataController` on the app actor rather
+than issued independently by Settings. It updates every live tab, drains pre-clear incremental
+writes, saves sanitized session metadata, and removes stored responses. Back/Forward entries
+carry visit and last-access dates independently of response bodies; the standalone v2 migration
+seeds known dates from response receipt times. Missing legacy dates match conservatively.
+Deleting response bodies is independent of deleting navigation entries, so Empty Caches keeps
+session layout and reading state. Clear Browsing Data filters noncurrent visits while keeping
+each tab's current entry as an anchor. Current source/rendered data remains display-only and
+is not reconstructed into a retained snapshot on autosave.
+
+The shared content-cache actor advances a write generation on clearing. Fetchers capture it
+before looking up or requesting content; the store rejects results from earlier generations.
+Tab generations also fence lazy Back/Forward reads and favicon probes. Active requests and
+swipe staging are stopped; cleared draft prompts cannot re-save their text on dismissal.
+The operations are local, exclude bookmark/security/sync repositories, and propagate storage
+errors to the confirmation window. Native windows are used for the shared commands so Settings
+and the menu expose the same time selector and safe Cancel default.
 
 Stored Gemini responses replay header, body, and completion events through the same consumer
 used by live transport responses. This is a narrow compatibility boundary, not a universal

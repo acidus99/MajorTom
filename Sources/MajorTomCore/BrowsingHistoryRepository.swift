@@ -63,15 +63,8 @@ public struct BrowsingHistoryRepository: Sendable {
             ) ?? false
             guard !wasImported else { return }
 
-            let grouped = Dictionary(grouping: visits, by: { $0.url.absoluteString })
-            for group in grouped.values {
-                guard let latest = group.max(by: { $0.visitedAt < $1.visitedAt }) else { continue }
-                try Self.upsert(
-                    url: latest.url,
-                    visitedAt: latest.visitedAt,
-                    visitCount: group.count,
-                    in: db
-                )
+            for visit in visits {
+                try Self.upsert(url: visit.url, visitedAt: visit.visitedAt, visitCount: 1, in: db)
             }
             try Self.prune(before: Date().addingTimeInterval(-Self.retention), in: db)
             try db.execute(
@@ -84,9 +77,14 @@ public struct BrowsingHistoryRepository: Sendable {
         }
     }
 
-    public func clear() throws {
+    public func clear(since cutoff: Date? = nil) throws {
         try database.write { db in
-            try db.execute(sql: "DELETE FROM history_entries")
+            if let cutoff {
+                try db.execute(sql: "DELETE FROM history_visits WHERE visited_at >= ?", arguments: [cutoff])
+            } else {
+                try db.execute(sql: "DELETE FROM history_visits")
+            }
+            try Self.rebuildSummaries(in: db)
         }
     }
 
@@ -94,6 +92,7 @@ public struct BrowsingHistoryRepository: Sendable {
         guard !urls.isEmpty else { return }
         try database.write { db in
             for url in urls {
+                try db.execute(sql: "DELETE FROM history_visits WHERE url = ?", arguments: [url.absoluteString])
                 try db.execute(
                     sql: "DELETE FROM history_entries WHERE url = ?",
                     arguments: [url.absoluteString]
@@ -109,6 +108,10 @@ public struct BrowsingHistoryRepository: Sendable {
         visitCount: Int,
         in db: Database
     ) throws {
+        try db.execute(
+            sql: "INSERT INTO history_visits (url, title, visited_at, visit_count) VALUES (?, ?, ?, ?)",
+            arguments: [url.absoluteString, title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "", visitedAt, visitCount]
+        )
         try db.execute(
             sql: """
                 INSERT INTO history_entries (url, title, visited_at, visit_count)
@@ -131,10 +134,21 @@ public struct BrowsingHistoryRepository: Sendable {
     }
 
     private static func prune(before cutoff: Date, in db: Database) throws {
-        try db.execute(
-            sql: "DELETE FROM history_entries WHERE visited_at < ?",
-            arguments: [cutoff]
-        )
+        try db.execute(sql: "DELETE FROM history_visits WHERE visited_at < ?", arguments: [cutoff])
+        if db.changesCount > 0 { try rebuildSummaries(in: db) }
+    }
+
+    private static func rebuildSummaries(in db: Database) throws {
+        try db.execute(sql: "DELETE FROM history_entries")
+        try db.execute(sql: """
+            INSERT INTO history_entries (url, title, visited_at, visit_count)
+            SELECT v.url,
+                COALESCE((SELECT title FROM history_visits t
+                    WHERE t.url = v.url AND t.title <> ''
+                    ORDER BY t.visited_at DESC, t.id DESC LIMIT 1), ''),
+                MAX(v.visited_at), SUM(v.visit_count)
+            FROM history_visits v GROUP BY v.url
+            """)
     }
 
     private static func entry(_ row: Row) -> BrowsingHistoryEntry? {

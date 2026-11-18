@@ -124,8 +124,8 @@ public struct SessionRepository: Sendable {
                                 INSERT INTO browser_tab_history (
                                     id, tab_id, position, url, title, favicon,
                                     response_status, response_meta, response_body, completion,
-                                    received_at, client_certificate_id, presentation_state
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    received_at, client_certificate_id, presentation_state, visited_at, last_accessed_at
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                 ON CONFLICT(id) DO UPDATE SET
                                     tab_id = excluded.tab_id,
                                     position = excluded.position,
@@ -137,7 +137,9 @@ public struct SessionRepository: Sendable {
                                     response_body = COALESCE(excluded.response_body, response_body),
                                     completion = COALESCE(excluded.completion, completion),
                                     received_at = COALESCE(excluded.received_at, received_at),
-                                    presentation_state = excluded.presentation_state
+                                    presentation_state = excluded.presentation_state,
+                                    visited_at = excluded.visited_at,
+                                    last_accessed_at = excluded.last_accessed_at
                                 """,
                             arguments: [
                                 entry.id.uuidString.lowercased(), tabID, historyPosition,
@@ -147,7 +149,7 @@ public struct SessionRepository: Sendable {
                                     page.responseMeta.flatMap { $0.isEmpty ? nil : $0 } ?? page.mimeType
                                 },
                                 page?.body, page?.completion.rawValue, page?.receivedAt,
-                                page?.clientCertificateID?.uuidString.lowercased(), state
+                                page?.clientCertificateID?.uuidString.lowercased(), state, entry.visitedAt, entry.lastAccessedAt
                             ]
                         )
                     }
@@ -231,6 +233,34 @@ public struct SessionRepository: Sendable {
             windows: snapshot.windows,
             keyWindowIndex: snapshot.keyWindowIndex
         )
+    }
+
+    /// Changes stored content separately from the metadata needed to restore tabs.
+    public func clearBrowsingData(_ action: BrowsingDataAction, since cutoff: Date?) throws {
+        if action == .clearBrowsingData, var session = try load() {
+            for window in session.windows.indices {
+                for tab in session.windows[window].tabs.indices {
+                    let state = session.windows[window].tabs[tab]
+                    var navigation = NavigationState(restoring: state)
+                    navigation.clearBrowsingData(action, since: cutoff)
+                    session.windows[window].tabs[tab] = navigation.restorationState(
+                        zoom: state.zoom, title: state.title, documentTitle: state.documentTitle
+                    )
+                }
+            }
+            try save(session)
+        }
+        try database.write { db in
+            let selection = cutoff == nil ? "" : " WHERE received_at >= ? OR last_accessed_at >= ? OR last_accessed_at IS NULL"
+            try db.execute(
+                sql: """
+                    UPDATE browser_tab_history
+                    SET response_status = NULL, response_meta = NULL, response_body = NULL,
+                        completion = NULL, received_at = NULL, client_certificate_id = NULL, favicon = NULL
+                    """ + selection,
+                arguments: cutoff.map { StatementArguments([$0, $0]) } ?? StatementArguments()
+            )
+        }
     }
 
     public func clear() throws {

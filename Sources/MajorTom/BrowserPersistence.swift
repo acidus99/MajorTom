@@ -152,6 +152,40 @@ final class SessionRestorationStore {
         defaults.set(data, forKey: applicationKey)
     }
 
+    func clearBrowsingData(_ action: BrowsingDataAction, since cutoff: Date?) throws {
+        if let sessionRepository {
+            try sessionRepository.clearBrowsingData(action, since: cutoff)
+            defaults.removeObject(forKey: key)
+            defaults.removeObject(forKey: applicationKey)
+        } else if let state = loadApplication() {
+            var windows = state.windows
+            for window in windows.indices {
+                for tab in windows[window].tabs.indices {
+                    let old = windows[window].tabs[tab]
+                    var navigation = NavigationState(restoring: old)
+                    navigation.clearBrowsingData(action, since: cutoff)
+                    windows[window].tabs[tab] = navigation.restorationState(
+                        zoom: old.zoom, title: old.title, documentTitle: old.documentTitle
+                    )
+                }
+            }
+            let updated = RestoredApplicationState(windows: windows, keyWindowIndex: state.keyWindowIndex)
+            defaults.set(try JSONEncoder().encode(updated), forKey: applicationKey)
+            defaults.removeObject(forKey: key)
+        }
+    }
+
+    func saveApplicationAfterClearing(_ state: RestoredApplicationState) throws {
+        if let sessionRepository {
+            try sessionRepository.save(Self.persistedSession(state))
+            defaults.removeObject(forKey: key)
+            defaults.removeObject(forKey: applicationKey)
+        } else {
+            defaults.set(try JSONEncoder().encode(state), forKey: applicationKey)
+            defaults.removeObject(forKey: key)
+        }
+    }
+
     func clear() {
         try? sessionRepository?.clear()
         defaults.removeObject(forKey: key)
@@ -287,10 +321,15 @@ final class BrowsingHistoryStore: ObservableObject {
         if repository == nil { persistLegacyFallback() }
     }
 
-    func clear() {
-        try? repository?.clear()
-        records = []
-        defaults.removeObject(forKey: key)
+    func clear(since cutoff: Date? = nil) throws {
+        if let repository {
+            try repository.clear(since: cutoff)
+            records = try repository.entries()
+            defaults.removeObject(forKey: key)
+        } else {
+            records.removeAll { BrowsingDataSelection.includes($0.visitedAt, since: cutoff) }
+            persistLegacyFallback()
+        }
     }
 
     private func persistLegacyFallback() {
@@ -314,13 +353,13 @@ final class GeminiInputDraftStore {
     private let repository = SharedMajorTomDatabase.shared.map(
         GeminiInputDraftRepository.init(database:)
     )
-    private var memoryFallback: [URL: String] = [:]
+    private var memoryFallback: [URL: (text: String, updatedAt: Date)] = [:]
 
     func text(for promptURL: URL) -> String {
         if let repository {
             return (try? repository.draft(for: promptURL)?.text) ?? ""
         }
-        return memoryFallback[promptURL] ?? ""
+        return memoryFallback[promptURL]?.text ?? ""
     }
 
     func save(_ text: String, for promptURL: URL) {
@@ -329,8 +368,13 @@ final class GeminiInputDraftStore {
         } else if text.isEmpty {
             memoryFallback.removeValue(forKey: promptURL)
         } else {
-            memoryFallback[promptURL] = text
+            memoryFallback[promptURL] = (text, Date())
         }
+    }
+
+    func clear(since cutoff: Date?) throws {
+        try repository?.removeAll(since: cutoff)
+        memoryFallback = memoryFallback.filter { !BrowsingDataSelection.includes($0.value.updatedAt, since: cutoff) }
     }
 
     func remove(for promptURL: URL) {

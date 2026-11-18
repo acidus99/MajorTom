@@ -138,6 +138,16 @@ public final class BackForwardCacheDatabase: @unchecked Sendable {
                 columns: ["tab_id", "position"]
             )
         }
+        migrator.registerMigration("v2-visit-and-access-dates") { db in
+            try db.alter(table: "browser_tab_history") { table in
+                table.add(column: "visited_at", .datetime)
+                table.add(column: "last_accessed_at", .datetime)
+            }
+            try db.execute(sql: """
+                UPDATE browser_tab_history
+                SET visited_at = received_at, last_accessed_at = received_at
+                """)
+        }
         return migrator
     }
 }
@@ -163,8 +173,8 @@ public actor BackForwardCacheStore {
                     INSERT INTO browser_tab_history (
                         id, tab_id, position, url, title, favicon,
                         response_status, response_meta, response_body, completion,
-                        received_at, client_certificate_id, presentation_state
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        received_at, client_certificate_id, presentation_state, visited_at, last_accessed_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         tab_id = excluded.tab_id,
                         position = excluded.position,
@@ -177,7 +187,9 @@ public actor BackForwardCacheStore {
                         completion = COALESCE(excluded.completion, completion),
                         received_at = COALESCE(excluded.received_at, received_at),
                         client_certificate_id = COALESCE(excluded.client_certificate_id, client_certificate_id),
-                        presentation_state = excluded.presentation_state
+                        presentation_state = excluded.presentation_state,
+                        visited_at = excluded.visited_at,
+                        last_accessed_at = excluded.last_accessed_at
                     """,
                 arguments: Self.arguments(entry, page: page, tabID: tabID, position: position, state: state)
             )
@@ -223,7 +235,7 @@ public actor BackForwardCacheStore {
                 page.responseMeta.flatMap { $0.isEmpty ? nil : $0 } ?? page.mimeType
             }, page?.body,
             page?.completion.rawValue, page?.receivedAt,
-            page?.clientCertificateID?.uuidString.lowercased(), state
+            page?.clientCertificateID?.uuidString.lowercased(), state, entry.visitedAt, entry.lastAccessedAt
         ])
     }
 
@@ -255,7 +267,9 @@ public actor BackForwardCacheStore {
         }
         return BackForwardEntry(
             id: id, url: url, title: row["title"], favicon: row["favicon"],
-            page: page, presentation: state
+            page: page, presentation: state,
+            visitedAt: row["visited_at"],
+            lastAccessedAt: row["last_accessed_at"]
         )
     }
 }

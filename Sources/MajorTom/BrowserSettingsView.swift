@@ -7,7 +7,6 @@ struct BrowserSettingsView: View {
     @ObservedObject private var store = BrowserSettingsStore.shared
     @ObservedObject private var cloud = ICloudSyncStore.shared
     @ObservedObject private var themes = ContentThemeStore.shared
-    @State private var faviconCacheCleared = false
     @State private var isDefaultGeminiBrowser = false
     @State private var defaultBrowserError: String?
 
@@ -199,15 +198,7 @@ struct BrowserSettingsView: View {
             Text("A capsule may publish one emoji at /favicon.txt. Major Tom shows it on the Page Information button and on the tab, asks for it only after you visit the capsule, and remembers the answer for 30 days.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-            HStack {
-                Button("Clear Favicon Cache") { clearFaviconCache() }
-                if faviconCacheCleared {
-                    Text("Cleared")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .transition(.opacity)
-                }
-            }
+
 
             Toggle("Automatically display same-capsule images", isOn: store.binding(\.automaticallyLoadsSameCapsuleImages))
             Toggle("Display inline data images", isOn: store.binding(\.automaticallyLoadsDataImages))
@@ -257,17 +248,6 @@ struct BrowserSettingsView: View {
                 .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
-    }
-
-    private func clearFaviconCache() {
-        Task {
-            try? await SharedContentCache.shared?.removeAll(ofType: .favicon)
-            BookmarksModel.shared.refreshFavicons()
-            faviconCacheCleared = true
-            // Transient confirmation: this is an action, not a state to stay latched on.
-            try? await Task.sleep(for: .seconds(2))
-            faviconCacheCleared = false
-        }
     }
 
     private func confirmDeleteUserData() {
@@ -335,7 +315,8 @@ struct BrowserSettingsView: View {
 
 private struct TrustedIdentitiesSettingsView: View {
     @State private var identities: [TrustedServerIdentity] = []
-    @State private var showsClearConfirmation = false
+    @Environment(\.openWindow) private var openWindow
+    @ObservedObject private var browsingData = BrowsingDataController.shared
     private let store = SharedTrustedIdentityStore.shared
 
     var body: some View {
@@ -367,25 +348,26 @@ private struct TrustedIdentitiesSettingsView: View {
                 }
             }
             Divider()
+            Text("Browsing Data")
+                .font(.headline)
+            Text("Browsing history, cached content, input drafts, and restored tabs are stored only on this Mac.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
             HStack {
-                Text("Browsing history and restored tabs are stored only on this Mac.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                Spacer()
                 Button("Clear Browsing Data…", role: .destructive) {
-                    showsClearConfirmation = true
+                    browsingData.action = .clearBrowsingData
+                    openWindow(id: "browsing-data")
                 }
+                .help("Clear history, Back/Forward visits, input drafts, and cached content across all windows.")
+                Button("Empty Caches…", role: .destructive) {
+                    browsingData.action = .emptyCaches
+                    openWindow(id: "browsing-data")
+                }
+                .help("Discard cached content while keeping history, tabs, and reading positions.")
             }
+            .disabled(browsingData.isClearing)
         }
         .task { await reload() }
-        .confirmationDialog("Clear Browsing Data?", isPresented: $showsClearConfirmation) {
-            Button("Clear History and Session", role: .destructive) {
-                BrowsingHistoryStore.shared.clear()
-                SessionRestorationStore.shared.clear()
-            }
-        } message: {
-            Text("This clears browsing history and prevents the current tabs from being restored after the next launch. Trusted capsule identities and settings are kept.")
-        }
     }
 
     @MainActor

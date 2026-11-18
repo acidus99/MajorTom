@@ -151,8 +151,34 @@ tab's Back/Forward structure. Client-certificate-authenticated response bodies a
 
 Back/Forward response snapshots are local browser data and never synchronize. Each tab keeps
 at most 32 MiB of response bodies in memory; the active session's entries remain in its
-standalone SQLite file so older entries can be loaded on demand. Clear Browsing Data removes
-global history and the complete saved Back/Forward session.
+standalone SQLite file so older entries can be loaded on demand.
+
+Privacy & Security settings and the History menu provide Clear Browsing Data… and
+Empty Caches… (Command-Option-E). Both open a native confirmation window with a Time Range
+menu: Last 24 Hours (the default) or Everything. Cancel is the default action, including
+Return and Escape. Both operations affect every open window and tab on this Mac only.
+
+Empty Caches removes retained response content from both the Back/Forward store and the
+shared image/favicon cache, including remembered absent favicons. It keeps browsing history,
+input drafts, tab destinations, Back/Forward lists, zoom, and reading positions. Clear Browsing
+Data includes Empty Caches and also removes matching global history visits, Back/Forward
+visits, and unsubmitted input drafts. Each tab retains its current entry as a navigation anchor;
+older unmatched entries remain accessible, and Back/Forward become disabled if none remain.
+
+Last 24 Hours selects visits by visit time, drafts by last edit, and cached responses by receipt
+or last use. Everything removes all eligible data. Unknown dates in legacy sessions are cleared
+conservatively. Earlier visits to a URL survive removal of its newer visits, including their
+older title and visit count. Upgraded aggregate history has only its last known visit date;
+its pre-upgrade count is retained at that date because earlier timestamps cannot be recovered.
+
+Open pages remain displayed and their source remains available for View Source and saving.
+Window/tab layout, current addresses, zoom, and reading positions can restore next launch;
+cleared response bodies cannot. Clearing stops requests already in progress and never starts a
+request; later navigation fetches missing content normally. It fences queued writes and clears
+live retained snapshots so neither a late response nor quitting can restore deleted data.
+Failures are reported without claiming success. Bookmarks and their icon observations, settings,
+capsule trust, client identities, downloads, saved files, and other Macs’ tab summaries are kept.
+The former favicon-only clearing button is removed.
 
 ## Trust, security, and privacy
 

@@ -537,7 +537,8 @@ final class BrowserModel: ObservableObject {
     var forwardHistoryEntries: [BackForwardEntry] { navigation.forwardHistoryEntries }
 
     let page: WebPage
-    let historySwipePage: WebPage
+    @Published private(set) var historySwipePage: WebPage
+    private let webPageConfiguration: WebPage.Configuration
 
     /// Set by the owning window session. A tab cannot create tabs or windows itself.
     var openInNewTab: ((URL, _ inBackground: Bool) -> Void)?
@@ -572,6 +573,10 @@ final class BrowserModel: ObservableObject {
     private var backForwardWriteTask: Task<Void, Never>?
     private var contentCacheWriteTask: Task<Void, Never>?
     private var bypassesContentCacheForPage = false
+    private var browsingDataGeneration: UInt64 = 0
+    private var isClearingBrowsingData = false
+    private var currentResponseCanBeCached = true
+    private var discardedDraftPrompts = Set<UUID>()
     /// While a traversal's replacement document is loading, its initial scroll events
     /// must not overwrite the offset we are about to restore.
     private var pendingScrollRestoration: (historyIndex: Int, offset: Double)?
@@ -682,6 +687,7 @@ final class BrowserModel: ObservableObject {
                 BrowserResourceSchemeHandler(store: resourceStore)
         ]
 
+        self.webPageConfiguration = configuration
         self.documentStore = documentStore
         self.resourceStore = resourceStore
         self.router = router
@@ -891,6 +897,7 @@ final class BrowserModel: ObservableObject {
             persistCurrentBackForwardEntry()
         }
         abandonScrollRestoration(for: disposition)
+        currentResponseCanBeCached = true
 
         navigationTask?.cancel()
         navigationTask = nil
@@ -1194,6 +1201,45 @@ final class BrowserModel: ObservableObject {
         backForwardDebounceTask = nil
         persistCurrentBackForwardEntry()
         await backForwardWriteTask?.value
+    }
+
+    func prepareForClearing(_ action: BrowsingDataAction, since cutoff: Date?) {
+        browsingDataGeneration &+= 1
+        if action == .clearBrowsingData, let prompt = inputPrompt {
+            discardedDraftPrompts.insert(prompt.id)
+            inputPrompt = nil
+            inputValidationMessage = nil
+        }
+        // Stop pre-clear network work without replacing the document being read.
+        stop()
+        cancelHistorySwipePreparation()
+        // Release the hidden preview, including its rendered source, without loading
+        // another document or disturbing the page currently being read.
+        historySwipePage = WebPage(
+            configuration: webPageConfiguration,
+            navigationDecider: BrowserNavigationDecider(router: router)
+        )
+        backForwardDebounceTask?.cancel()
+        backForwardDebounceTask = nil
+        isClearingBrowsingData = true
+        currentResponseCanBeCached = false
+        navigation.recordCurrentAccess()
+        navigation.clearBrowsingData(action, since: cutoff)
+        favicon = navigation.currentEntry?.favicon
+        pendingScrollRestoration = nil
+        pendingInlineImageScrollCorrection = nil
+        pendingRestoredInlineImageCount = 0
+        isRestoringHistoryScroll = false
+        updateNavigationAvailability()
+    }
+
+    func drainWritesForClearing() async {
+        await backForwardWriteTask?.value
+        await contentCacheWriteTask?.value
+    }
+
+    func finishClearing() {
+        isClearingBrowsingData = false
     }
 
     func flushContentCacheWrites() async {
@@ -1738,8 +1784,9 @@ final class BrowserModel: ObservableObject {
     /// cleared, so the target is passed in.
     ///
     /// A sensitive prompt's text never reaches here; the sheet does not report one.
-    func preserveInputDraft(_ draft: String, for target: GeminiRequestTarget) {
-        GeminiInputDraftStore.shared.save(draft, for: target.url)
+    func preserveInputDraft(_ draft: String, for prompt: InputPrompt) {
+        guard !discardedDraftPrompts.contains(prompt.id) else { return }
+        GeminiInputDraftStore.shared.save(draft, for: prompt.target.url)
     }
 
     func submitInput(_ value: String) {
@@ -1771,9 +1818,11 @@ final class BrowserModel: ObservableObject {
         }
         if let entryID = navigation.currentEntryID, let backForwardCache {
             browserNavigationLogger.notice("navigateHistory route=durable-cache id=\(entryID.uuidString, privacy: .public)")
+            let generation = browsingDataGeneration
             Task { [weak self] in
                 let stored = try? await backForwardCache.entry(id: entryID)
-                guard let self, self.navigation.currentEntryID == entryID else { return }
+                guard let self, self.browsingDataGeneration == generation,
+                      self.navigation.currentEntryID == entryID else { return }
                 if let page = stored?.page {
                     browserNavigationLogger.notice("durable-cache hit id=\(entryID.uuidString, privacy: .public) bytes=\(page.body.count)")
                     self.navigation.cache(page, for: entryID)
@@ -1865,6 +1914,7 @@ final class BrowserModel: ObservableObject {
         nextVisited.insert(target.url)
         var responseHeader: GeminiResponseHeader?
         var mimeType = ""
+        let cacheGeneration = await contentCache?.writeGeneration
         var sourceBytes = Data()
         var utf8Decoder = IncrementalUTF8Decoder()
         var gemtextParser = IncrementalGemtextParser()
@@ -2105,7 +2155,7 @@ final class BrowserModel: ObservableObject {
                             body: sourceBytes,
                             receivedAt: receivedAt
                         )
-                        storeInContentCacheIfNeeded(response, for: target)
+                        storeInContentCacheIfNeeded(response, for: target, generation: cacheGeneration)
                     }
                     if renderAsSource {
                         guard mimeType.hasPrefix("text/") else {
@@ -2198,6 +2248,7 @@ final class BrowserModel: ObservableObject {
             if let committedURL { locationText = committedURL.absoluteString }
             return
         } catch {
+            guard !Task.isCancelled else { return }
             if contentStarted {
                 for parsedEvent in gemtextParser.receive(utf8Decoder.finish()) + gemtextParser.finish() {
                     emit(parsedEvent, baseURL: target.url)
@@ -2618,6 +2669,8 @@ final class BrowserModel: ObservableObject {
     }
 
     private func displayCachedPage(_ cached: CachedPage) {
+        currentResponseCanBeCached = true
+        navigation.recordCurrentAccess()
         browserNavigationLogger.notice(
             "displayCachedPage url=\(cached.url.absoluteString, privacy: .public) bytes=\(cached.body.count) modelIndex=\(self.navigation.historyIndex)"
         )
@@ -2669,6 +2722,7 @@ final class BrowserModel: ObservableObject {
 
     /// Keeps a small hot set in the tab while the durable cache owns the global limits.
     private func cache(_ page: CachedPage) {
+        guard currentResponseCanBeCached, !isClearingBrowsingData else { return }
         if page.clientCertificateID == nil {
             navigation.cache(page)
         } else {
@@ -2703,6 +2757,7 @@ final class BrowserModel: ObservableObject {
     }
 
     private func persistCurrentBackForwardEntry() {
+        guard !isClearingBrowsingData else { return }
         guard let backForwardCache, let entry = navigation.currentEntry else { return }
         let tabID = navigation.tabID
         let position = navigation.historyIndex
@@ -2724,7 +2779,8 @@ final class BrowserModel: ObservableObject {
 
     private func storeInContentCacheIfNeeded(
         _ response: ContentResponse,
-        for target: GeminiRequestTarget
+        for target: GeminiRequestTarget,
+        generation: UInt64?
     ) {
         guard let contentCache else { return }
         guard case .store(let resourceType, let lifetime) = cacheDecider.decision(
@@ -2735,7 +2791,8 @@ final class BrowserModel: ObservableObject {
             _ = try? await contentCache.store(
                 response,
                 resourceType: resourceType,
-                lifetime: lifetime
+                lifetime: lifetime,
+                generation: generation
             )
         }
     }
@@ -3389,6 +3446,10 @@ final class BrowserModel: ObservableObject {
     /// navigated to that server. This is called after a page commits, which is exactly
     /// that moment.
     private func refreshFavicon(forCapsuleAt url: URL) async {
+        guard !isClearingBrowsingData else { return }
+        let generation = browsingDataGeneration
+        let cacheGeneration = await contentCache?.writeGeneration
+        guard generation == browsingDataGeneration else { return }
         guard settings.preferences.showsFavicons else {
             favicon = nil
             return
@@ -3404,6 +3465,7 @@ final class BrowserModel: ObservableObject {
         }
 
         if let response = try? await contentCache?.freshResponse(for: faviconURL) {
+            guard generation == browsingDataGeneration else { return }
             let emoji = GeminiFavicon.parse(response: response)
             if emoji == nil, response.status != 51 {
                 let negative = GeminiFavicon.negativeResponse(
@@ -3414,7 +3476,8 @@ final class BrowserModel: ObservableObject {
                     _ = try? await contentCache?.store(
                         negative,
                         resourceType: .favicon,
-                        lifetime: GeminiFavicon.cacheLifetime
+                        lifetime: GeminiFavicon.cacheLifetime,
+                        generation: cacheGeneration
                     )
                 }
             }
@@ -3431,6 +3494,7 @@ final class BrowserModel: ObservableObject {
         favicon = nil
 
         let probe = await self.probeFavicon(probeTarget)
+        guard generation == browsingDataGeneration else { return }
         switch probe {
         case .failed:
             // A connection that never completed says nothing about whether a favicon
@@ -3441,7 +3505,8 @@ final class BrowserModel: ObservableObject {
                 _ = try? await contentCache?.store(
                     response,
                     resourceType: .favicon,
-                    lifetime: GeminiFavicon.cacheLifetime
+                    lifetime: GeminiFavicon.cacheLifetime,
+                        generation: cacheGeneration
                 )
             }
             BookmarksModel.shared.updateFavicon(emoji, for: endpoint, fetchedAt: response.receivedAt)
@@ -3455,7 +3520,8 @@ final class BrowserModel: ObservableObject {
                 _ = try? await contentCache?.store(
                     negative,
                     resourceType: .favicon,
-                    lifetime: GeminiFavicon.cacheLifetime
+                    lifetime: GeminiFavicon.cacheLifetime,
+                        generation: cacheGeneration
                 )
             }
             BookmarksModel.shared.updateFavicon(nil, for: endpoint, fetchedAt: receivedAt)
@@ -3530,12 +3596,18 @@ final class BrowserModel: ObservableObject {
         redirects: Int,
         bypassesContentCache: Bool
     ) async -> LoadedInlineImage? {
+        guard !Task.isCancelled else {
+            continuation.finish(throwing: CancellationError())
+            return nil
+        }
+        let cacheGeneration = await contentCache?.writeGeneration
         guard redirects <= 5,
               let target = try? GeminiRequestTarget(url.absoluteString) else {
             continuation.finish(throwing: URLError(.badURL))
             return nil
         }
         do {
+            try Task.checkCancellation()
             if bypassesContentCache {
                 try? await contentCache?.removeResponse(for: target.url)
             }
@@ -3564,6 +3636,7 @@ final class BrowserModel: ObservableObject {
             var body = Data()
             var responseHeader: GeminiResponseHeader?
             for try await event in events {
+                try Task.checkCancellation()
                 switch event {
                 case .responseHeader(let header):
                     if !responseIsCached { receivedAt = Date() }
@@ -3605,7 +3678,7 @@ final class BrowserModel: ObservableObject {
                             mimeType: mimeType,
                             body: body,
                             receivedAt: receivedAt
-                        ), for: target)
+                        ), for: target, generation: cacheGeneration)
                     }
                     continuation.finish()
                     return accepted
@@ -3635,6 +3708,7 @@ final class BrowserModel: ObservableObject {
         guard let target = try? GeminiRequestTarget(url.absoluteString) else {
             throw URLError(.badURL)
         }
+        let cacheGeneration = await contentCache?.writeGeneration
         var body = Data()
         var mimeType = "application/octet-stream"
         let cachedResponse = try? await contentCache?.freshResponse(for: target.url)
@@ -3699,7 +3773,7 @@ final class BrowserModel: ObservableObject {
                 mimeType: mimeType,
                 body: body,
                 receivedAt: receivedAt
-            ), for: target)
+            ), for: target, generation: cacheGeneration)
         }
         return (body, mimeType, url)
     }

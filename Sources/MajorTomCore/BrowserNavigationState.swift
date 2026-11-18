@@ -105,6 +105,8 @@ public struct BackForwardEntry: Codable, Equatable, Sendable, Identifiable {
     public var favicon: String?
     public var page: CachedPage?
     public var presentation: HistoryPresentationState
+    public var visitedAt: Date?
+    public var lastAccessedAt: Date?
 
     public init(
         id: UUID = UUID(),
@@ -112,7 +114,9 @@ public struct BackForwardEntry: Codable, Equatable, Sendable, Identifiable {
         title: String? = nil,
         favicon: String? = nil,
         page: CachedPage? = nil,
-        presentation: HistoryPresentationState = HistoryPresentationState()
+        presentation: HistoryPresentationState = HistoryPresentationState(),
+        visitedAt: Date? = Date(),
+        lastAccessedAt: Date? = nil
     ) {
         self.id = id
         self.url = url
@@ -120,6 +124,8 @@ public struct BackForwardEntry: Codable, Equatable, Sendable, Identifiable {
         self.favicon = favicon
         self.page = page
         self.presentation = presentation
+        self.visitedAt = visitedAt
+        self.lastAccessedAt = lastAccessedAt ?? page?.receivedAt ?? visitedAt
     }
 }
 
@@ -320,9 +326,13 @@ public struct NavigationState: Equatable, Sendable {
     /// - Returns: true when the history itself changed, so a caller can record the visit
     ///   only for a genuinely new destination.
     @discardableResult
-    public mutating func commit(_ url: URL, disposition: Disposition) -> Bool {
+    public mutating func commit(_ url: URL, disposition: Disposition, at date: Date = Date()) -> Bool {
         switch disposition {
         case .reload, .traversal:
+            if entries.indices.contains(historyIndex) {
+                entries[historyIndex].lastAccessedAt = date
+                if disposition == .reload { entries[historyIndex].visitedAt = date }
+            }
             return false
         case .new:
             // A new destination supersedes the forward branch, and the offsets recorded
@@ -333,7 +343,7 @@ public struct NavigationState: Equatable, Sendable {
             // Re-committing the entry already at the cursor is not a new entry. Following
             // a link back to the page you are on should not grow the history.
             guard entries.last?.url != url else { return false }
-            entries.append(BackForwardEntry(url: url))
+            entries.append(BackForwardEntry(url: url, visitedAt: date))
             historyIndex = entries.count - 1
             return true
         }
@@ -345,6 +355,7 @@ public struct NavigationState: Equatable, Sendable {
     public mutating func goBack() -> URL? {
         guard canGoBack else { return nil }
         historyIndex -= 1
+        entries[historyIndex].lastAccessedAt = Date()
         return entries[historyIndex].url
     }
 
@@ -352,6 +363,7 @@ public struct NavigationState: Equatable, Sendable {
     public mutating func goForward() -> URL? {
         guard canGoForward else { return nil }
         historyIndex += 1
+        entries[historyIndex].lastAccessedAt = Date()
         return entries[historyIndex].url
     }
 
@@ -364,6 +376,7 @@ public struct NavigationState: Equatable, Sendable {
             return nil
         }
         historyIndex = index
+        entries[index].lastAccessedAt = Date()
         return entries[index].url
     }
 
@@ -442,6 +455,30 @@ public struct NavigationState: Equatable, Sendable {
         for index in entries.indices where entries[index].url == url {
             entries[index].page = nil
         }
+    }
+
+    /// Drops response bytes independently of destinations and reading state. The
+    /// current entry is retained as an anchor even when its visit is being forgotten.
+    public mutating func clearBrowsingData(_ action: BrowsingDataAction, since cutoff: Date?) {
+        let currentID = currentEntryID
+        for index in entries.indices {
+            if BrowsingDataSelection.includes(entries[index].lastAccessedAt, since: cutoff)
+                || BrowsingDataSelection.includes(entries[index].page?.receivedAt ?? entries[index].lastAccessedAt, since: cutoff) {
+                entries[index].page = nil
+                entries[index].favicon = nil
+            }
+        }
+        if action == .clearBrowsingData {
+            entries.removeAll {
+                $0.id != currentID && BrowsingDataSelection.includes($0.visitedAt, since: cutoff)
+            }
+            historyIndex = currentID.flatMap { id in entries.firstIndex { $0.id == id } } ?? -1
+        }
+    }
+
+    public mutating func recordCurrentAccess(at date: Date = Date()) {
+        guard entries.indices.contains(historyIndex) else { return }
+        entries[historyIndex].lastAccessedAt = date
     }
 
     public var cachedByteCount: Int {

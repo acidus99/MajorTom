@@ -486,6 +486,27 @@ public final class MajorTomDatabase: @unchecked Sendable {
                 )
                 """)
         }
+        migrator.registerMigration("v15-individual-history-visits") { db in
+            try db.execute(sql: """
+                CREATE TABLE history_visits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    url TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    visited_at DATETIME NOT NULL,
+                    visit_count INTEGER NOT NULL CHECK (visit_count > 0)
+                );
+                CREATE INDEX history_visits_date ON history_visits(visited_at);
+                CREATE INDEX history_visits_url ON history_visits(url, visited_at);
+                """)
+            // Some old development databases omitted earlier domain tables. Do not
+            // prevent their unrelated repair migrations from completing.
+            if try db.tableExists("history_entries") {
+                try db.execute(sql: """
+                    INSERT INTO history_visits (url, title, visited_at, visit_count)
+                    SELECT url, title, visited_at, visit_count FROM history_entries
+                    """)
+            }
+        }
         return migrator
     }
 }
