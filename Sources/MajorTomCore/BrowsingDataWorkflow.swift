@@ -43,11 +43,15 @@ public struct BrowsingDataServices {
 public final class BrowsingDataWorkflow: ObservableObject {
     @Published public private(set) var isClearing = false
     private struct SessionReference { weak var session: BrowserSession? }
+    private let lifetime: AcceptedLocalWork
     private let services: BrowsingDataServices
     private var sessions: [ObjectIdentifier: SessionReference] = [:]
     private var clearing: (action: BrowsingDataAction, cutoff: Date?)?
 
-    public init(services: BrowsingDataServices) { self.services = services }
+    public init(services: BrowsingDataServices, lifetime: AcceptedLocalWork? = nil) {
+        self.services = services
+        self.lifetime = lifetime ?? AcceptedLocalWork()
+    }
 
     public func register(_ session: BrowserSession) {
         sessions = sessions.filter { $0.value.session != nil }
@@ -62,6 +66,10 @@ public final class BrowsingDataWorkflow: ObservableObject {
     }
 
     public func clear(_ action: BrowsingDataAction, range: BrowsingDataTimeRange) async throws {
+        try await lifetime.perform { try await self.performConfirmed(action, range: range) }
+    }
+
+    private func performConfirmed(_ action: BrowsingDataAction, range: BrowsingDataTimeRange) async throws {
         guard !isClearing else { throw BrowsingDataWorkflowError.operationInProgress }
         let cutoff = range.cutoff(at: services.now())
         clearing = (action, cutoff)

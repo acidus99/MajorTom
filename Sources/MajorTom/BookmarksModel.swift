@@ -195,15 +195,15 @@ final class BookmarksModel: ObservableObject {
     /// Imports a browser's bookmarks as one durable update, avoiding a race between
     /// individual asynchronous bookmark writes. Existing URLs retain their normal
     /// de-duplication behavior.
-    func importLagrangeBookmarks(_ bookmarks: [LagrangeUserDataExport.Bookmark]) async -> Int {
-        await importBookmarks(
+    func importLagrangeBookmarks(_ bookmarks: [LagrangeUserDataExport.Bookmark]) async throws -> Int {
+        try await importBookmarks(
             bookmarks.map { (title: $0.title, url: $0.url) },
             intoFolderNamed: "Lagrange"
         )
     }
 
-    func importAlhenaBookmarks(_ bookmarks: [AlhenaUserDataExport.Bookmark]) async -> Int {
-        await importBookmarks(
+    func importAlhenaBookmarks(_ bookmarks: [AlhenaUserDataExport.Bookmark]) async throws -> Int {
+        try await importBookmarks(
             bookmarks.map { (title: $0.title, url: $0.url) },
             intoFolderNamed: "Alhena"
         )
@@ -212,25 +212,21 @@ final class BookmarksModel: ObservableObject {
     private func importBookmarks(
         _ bookmarks: [(title: String, url: URL)],
         intoFolderNamed folderName: String
-    ) async -> Int {
+    ) async throws -> Int {
         var seen = Set(collection.allBookmarks.map(\.url))
         let additions = bookmarks.filter { seen.insert($0.url).inserted }
         guard !additions.isEmpty else { return 0 }
-        do {
-            try await mutateAndWait { collection in
-                let folderID = collection.folders.first(where: { $0.name == folderName })?.id
-                    ?? collection.addFolder(named: folderName)?.id
-                    ?? collection.favoritesID
-                for bookmark in additions {
-                    // Never retitle or move a bookmark already saved in Major Tom.
-                    guard !collection.contains(url: bookmark.url) else { continue }
-                    collection.add(title: bookmark.title, url: bookmark.url, toFolderWith: folderID)
-                }
+        try await mutateAndWait { collection in
+            let folderID = collection.folders.first(where: { $0.name == folderName })?.id
+                ?? collection.addFolder(named: folderName)?.id
+                ?? collection.favoritesID
+            for bookmark in additions {
+                // Never retitle or move a bookmark already saved in Major Tom.
+                guard !collection.contains(url: bookmark.url) else { continue }
+                collection.add(title: bookmark.title, url: bookmark.url, toFolderWith: folderID)
             }
-            return additions.count
-        } catch {
-            return 0
         }
+        return additions.count
     }
 
     /// Deletes every bookmark and custom folder, retaining only the required empty

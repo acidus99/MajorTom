@@ -229,6 +229,7 @@ final class BrowserModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var downloadTask: Task<Void, Never>?
     private var downloadPanel: NSSavePanel?
+    private var savePanels: [ObjectIdentifier: NSSavePanel] = [:]
     private var contextMenuTargets: [ContextMenuTarget] = []
     private weak var pendingContextMenuView: NSView?
     private var pendingContextMenuLocation: NSPoint?
@@ -400,7 +401,6 @@ final class BrowserModel: ObservableObject {
     func prepareForClearing(_ action: BrowsingDataAction, since cutoff: Date?) { cancelHistorySwipePreparation(); session.prepareForClearing(action, since: cutoff) }
     func drainWritesForClearing() async { await session.drainWritesForClearing() }
     func flushBackForwardPersistence() async { await session.flushBackForwardPersistence() }
-    func flushContentCacheWrites() async {}
     func handleInlineImageMessage(lineIdentifier: String, url: URL, action: String, documentURL: URL) { session.handleInlineImageMessage(lineIdentifier: lineIdentifier, url: url, action: action, documentURL: documentURL) }
     func toggleInlineImage(lineIdentifier: String, url: URL, documentURL: URL) { session.toggleInlineImage(lineIdentifier: lineIdentifier, url: url, documentURL: documentURL) }
     func updateImageViewportTopInset(_ inset: CGFloat) { session.updateImageViewportTopInset(Double(inset)) }
@@ -459,6 +459,18 @@ final class BrowserModel: ObservableObject {
         menu.addItem(item)
     }
 
+    @discardableResult
+    func close() -> Task<Void, Never> {
+        let requestDrain = session.close()
+        downloadTask?.cancel()
+        downloadPanel?.cancel(nil)
+        for panel in savePanels.values { panel.cancel(nil) }
+        return Task {
+            await cancelAndDrainNativeRequests()
+            await requestDrain.value
+        }
+    }
+
     func cancelAndDrainNativeRequests() async {
         let task = downloadTask
         task?.cancel()
@@ -467,6 +479,7 @@ final class BrowserModel: ObservableObject {
     }
 
     func download(_ url: URL) {
+        guard !session.isClosed else { return }
         let proxy = settings.preferences.proxy
         statusText = "Downloading \(url.lastPathComponent)…"
         downloadTask?.cancel()
@@ -567,20 +580,24 @@ final class BrowserModel: ObservableObject {
     }
 
     func savePage() async {
-        guard canSavePage, let snapshot = session.pageSnapshot else { return }
+        guard !session.isClosed, canSavePage, let snapshot = session.pageSnapshot else { return }
         // NSSavePanel.begin is modeless, so the user can keep browsing the window
         // behind it. Capture the bytes for the page that was on screen when Save was
         // invoked; re-reading the property after the await wrote the *new* page's
         // bytes into a file named after the old one.
         let bytes = snapshot.body
         let panel = NSSavePanel()
+        let panelID = ObjectIdentifier(panel)
+        savePanels[panelID] = panel
+        defer { savePanels[panelID] = nil }
         panel.nameFieldStringValue = BrowserFilenameSuggestion.make(
             for: snapshot.url,
             mimeType: snapshot.mimeType,
             documentTitle: snapshot.documentTitle
         )
         panel.canCreateDirectories = true
-        guard await panel.begin() == .OK, let destination = panel.url else { return }
+        guard await panel.begin() == .OK, !session.isClosed, !Task.isCancelled,
+              let destination = panel.url else { return }
         do {
             try bytes.write(to: destination, options: .atomic)
             statusText = "Saved \(destination.lastPathComponent)"

@@ -45,11 +45,19 @@ public struct UserDataDeletionServices {
 @MainActor
 public final class UserDataDeletionWorkflow: ObservableObject {
     @Published public private(set) var isDeleting = false
+    private let lifetime: AcceptedLocalWork
     private let services: UserDataDeletionServices
 
-    public init(services: UserDataDeletionServices) { self.services = services }
+    public init(services: UserDataDeletionServices, lifetime: AcceptedLocalWork? = nil) {
+        self.services = services
+        self.lifetime = lifetime ?? AcceptedLocalWork()
+    }
 
     public func delete() async throws {
+        try await lifetime.perform { try await self.performConfirmed() }
+    }
+
+    private func performConfirmed() async throws {
         guard !isDeleting else { throw UserDataDeletionError.operationInProgress }
         isDeleting = true
         let account = services.accountToken()

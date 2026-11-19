@@ -10,7 +10,7 @@ enum UserDataDeletion {
         UserDataDeletionWorkflow(services: UserDataDeletionServices(
         accountToken: { ClientCertificateStore.shared.accountToken },
         prepare: {
-            guard !BrowsingDataController.shared.isClearing else {
+            guard !BrowsingDataController.shared.isClearing, !UserDataImportComposition.importer.isImporting else {
                 throw BrowsingDataWorkflowError.operationInProgress
             }
             await ServerTrustPresentation.shared.suspendAndDrain()
@@ -33,7 +33,7 @@ enum UserDataDeletion {
             preferences.homepage = BrowserPreferences().homepage
             BrowserSettingsStore.shared.preferences = preferences
         }
-        ))
+        ), lifetime: ApplicationWork.lifetime)
     }
 
     static func message(for error: any Error) -> String {

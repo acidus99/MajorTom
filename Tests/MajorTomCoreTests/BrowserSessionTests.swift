@@ -57,6 +57,28 @@ final class BrowserSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testClosingDrainsRequestPreservesStoppedBytesAndPermanentlyRejectsNavigation() async throws {
+        let fixture = SessionFixture()
+        defer { fixture.close() }
+        fixture.session.openLink(fixture.a)
+        await fixture.source.waitForRequests(1)
+        let partial = Data("# Closing fixture\nRetained tail".utf8)
+        fixture.source.send(0, status: 20, meta: "text/gemini", chunks: [partial], completes: false)
+        await fixture.wait { fixture.session.sourceBytes == partial }
+        let closing = fixture.session.close()
+        XCTAssertTrue(fixture.session.isClosed)
+        fixture.session.openLink(fixture.b)
+        fixture.session.start()
+        await closing.value
+        await fixture.source.waitForTermination(0)
+        fixture.source.sendBody(0, Data("late bytes".utf8))
+        XCTAssertEqual(fixture.session.committedURL, fixture.a)
+        XCTAssertEqual(fixture.session.sourceBytes, partial)
+        XCTAssertNil(fixture.session.activeWebDocumentURL)
+        XCTAssertEqual(fixture.session.restorationState.cachedPages.first(where: { $0.url == fixture.a })?.completion, .stopped)
+    }
+
+    @MainActor
     func testShowSourceCancelsPendingNavigationAndRetainsOriginalResponse() async throws {
         let fixture = SessionFixture()
         defer { fixture.close() }

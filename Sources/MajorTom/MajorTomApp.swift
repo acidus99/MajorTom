@@ -587,6 +587,8 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
 
         terminationTask = Task { @MainActor [weak self, weak sender] in
             guard let self, let sender else { return }
+            await ApplicationWork.lifetime.closeAndDrain()
+            await ServerTrustPresentation.shared.suspendAndDrain()
             if #available(macOS 26.0, *) {
                 await NativeTabCoordinator.shared.prepareForTermination()
             }
@@ -922,6 +924,8 @@ final class NativeTabCoordinator {
         NSAnimationContext.endGrouping()
     }
 
+    private var closingTasks: [UUID: Task<Void, Never>] = [:]
+
     var browsingDataModels: [BrowserModel] {
         var seen = Set<ObjectIdentifier>()
         return registeredTabs.values.filter { $0.window != nil }.compactMap {
@@ -987,8 +991,11 @@ final class NativeTabCoordinator {
         let browsers = registeredTabs.values.compactMap(\.browser)
         var seen = Set<ObjectIdentifier>()
         for browser in browsers where seen.insert(ObjectIdentifier(browser)).inserted {
-            await browser.flushBackForwardPersistence()
-            await browser.flushContentCacheWrites()
+            await browser.close().value
+        }
+        while let (id, task) = closingTasks.first {
+            await task.value
+            closingTasks[id] = nil
         }
         persistSession()
     }
@@ -1128,6 +1135,14 @@ final class NativeTabCoordinator {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                if let browser = self.registeredTabs[identifier]?.browser {
+                    let id = UUID()
+                    self.closingTasks[id] = browser.close()
+                    Task { [weak self] in
+                        await self?.closingTasks[id]?.value
+                        self?.closingTasks[id] = nil
+                    }
+                }
                 self.registeredTabs.removeValue(forKey: identifier)
                 self.windowControllers.removeValue(forKey: identifier)
                 self.tabOverviewControls.removeValue(forKey: identifier)

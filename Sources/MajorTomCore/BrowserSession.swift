@@ -89,6 +89,10 @@ public final class BrowserSession: ObservableObject {
     ))
     private var lastPreferences: BrowserPreferences
     private var backForwardCache: BackForwardCacheStore? { services.backForwardCache }
+    public private(set) var isClosed = false
+    private var closingTask: Task<Void, Never>?
+    private let requestLifetime = AcceptedLocalWork()
+    private var faviconTask: Task<Void, Never>?
     private var navigationTask: Task<Void, Never>?
     private var documentContinuation: AsyncThrowingStream<Data, any Error>.Continuation?
     /// Rendered HTML waiting to be handed to WebKit. See `yieldToDocument`.
@@ -205,14 +209,14 @@ public final class BrowserSession: ObservableObject {
     public var mimeType: String { currentMIMEType }
 
     public func start() {
-        guard !hasStarted else { return }
+        guard !hasStarted, !isClosed else { return }
         hasStarted = true
 
         Task { @MainActor [weak self] in
             await self?.services.preparePresentation()
             // A location submitted while the first theme was resolving supersedes
             // launch restoration. Never replace that newer navigation with the homepage.
-            guard let self, navigationTask == nil, activeWebDocumentURL == nil else { return }
+            guard let self, !isClosed, navigationTask == nil, activeWebDocumentURL == nil else { return }
             startInitialNavigation()
         }
     }
@@ -244,6 +248,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func submitLocation() {
+        guard !isClosed else { return }
         validationMessage = nil
         do {
             let preferences = services.preferences()
@@ -282,6 +287,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func reload() {
+        guard !isClosed else { return }
         if let internalPage {
             showInternalPage(internalPage, disposition: .reload)
             return
@@ -332,6 +338,8 @@ public final class BrowserSession: ObservableObject {
 
         navigationTask?.cancel()
         navigationTask = nil
+        faviconTask?.cancel()
+        faviconTask = nil
         imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
         automaticImagesPaused = false
@@ -360,6 +368,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func openFile(_ url: URL, disposition: HistoryDisposition = .new) {
+        guard !isClosed else { return }
         guard url.isFileURL else { return }
         beginNavigation(disposition: disposition)
 
@@ -440,6 +449,8 @@ public final class BrowserSession: ObservableObject {
         // work, and spec 9.2 requires that to cancel the network work it owns.
         navigationTask?.cancel()
         navigationTask = nil
+        faviconTask?.cancel()
+        faviconTask = nil
         imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
         expandedInlineImages.subtract(stoppedImages)
@@ -488,9 +499,34 @@ public final class BrowserSession: ObservableObject {
     public func cancelAndDrainRequests() async {
         let navigation = navigationTask
         let images = Array(imageTasks.values)
+        let favicon = faviconTask
+        let slowDown = slowDownTask
         stop()
         await navigation?.value
         for image in images { await image.value }
+        await favicon?.value
+        await slowDown?.value
+        await requestLifetime.drain()
+    }
+
+    /// Closing is permanent, unlike Stop. Capture accepted requests before Stop
+    /// releases their handles, then drain persistence after their final state.
+    @discardableResult
+    public func close() -> Task<Void, Never> {
+        if let closingTask { return closingTask }
+        isClosed = true
+        let requests = [navigationTask, faviconTask, slowDownTask].compactMap { $0 } + Array(imageTasks.values)
+        stop()
+        cancelHistoryPreview()
+        activeWebDocumentURL = nil
+        presentation.invalidateDocument()
+        let task = Task {
+            await requestLifetime.closeAndDrain()
+            for request in requests { await request.value }
+            await flushBackForwardPersistence()
+        }
+        closingTask = task
+        return task
     }
 
     public func goBack() {
@@ -510,6 +546,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func go(toHistoryEntryWithID id: BackForwardEntry.ID) {
+        guard !isClosed else { return }
         browserNavigationLogger.notice(
             "model traversal begin targetID=\(id.uuidString, privacy: .public) fromIndex=\(self.navigation.historyIndex)"
         )
@@ -529,6 +566,8 @@ public final class BrowserSession: ObservableObject {
         // the history ahead of it.
         navigationTask?.cancel()
         navigationTask = nil
+        faviconTask?.cancel()
+        faviconTask = nil
         prepareScrollRestoration(for: navigation.historyIndex)
         updateNavigationAvailability()
         navigateHistory(to: url)
@@ -585,9 +624,6 @@ public final class BrowserSession: ObservableObject {
 
     public func finishClearing() {
         isClearingBrowsingData = false
-    }
-
-    public func flushContentCacheWrites() async {
     }
 
     private func prepareScrollRestoration(for index: Int) {
@@ -647,6 +683,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func showPageSource() {
+        guard !isClosed else { return }
         guard canShowSource,
               let resourceURL = committedURL,
               !ViewSourceURL.isViewSource(resourceURL) else { return }
@@ -656,6 +693,8 @@ public final class BrowserSession: ObservableObject {
         // until its response arrived and replaced the source view.
         navigationTask?.cancel()
         navigationTask = nil
+        faviconTask?.cancel()
+        faviconTask = nil
         presentSource(
             currentSourceBytes,
             of: resourceURL,
@@ -717,6 +756,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func showInternalPage(_ page: InternalPage, disposition: HistoryDisposition = .new) {
+        guard !isClosed else { return }
         beginNavigation(disposition: disposition)
 
         currentSourceBytes = Data()
@@ -763,6 +803,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func submitInput(_ value: String, for promptID: UUID) {
+        guard !isClosed else { return }
         guard let prompt = inputPrompt, prompt.id == promptID else { return }
         guard let url = GeminiQueryEncoding.url(base: prompt.target.url, query: value),
               let target = try? GeminiRequestTarget(url.absoluteString) else {
@@ -838,6 +879,7 @@ public final class BrowserSession: ObservableObject {
         disposition: HistoryDisposition,
         renderAsSource: Bool = false
     ) {
+        guard !isClosed else { return }
         // Keep the glyph while moving within one capsule, so it does not flicker
         // between pages of the same site.
         let staysWithinCapsule = CapsuleEndpoint(url: target.url)
@@ -849,13 +891,11 @@ public final class BrowserSession: ObservableObject {
         locationText = target.url.absoluteString
 
         navigationTask = Task { [weak self] in
-            guard let self else { return }
-            await self.load(
-                target: target,
-                disposition: disposition,
-                renderAsSource: renderAsSource,
-                bypassesContentCache: disposition == .reload
-            )
+            guard let self, !isClosed, !Task.isCancelled else { return }
+            try? await requestLifetime.perform {
+                await load(target: target, disposition: disposition, renderAsSource: renderAsSource,
+                    bypassesContentCache: disposition == .reload)
+            }
         }
     }
 
@@ -1125,7 +1165,7 @@ public final class BrowserSession: ObservableObject {
                         : "Loaded \(sourceBytes.count) bytes"
                     // Only now, once the reader has actually landed on this capsule: the
                     // RFC forbids probing for a favicon any earlier.
-                    Task { await refreshFavicon(forCapsuleAt: target.url) }
+                    scheduleFaviconRefresh(for: target.url)
                     navigationTask = nil
                     return
                 }
@@ -1206,6 +1246,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func openLink(_ url: URL) {
+        guard !isClosed else { return }
         if url.scheme?.lowercased() == "gemini",
            let target = try? GeminiRequestTarget(url.absoluteString) {
             navigate(to: target, disposition: .new)
@@ -1416,7 +1457,7 @@ public final class BrowserSession: ObservableObject {
         statusText = cached.completion == .complete
             ? "Cached • \(cached.body.count) bytes"
             : "Cached \(cached.completion.rawValue) response"
-        Task { await refreshFavicon(forCapsuleAt: cached.url) }
+        scheduleFaviconRefresh(for: cached.url)
     }
 
     private func cache(_ page: CachedPage) {
@@ -1534,6 +1575,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func preferencesChanged(to preferences: BrowserPreferences) {
+        guard !isClosed else { return }
         defer { lastPreferences = preferences }
 
         // Handled ahead of the guard below, which is about re-rendering a document:
@@ -1542,7 +1584,7 @@ public final class BrowserSession: ObservableObject {
         if preferences.showsFavicons != lastPreferences.showsFavicons {
             if preferences.showsFavicons {
                 if let committedURL {
-                    Task { await refreshFavicon(forCapsuleAt: committedURL) }
+                    scheduleFaviconRefresh(for: committedURL)
                 }
             } else {
                 favicon = nil
@@ -1567,6 +1609,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func contentThemeChanged() {
+        guard !isClosed else { return }
         guard committedURL != nil else { return }
         if isLoading {
             // Finish the current stream before rebuilding ANSI runs from source bytes.
@@ -1656,6 +1699,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func toggleInlineImage(lineIdentifier: String, url: URL, documentURL: URL) {
+        guard !isClosed else { return }
         guard activeWebDocumentURL == documentURL, inlineImageURLs[lineIdentifier] == url else { return }
         if imageTasks[lineIdentifier] != nil {
             Task { await services.imageLoader?.prioritize(url) }
@@ -1680,10 +1724,10 @@ public final class BrowserSession: ObservableObject {
         let documentURL = activeWebDocumentURL
         imageTasks[lineIdentifier] = Task { [weak self] in
             guard let self, !Task.isCancelled else { return }
-            await self.expandInlineImage(
-                lineIdentifier: lineIdentifier, url: url,
-                completesScrollRestoration: restoresScroll, prioritize: prioritize
-            )
+            try? await requestLifetime.perform {
+                await expandInlineImage(lineIdentifier: lineIdentifier, url: url,
+                    completesScrollRestoration: restoresScroll, prioritize: prioritize)
+            }
             if !Task.isCancelled, self.activeWebDocumentURL == documentURL {
                 self.imageTasks[lineIdentifier] = nil
             }
@@ -1710,6 +1754,14 @@ public final class BrowserSession: ObservableObject {
         ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
     }
 
+    private func scheduleFaviconRefresh(for url: URL) {
+        faviconTask?.cancel()
+        faviconTask = Task { [weak self] in
+            guard let self, !isClosed, !Task.isCancelled else { return }
+            try? await requestLifetime.perform { await refreshFavicon(forCapsuleAt: url) }
+        }
+    }
+
     private func refreshFavicon(forCapsuleAt url: URL) async {
         guard !isClearingBrowsingData else { return }
         let generation = browsingDataGeneration
@@ -1721,7 +1773,7 @@ public final class BrowserSession: ObservableObject {
         }
         guard let loader = services.faviconLoader else { return }
         let observation = await loader.observation(for: endpoint)
-        guard generation == browsingDataGeneration else { return }
+        guard !Task.isCancelled, !isClosed, generation == browsingDataGeneration else { return }
         switch observation.kind {
         case .unknown:
             return
@@ -1771,6 +1823,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func resumeClientCertificatePrompt(id: UUID) {
+        guard !isClosed else { return }
         guard clientCertificatePrompt?.id == id, let pending = pendingClientCertificateChallenge else { return }
         clientCertificatePrompt = nil
         pendingClientCertificateChallenge = nil
@@ -1783,6 +1836,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func prepareHistoryPreview(direction: BrowserHistoryDirection) async -> UUID? {
+        guard !isClosed else { return nil }
         guard let source = navigation.currentEntryID,
               let entry = direction == .back ? navigation.backHistoryEntries.first : navigation.forwardHistoryEntries.first
         else { return nil }

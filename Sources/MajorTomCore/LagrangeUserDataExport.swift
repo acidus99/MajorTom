@@ -1,8 +1,8 @@
 import Foundation
 
-/// The portable subset of a Lagrange User Data export. Archive access deliberately
-/// lives in the app target; this type only interprets the exported bytes so it is easy
-/// to validate and test without extracting untrusted archives to disk.
+/// The portable subset of a Lagrange User Data export. Archive access is separate
+/// from byte interpretation, so validation is testable without extracting untrusted
+/// archives to disk.
 public struct LagrangeUserDataExport: Sendable {
     public struct Bookmark: Sendable, Equatable {
         public let title: String

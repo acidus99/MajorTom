@@ -26,7 +26,7 @@ final class BrowsingDataController: ObservableObject {
             clearSavedVisits: { try SessionRestorationStore.shared.clearBrowsingData($0, since: $1) },
             clearHistory: { try BrowsingHistoryStore.shared.clear(since: $0) },
             clearInputDrafts: { try GeminiInputDraftStore.shared.clear(since: $0) }
-        ))
+        ), lifetime: ApplicationWork.lifetime)
         observation = workflow.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
