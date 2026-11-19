@@ -4,9 +4,9 @@ import MajorTomCore
 import SwiftUI
 
 struct BrowserSettingsView: View {
-    @ObservedObject private var store = BrowserSettingsStore.shared
-    @ObservedObject private var cloud = ICloudSyncStore.shared
-    @ObservedObject private var themes = ContentThemeStore.shared
+    @ObservedObject private var store = ApplicationServices.settings
+    @ObservedObject private var cloud = ApplicationServices.cloud
+    @ObservedObject private var themes = ApplicationServices.themes
     @State private var isDefaultGeminiBrowser = false
     @State private var defaultBrowserError: String?
 
@@ -285,11 +285,11 @@ struct BrowserSettingsView: View {
 
 private struct DataManagementSettingsView: View {
     @Environment(\.openWindow) private var openWindow
-    @ObservedObject private var store = BrowserSettingsStore.shared
-    @ObservedObject private var browsingData = BrowsingDataController.shared
+    @ObservedObject private var store = ApplicationServices.settings
+    @ObservedObject private var browsingData = ApplicationServices.browsingData
     @State private var browsingRange: BrowsingDataTimeRange = .last24Hours
     @State private var cacheRange: BrowsingDataTimeRange = .last24Hours
-    @ObservedObject private var userDataDeletion = UserDataDeletion.workflow
+    @ObservedObject private var userDataDeletion = ApplicationServices.userDataDeletion
 
     var body: some View {
         Form {

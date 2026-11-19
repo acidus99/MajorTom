@@ -69,7 +69,7 @@ private final class ImportDataModel: ObservableObject {
             // Give SwiftUI an opportunity to present the progress screen before any
             // import work begins.
             await Task.yield()
-            do { try await UserDataImportComposition.importer.importExport(export) }
+            do { try await ApplicationServices.importer.importExport(export) }
             catch UserDataImportError.accountChanged {
                 errorMessage = "The iCloud account changed. Import stopped; earlier changes were kept."
             } catch {
@@ -122,7 +122,7 @@ private struct LoopingVideoView: NSViewRepresentable {
 /// Reads only named files from an archive. No untrusted path is ever extracted to disk.
 private struct ImportDataView: View {
     @StateObject private var model = ImportDataModel()
-    @ObservedObject private var importer = UserDataImportComposition.importer
+    @ObservedObject private var importer = ApplicationServices.importer
     private var isBusy: Bool { model.isCheckingArchive || importer.isImporting }
     @StateObject private var lagrangeVideo = ExportVideoController(resourceName: "lagrange-data-export")
     @StateObject private var alhenaVideo = ExportVideoController(resourceName: "alhena-data-export")

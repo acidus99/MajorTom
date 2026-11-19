@@ -37,8 +37,6 @@ enum ICloudSyncStatus: Equatable {
 /// Incremental, outbox-backed private CloudKit synchronization.
 @MainActor
 final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncEngineDelegate {
-    static let shared = ICloudSyncStore()
-
     @Published private(set) var status: ICloudSyncStatus = .preparing {
         didSet {
             guard status != oldValue else { return }
@@ -64,8 +62,8 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     let receivedPreferences = PassthroughSubject<SyncedBrowserPreferences, Never>()
     let receivedAccountPreferences = PassthroughSubject<SyncedBrowserPreferences, Never>()
     let activeAccountChanged = PassthroughSubject<String, Never>()
-    let receivedClientCertificates = PassthroughSubject<ClientCertificateSyncState, Never>()
-    let receivedBookmarks = PassthroughSubject<SyncedBookmarks, Never>()
+    let receivedClientCertificates = PassthroughSubject<Void, Never>()
+    let receivedBookmarks = PassthroughSubject<Void, Never>()
 
     let localDeviceID: UUID
     let localDeviceName: String
@@ -115,23 +113,25 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     private var lastFullSyncAt: Date?
     private var lastSendFailureWasHandled = false
     private var localPreferences: SyncedBrowserPreferences?
-    private var localClientCertificates: ClientCertificateSyncState?
-    private var localBookmarks: SyncedBookmarks?
     private var localTabs: CloudTabDeviceSnapshot?
     private var migrationTask: Task<Void, Never>?
     private var bootstrapInFlight = false
     private var isTerminating = false
-    private var localPersistenceInFlight = 0
+    private var hasStarted = false
+    private let activity: LocalPersistenceActivity
+    private var activityObservations: Set<AnyCancellable> = []
+    private var observedActiveWrites = 0
+    var prepareForFirstAccountClaim: (@MainActor () async throws -> Void)?
     private var tabWriteTask: Task<Void, Never>?
     private var checkpointTask: Task<Void, Error>?
     private var preferenceWriteTask: Task<Void, Never>?
-    private(set) var isClaimingLocalData = false
     private var confirmationTask: Task<Void, Never>?
     private var keyValueObserver: AnyCancellable?
     private let decoder = JSONDecoder()
 
-    private init(defaults: UserDefaults = MajorTomDataScope.defaults) {
+    init(defaults: UserDefaults, database: MajorTomDatabase?, activity: LocalPersistenceActivity) {
         self.defaults = defaults
+        self.activity = activity
         pathMonitor = NWPathMonitor()
         let cloudEnvironment = Self.entitledCloudEnvironment
         self.cloudEnvironment = cloudEnvironment
@@ -145,7 +145,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             defaults.set(id.uuidString, forKey: Self.deviceIDKey)
         }
         localDeviceName = Host.current().localizedName ?? "Mac"
-        localDatabase = ApplicationServices.storage.durable
+        localDatabase = database
         repository = localDatabase.map(CloudSyncRepository.init(database:))
         if cloudEnvironment != nil {
             let value = CKContainer(identifier: "iCloud.dev.gemi.major-tom")
@@ -159,6 +159,17 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             ))
         }
         super.init()
+        activity.$activeWrites.dropFirst().sink { [weak self] count in
+            guard let self else { return }
+            if count > observedActiveWrites {
+                cycle.invalidateSendProof()
+                if engine != nil, !cycle.failed, !writesBlocked { status = .syncing }
+            } else { requestSend() }
+            observedActiveWrites = count
+        }.store(in: &activityObservations)
+        activity.$failure.compactMap { $0 }.sink { [weak self] error in
+            self?.recordCycleFailure(error)
+        }.store(in: &activityObservations)
         pathMonitor.pathUpdateHandler = { [weak self] path in
             let isAvailable = path.status == .satisfied
             Task { @MainActor [weak self] in
@@ -178,10 +189,6 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             }
         }
 
-        // Remote tabs are read from account-scoped record metadata after activation.
-        if container != nil, localDatabase != nil {
-            migrationTask = Task { [weak self] in await self?.bootstrap() }
-        }
         NSUbiquitousKeyValueStore.default.synchronize()
         keyValueObserver = NotificationCenter.default.publisher(
             for: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
@@ -219,53 +226,12 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         }
     }
 
-    func configure(clientCertificates: ClientCertificateSyncState?) {
-        localClientCertificates = clientCertificates
-        requestSend()
-    }
-
-    func updateClientCertificates(_ snapshot: ClientCertificateSyncState) {
-        localClientCertificates = snapshot
-        requestSend()
-    }
-
-    /// Fans an explicit user deletion out to every UUID that previously represented
-    /// the same certificate. Automatic fingerprint reconciliation never calls this.
-    func deleteClientCertificateRecords(
-        descriptorIDs: some Sequence<UUID>,
-        associationIDs: some Sequence<UUID>
-    ) {
-        guard let activeAccount, let localDatabase else { return }
-        do {
-            let descriptorIDs = Set(descriptorIDs)
-            let associationIDs = Set(associationIDs)
-            try ClientCertificateSyncRepository(
-                database: localDatabase, accountIdentityHash: activeAccount
-            ).enqueueExplicitDeletion(
-                descriptorIDs: descriptorIDs,
-                associationIDs: associationIDs
-            )
-            cloudSyncLogger.notice(
-                "explicit certificate deletion queued descriptors=\(descriptorIDs.count) associations=\(associationIDs.count)"
-            )
-            status = .syncing
-            requestSend()
-        } catch {
-            Self.log(error, operation: "queueing client certificate deletion")
-            recordCycleFailure(error)
-        }
-    }
-
-    func configure(bookmarks: SyncedBookmarks?) {
-        localBookmarks = bookmarks
-        requestSend()
-    }
-
-    func updateBookmarks(_ snapshot: SyncedBookmarks) {
-        localBookmarks = snapshot
-        // BookmarkStore already committed this mutation and its outbox. Replacing the
-        // whole collection here can replay an older actor completion over a newer edit.
-        requestSend()
+    func start() {
+        guard !hasStarted else { return }
+        hasStarted = true
+        applyUbiquitousPreferences()
+        guard migrationTask == nil, container != nil, localDatabase != nil else { return }
+        migrationTask = Task { [weak self] in await self?.bootstrap() }
     }
 
     func updateTabs(_ tabs: [CloudTabSnapshot]) {
@@ -287,10 +253,11 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             return
         }
         let previous = tabWriteTask
-        localPersistenceBegan()
+        activity.begin()
+        let activity = activity
         tabWriteTask = Task { [weak self] in
             await previous?.value
-            defer { self?.localPersistenceEnded() }
+            defer { activity.end() }
             do {
                 try await Task.detached(priority: .utility) {
                     _ = try repository.enqueueSave(accountIdentityHash: account, recordType: "MTDeviceTabs",
@@ -334,7 +301,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
     }
 
     func refresh(trigger: FullSyncTrigger = .user) {
-        guard !isTerminating else { return }
+        guard hasStarted, !isTerminating else { return }
         guard transportTransitionID == nil, !manualSyncInFlight else {
             // A click during an automatic confirmation must still request a fresh
             // server check after that work finishes, rather than silently disappearing.
@@ -582,7 +549,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         let activationToken = activeEngineSessionToken
         transportTransitionID = nil
         userRefreshQueued = false
-        isClaimingLocalData = false
+        activity.isPreparingAccount = false
         checkpointTask = nil
         let priorEngine = engine
         engine = nil
@@ -598,10 +565,10 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         let priorActive = try repository.activeAccountIdentityHash()
         var state = try repository.state(for: account)
         if priorActive == nil {
-            isClaimingLocalData = true
+            activity.isPreparingAccount = true
             do {
-                try await BookmarksModel.shared.prepareForFirstAccountClaim()
-                try await ClientCertificateStore.shared.prepareForFirstAccountClaim()
+                guard let prepareForFirstAccountClaim else { throw CocoaError(.fileReadUnknown) }
+                try await prepareForFirstAccountClaim()
                 guard activationToken == activeEngineSessionToken else { throw CancellationError() }
                 try await Task.detached(priority: .utility) { try repository.claimUnownedRows(for: account) }.value
                 guard activationToken == activeEngineSessionToken else { throw CancellationError() }
@@ -610,9 +577,9 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
                 try repository.saveActiveAccountIdentityHash(account)
                 activeAccount = account
                 activeAccountChanged.send(account)
-                isClaimingLocalData = false
+                activity.isPreparingAccount = false
             } catch {
-                if activationToken == activeEngineSessionToken { isClaimingLocalData = false }
+                if activationToken == activeEngineSessionToken { activity.isPreparingAccount = false }
                 throw error
             }
         }
@@ -847,15 +814,10 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
 
     private func publishAccountDataset(_ account: String) throws {
         guard let localDatabase else { return }
-        let collection = try BookmarkRepository(database: localDatabase, accountIdentityHash: account).collection()
-        let certificates = try ClientCertificateSyncRepository(
-            database: localDatabase, accountIdentityHash: account
-        ).load().state
-        let bookmarks = SyncedBookmarks(collection: collection, modifiedAt: Date())
-        localBookmarks = bookmarks
-        localClientCertificates = certificates
-        receivedBookmarks.send(bookmarks)
-        receivedClientCertificates.send(certificates)
+        // Received rows and outgoing intent are already committed atomically. Observers
+        // reload their current repository; an old notification cannot replay old data.
+        receivedBookmarks.send(())
+        receivedClientCertificates.send(())
     }
 
 
@@ -1174,7 +1136,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
                 hasUnappliedIncoming: try repository.hasUnappliedBatches(for: account),
                 engineStatePersistenceFailed: engineStatePersistenceBlocked,
                 hasInFlightAttempts: !attemptedSnapshots.isEmpty,
-                hasPendingLocalWrites: localPersistenceInFlight > 0
+                hasPendingLocalWrites: activity.activeWrites > 0
             ) {
                 status = .upToDate(Date())
                 lastFailureCategory = nil
@@ -1202,24 +1164,6 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
         } else {
             status = .failed(Self.description(for: error))
         }
-    }
-
-    func reportLocalPersistenceFailure(_ error: Error) {
-        recordCycleFailure(error)
-    }
-
-    func localRecordsDidChange() { requestSend() }
-
-    func localPersistenceBegan() {
-        localPersistenceInFlight += 1
-        cycle.invalidateSendProof()
-        if engine != nil, !cycle.failed, !writesBlocked { status = .syncing }
-    }
-
-    func localPersistenceEnded() {
-        precondition(localPersistenceInFlight > 0)
-        localPersistenceInFlight -= 1
-        requestSend()
     }
 
     /// A support-facing snapshot contains only a short hash prefix and aggregate queue

@@ -5,8 +5,6 @@ import SwiftUI
 
 @MainActor
 final class BrowserSettingsStore: ObservableObject {
-    static let shared = BrowserSettingsStore(defaults: MajorTomDataScope.defaults)
-
     /// `@Published` emits from `willSet`, while browser models need to read the fully
     /// updated store when re-rendering. This post-update stream keeps every tab in sync
     /// without making the selected tab a special case.
@@ -36,13 +34,14 @@ final class BrowserSettingsStore: ObservableObject {
     private let sameCapsuleImageDefaultMigrationKey = "browser-preferences-same-capsule-images-disabled-v1"
     private var modifiedAt: Date
     private var isApplyingRemotePreferences = false
-    private var iCloudObserver: AnyCancellable?
-    private var iCloudAccountObserver: AnyCancellable?
+    private let publishPreferences: (SyncedBrowserPreferences) -> Void
+    let initialSyncedSnapshot: SyncedBrowserPreferences?
     private var uploadTask: Task<Void, Never>?
     private var persistTask: Task<Void, Never>?
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults, publishPreferences: @escaping (SyncedBrowserPreferences) -> Void) {
         self.defaults = defaults
+        self.publishPreferences = publishPreferences
         let storedData = defaults.data(forKey: key)
         var loadedPreferences: BrowserPreferences
         var loadedModifiedAt: Date
@@ -64,22 +63,13 @@ final class BrowserSettingsStore: ObservableObject {
         preferences = loadedPreferences
         modifiedAt = loadedModifiedAt
 
+        initialSyncedSnapshot = storedData == nil ? nil : SyncedBrowserPreferences(
+            preferences: loadedPreferences,
+            modifiedAt: loadedModifiedAt
+        )
         if needsSameCapsuleImageMigration, storedData != nil {
             persist()
         }
-
-        iCloudObserver = ICloudSyncStore.shared.receivedPreferences.sink { [weak self] snapshot in
-            self?.apply(snapshot)
-        }
-        iCloudAccountObserver = ICloudSyncStore.shared.receivedAccountPreferences.sink {
-            [weak self] snapshot in
-            self?.apply(snapshot, force: true)
-        }
-        let localSnapshot = storedData == nil ? nil : SyncedBrowserPreferences(
-            preferences: preferences,
-            modifiedAt: modifiedAt
-        )
-        ICloudSyncStore.shared.configure(preferences: localSnapshot)
     }
 
     private func persist() {
@@ -118,11 +108,11 @@ final class BrowserSettingsStore: ObservableObject {
         uploadTask = Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(500))
             guard !Task.isCancelled else { return }
-            ICloudSyncStore.shared.updatePreferences(snapshot)
+            publishPreferences(snapshot)
         }
     }
 
-    private func apply(_ snapshot: SyncedBrowserPreferences, force: Bool = false) {
+    func apply(_ snapshot: SyncedBrowserPreferences, force: Bool = false) {
         let local = SyncedBrowserPreferences(preferences: preferences, modifiedAt: modifiedAt)
         guard force || snapshot.shouldReplace(local) else { return }
         uploadTask?.cancel()

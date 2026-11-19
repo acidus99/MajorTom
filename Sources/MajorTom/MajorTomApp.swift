@@ -26,9 +26,9 @@ struct MajorTomApp: App {
     @Environment(\.openWindow) private var openWindow
     /// Observed so the Bookmarks menu lists the current favourites and reflects the
     /// Favourites-bar toggle.
-    @ObservedObject private var bookmarks = BookmarksModel.shared
-    @ObservedObject private var settings = BrowserSettingsStore.shared
-    @ObservedObject private var browsingData = BrowsingDataController.shared
+    @ObservedObject private var bookmarks = ApplicationServices.bookmarks
+    @ObservedObject private var settings = ApplicationServices.settings
+    @ObservedObject private var browsingData = ApplicationServices.browsingData
 
     var body: some Scene {
         WindowGroup(for: BrowserWindowDestination.self) { destination in
@@ -297,6 +297,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.registerForRemoteNotifications()
+        ApplicationServices.start()
         ApplicationServices.presentStorageOpeningFailures()
         installCommandKeyMonitor()
         // Observed here rather than in a window's view so About is handled consistently
@@ -441,7 +442,7 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        ICloudSyncStore.shared.refresh(trigger: .activation)
+        ApplicationServices.cloud.refresh(trigger: .activation)
     }
 
 
@@ -588,15 +589,15 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
 
         terminationTask = Task { @MainActor [weak self, weak sender] in
             guard let self, let sender else { return }
-            await ApplicationWork.lifetime.closeAndDrain()
-            await ServerTrustPresentation.shared.suspendAndDrain()
+            await ApplicationServices.lifetime.closeAndDrain()
+            await ApplicationServices.trustPresentation.suspendAndDrain()
             if #available(macOS 26.0, *) {
                 await NativeTabCoordinator.shared.prepareForTermination()
             }
-            BrowserSettingsStore.shared.flushPendingWrites()
-            await BookmarksModel.shared.flushPendingWrites()
-            await ClientCertificateStore.shared.flushPendingWrites()
-            await ICloudSyncStore.shared.prepareForTermination()
+            ApplicationServices.settings.flushPendingWrites()
+            await ApplicationServices.bookmarks.flushPendingWrites()
+            await ApplicationServices.certificates.flushPendingWrites()
+            await ApplicationServices.cloud.prepareForTermination()
             try? ApplicationServices.storage.content?.checkpointAndClose()
             try? ApplicationServices.storage.session?.checkpointAndClose()
             try? ApplicationServices.storage.durable?.checkpointAndClose()
@@ -617,8 +618,8 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         }
         // Preferences coalesce their writes, so a change made moments before quitting
         // may still be waiting. History and drafts commit directly to SQLite.
-        BrowserSettingsStore.shared.flushPendingWrites()
-        ICloudSyncStore.shared.stopForTermination()
+        ApplicationServices.settings.flushPendingWrites()
+        ApplicationServices.cloud.stopForTermination()
         try? ApplicationServices.storage.content?.checkpointAndClose()
         try? ApplicationServices.storage.session?.checkpointAndClose()
         try? ApplicationServices.storage.durable?.checkpointAndClose()
@@ -935,11 +936,11 @@ final class NativeTabCoordinator {
     }
 
     func persistSession() {
-        SessionRestorationStore.shared.saveApplication(applicationSessionSnapshot())
+        ApplicationServices.sessionRestoration.saveApplication(applicationSessionSnapshot())
     }
 
     func persistSessionAfterClearing() throws {
-        try SessionRestorationStore.shared.saveApplicationAfterClearing(applicationSessionSnapshot())
+        try ApplicationServices.sessionRestoration.saveApplicationAfterClearing(applicationSessionSnapshot())
     }
 
     private func applicationSessionSnapshot() -> RestoredApplicationState {
@@ -1007,7 +1008,7 @@ final class NativeTabCoordinator {
     ///   through `openLocation(_:)`, which would find no window to attach a tab to and
     ///   create a second one alongside this launch's window.
     func restoreSessionOrOpenInitialWindow(openingInitially requestedLocations: [URL] = []) {
-        guard let session = SessionRestorationStore.shared.loadApplication(),
+        guard let session = ApplicationServices.sessionRestoration.loadApplication(),
               let first = session.windows.first,
               let firstTab = first.tabs.first else {
             // A location Major Tom was launched to open belongs in the window it is
@@ -1338,7 +1339,7 @@ final class NativeTabCoordinator {
                 favicon: browser.favicon
             )
         }
-        ICloudSyncStore.shared.updateTabs(tabs)
+        ApplicationServices.cloud.updateTabs(tabs)
     }
 
     private func makeBrowserWindow(
@@ -1655,7 +1656,7 @@ private final class PermanentTabOverviewControl: NSObject {
 }
 
 private struct NativeFoundationView: View {
-    @ObservedObject private var settings = BrowserSettingsStore.shared
+    @ObservedObject private var settings = ApplicationServices.settings
     let initialURL: URL?
     let destinationID: UUID
     let focusesLocationOnPresentation: Bool
@@ -1711,7 +1712,7 @@ private struct BrowserWindowView: View {
         destinationID: UUID = UUID(),
         focusesLocationOnPresentation: Bool = false
     ) {
-        _browser = StateObject(wrappedValue: BrowserModel(
+        _browser = StateObject(wrappedValue: ApplicationServices.browser(
             restoredState: NativeTabRestorationState.next(
                 destinationID: destinationID
             ),
@@ -2109,15 +2110,15 @@ private struct SafariToolbarSegmentButtonStyle: ButtonStyle {
 
 @available(macOS 26.0, *)
 private struct BrowserTabView: View {
-    @ObservedObject private var trust = ServerTrustPresentation.shared
+    @ObservedObject private var trust = ApplicationServices.trustPresentation
     @ObservedObject var browser: BrowserModel
     let chromeTopInset: CGFloat
     let hostWindow: NSWindow?
     let focusesLocationOnPresentation: Bool
-    @ObservedObject private var bookmarks = BookmarksModel.shared
-    @ObservedObject private var settings = BrowserSettingsStore.shared
-    @ObservedObject private var themes = ContentThemeStore.shared
-    @ObservedObject private var clientCertificates = ClientCertificateStore.shared
+    @ObservedObject private var bookmarks = ApplicationServices.bookmarks
+    @ObservedObject private var settings = ApplicationServices.settings
+    @ObservedObject private var themes = ApplicationServices.themes
+    @ObservedObject private var clientCertificates = ApplicationServices.certificates
     @State private var locationFocusRequest = 0
     @State private var showsFind = false
     @State private var historySearchFocusRequest = 0

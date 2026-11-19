@@ -222,10 +222,10 @@ final class BrowserModel: ObservableObject {
     var isPresentingHistorySwipe: Bool { historySwipePresentation != nil }
     private var pendingHistorySwipe: PendingHistorySwipe?
     private var historySwipeGeneration = 0
-    private let settings = BrowserSettingsStore.shared
-    private let themes = ContentThemeStore.shared
-    private let clientCertificates = ClientCertificateStore.shared
-    private let trustStore = ApplicationServices.storage.trust
+    private let settings: BrowserSettingsStore
+    private let themes: ContentThemeStore
+    private let clientCertificates: ClientCertificateStore
+    private let trustStore: TrustedIdentityStore?
     private var cancellables = Set<AnyCancellable>()
     private var downloadTask: Task<Void, Never>?
     private var downloadPanel: NSSavePanel?
@@ -273,7 +273,13 @@ final class BrowserModel: ObservableObject {
     var statusText: String { get { session.statusText } set { session.reportNativeResult(status: newValue) } }
     private var activeWebDocumentURL: URL? { session.activeWebDocumentURL }
 
-    init(restoredState: RestoredTabState? = nil, initialURL: URL? = nil) {
+    init(services: BrowserSessionServices, settings: BrowserSettingsStore, themes: ContentThemeStore,
+         clientCertificates: ClientCertificateStore, trustStore: TrustedIdentityStore?,
+         restoredState: RestoredTabState?, initialURL: URL?) {
+        self.settings = settings
+        self.themes = themes
+        self.clientCertificates = clientCertificates
+        self.trustStore = trustStore
         let contextMenuScriptHandler = ContextMenuScriptHandler()
         let linkHoverScriptHandler = LinkHoverScriptHandler()
         let linkActivationScriptHandler = LinkActivationScriptHandler()
@@ -320,35 +326,6 @@ final class BrowserModel: ObservableObject {
         )
         let presentation = BrowserWebPresentation(userContentController: userContentController)
         self.presentation = presentation
-        let transport = GeminiTransport()
-        let settings = BrowserSettingsStore.shared
-        let themes = ContentThemeStore.shared
-        let certificates = ClientCertificateStore.shared
-        let cache = ApplicationServices.contentCache
-        let retriever = GeminiResourceRetriever<ClientTLSIdentity>(
-            transportEvents: { target, identity, configuration, authorize in
-                transport.events(for: target, clientIdentity: identity, configuration: configuration, authorizeTrust: authorize)
-            }, cache: cache, resolveIdentity: { url in
-                guard let resolved = await certificates.resolvedCertificate(for: url) else { return nil }
-                return GeminiRetrievalIdentity(descriptor: resolved.descriptor, credential: resolved.tlsIdentity)
-            }, authorizeTrust: { identity, _ in await ServerTrustPresentation.shared.authorize(identity) }
-        )
-        var services = BrowserSessionServices(preferences: { settings.preferences }, retriever: retriever)
-        services.preparePresentation = { await themes.waitUntilReady() }
-        services.contentStyle = { zoom, hides, inset in
-            Self.contentStyle(themes: themes, preferences: settings.preferences, zoom: zoom, hides: hides, inset: inset)
-        }
-        services.faviconLoader = GeminiFaviconLoader(cache: cache) { target in try await retriever.response(for: target, purpose: .favicon) }
-        services.imageLoader = ApplicationServices.imageLoader
-        services.authorizeTrust = { identity, _ in await ServerTrustPresentation.shared.authorize(identity) }
-        services.backForwardCache = ApplicationServices.backForwardCache
-        services.recordVisit = { BrowsingHistoryStore.shared.record($0, title: $1) }
-        services.updateBookmarkFavicon = { BookmarksModel.shared.updateFavicon($0, for: $1, fetchedAt: $2) }
-        services.certificateDescriptor = { certificates.descriptor(id: $0) }
-        services.inputDraft = { GeminiInputDraftStore.shared.text(for: $0) }
-        services.saveInputDraft = { GeminiInputDraftStore.shared.save($0, for: $1) }
-        services.removeInputDraft = { GeminiInputDraftStore.shared.remove(for: $0) }
-        services.openExternalURL = { NSWorkspace.shared.open($0) }
         self.session = BrowserSession(services: services, presentation: presentation, restoredState: restoredState, initialURL: initialURL)
         self.contextMenuScriptHandler = contextMenuScriptHandler
         self.linkHoverScriptHandler = linkHoverScriptHandler
@@ -356,7 +333,6 @@ final class BrowserModel: ObservableObject {
         self.inlineImageScriptHandler = inlineImageScriptHandler
         self.scrollPositionScriptHandler = scrollPositionScriptHandler
         self.preformattedStateScriptHandler = preformattedStateScriptHandler
-        BrowsingDataController.shared.register(session)
         contextMenuScriptHandler.browser = self
         linkHoverScriptHandler.browser = self
         linkActivationScriptHandler.browser = self
@@ -796,7 +772,7 @@ final class BrowserModel: ObservableObject {
         historySwipePresentation = nil
     }
 
-    private static func contentStyle(themes: ContentThemeStore, preferences: BrowserPreferences, zoom: Double, hides: Bool, inset: Double) -> BrowserContentStyle {
+    static func contentStyle(themes: ContentThemeStore, preferences: BrowserPreferences, zoom: Double, hides: Bool, inset: Double) -> BrowserContentStyle {
         var theme = themes.resolved?.css ?? ContentThemeStylesheets.base + ContentThemeStylesheets.print
         // This style arrives in the document's first HTML chunk, before WebKit can paint
         // its initial y=0 layout. restoreScrollPosition reveals it only after the saved

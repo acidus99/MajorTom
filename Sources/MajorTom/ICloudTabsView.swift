@@ -3,7 +3,7 @@ import MajorTomCore
 import SwiftUI
 
 struct ICloudTabsView: View {
-    @ObservedObject private var cloud = ICloudSyncStore.shared
+    @ObservedObject private var cloud = ApplicationServices.cloud
 
     var body: some View {
         Group {

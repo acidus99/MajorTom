@@ -28,14 +28,14 @@ struct RestoredApplicationState: Codable {
 
 @MainActor
 final class SessionRestorationStore {
-    static let shared = SessionRestorationStore()
-    private let defaults = MajorTomDataScope.defaults
+    private let defaults: UserDefaults
     private let key = "last-window-session-v1"
     private let applicationKey = "last-application-session-v2"
     private let sessionRepository: SessionRepository?
 
-    private init() {
-        sessionRepository = ApplicationServices.storage.session.map(SessionRepository.init(database:))
+    init(defaults: UserDefaults, repository: SessionRepository?) {
+        self.defaults = defaults
+        sessionRepository = repository
     }
 
     /// Migration only: reads a session written by a release that predates native
@@ -176,15 +176,15 @@ private struct LegacyBrowsingHistoryRecord: Codable {
 
 @MainActor
 final class BrowsingHistoryStore: ObservableObject {
-    static let shared = BrowsingHistoryStore()
     @Published private(set) var records: [BrowsingHistoryEntry] = []
 
-    private let defaults = MajorTomDataScope.defaults
+    private let defaults: UserDefaults
     private let key = "browsing-history-v1"
     private let repository: BrowsingHistoryRepository?
 
-    init() {
-        repository = ApplicationServices.storage.durable.map(BrowsingHistoryRepository.init(database:))
+    init(defaults: UserDefaults, repository: BrowsingHistoryRepository?) {
+        self.defaults = defaults
+        self.repository = repository
 
         if let repository {
             // Import is additive and transactional. The legacy blob remains available to
@@ -283,11 +283,9 @@ final class BrowsingHistoryStore: ObservableObject {
 
 @MainActor
 final class GeminiInputDraftStore {
-    static let shared = GeminiInputDraftStore()
 
-    private let repository = ApplicationServices.storage.durable.map(
-        GeminiInputDraftRepository.init(database:)
-    )
+    private let repository: GeminiInputDraftRepository?
+    init(repository: GeminiInputDraftRepository?) { self.repository = repository }
     private var memoryFallback: [URL: (text: String, updatedAt: Date)] = [:]
 
     func text(for promptURL: URL) -> String {

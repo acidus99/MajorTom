@@ -77,7 +77,7 @@ struct OmnibarAddressField: NSViewRepresentable {
         init(parent: OmnibarAddressField) {
             self.parent = parent
             super.init()
-            OmnibarStore.shared.$revision.dropFirst().sink { [weak self] _ in
+            ApplicationServices.omnibar.$revision.dropFirst().sink { [weak self] _ in
                 guard let self, self.isEditing else { return }
                 // Do not leave a deleted history entry actionable while rebuilding.
                 self.rejectCompletion()
@@ -238,13 +238,13 @@ struct OmnibarAddressField: NSViewRepresentable {
             generation += 1
             let requestedGeneration = generation
             let query = showRecent ? "" : input
-            let sourceRevision = OmnibarStore.shared.revision
+            let sourceRevision = ApplicationServices.omnibar.revision
             let currentTabID = NativeTabCoordinator.shared.omnibarTabID(for: field?.window)
             searchTask = Task { [weak self] in
-                guard let matches = await OmnibarStore.shared.search(query, excludingTabID: currentTabID), !Task.isCancelled,
+                guard let matches = await ApplicationServices.omnibar.search(query, excludingTabID: currentTabID), !Task.isCancelled,
                       let self, self.isEditing, !self.isDismissed,
                       self.generation == requestedGeneration,
-                      OmnibarStore.shared.revision == sourceRevision,
+                      ApplicationServices.omnibar.revision == sourceRevision,
                       let editor = self.field?.currentEditor() as? NSTextView,
                       !editor.hasMarkedText() else { return }
                 if self.allowsCompletion && !showRecent && self.selectedID == nil,

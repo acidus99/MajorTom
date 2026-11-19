@@ -21,12 +21,6 @@ struct ResolvedClientCertificate {
 /// connection is about to be made.
 @MainActor
 final class ClientCertificateStore: ObservableObject {
-    static let shared = ClientCertificateStore(
-        defaults: MajorTomDataScope.defaults,
-        keychain: ClientCertificateKeychain(namespace: MajorTomDataScope.keychainNamespace),
-        database: ApplicationServices.storage.durable
-    )
-
     @Published private(set) var certificates: [ClientCertificateDescriptor] = []
     @Published private(set) var associations: [ClientCertificateAssociation] = []
     @Published private(set) var availability: [UUID: Bool] = [:]
@@ -35,16 +29,12 @@ final class ClientCertificateStore: ObservableObject {
     private let defaults: UserDefaults
     private let keychain: ClientCertificateKeychain
     private var repository: ClientCertificateSyncRepository?
-    private let database: MajorTomDatabase?
+    private let activity: LocalPersistenceActivity
     private let storageKey = "client-certificates-v1"
     private let syncStorageKey = "client-certificate-sync-state-v2"
     private let localStorageFlagsKey = "client-certificate-local-storage-v1"
     private var syncState = ClientCertificateSyncState()
     private var localSynchronizationFlags: [UUID: Bool] = [:]
-    private var isApplyingRemote = false
-    private var cloudObserver: AnyCancellable?
-    private var accountObserver: AnyCancellable?
-    private var uploadTask: Task<Void, Never>?
     private var managerSelectionRequest: UUID?
     private var identityCache: [UUID: ClientTLSIdentity] = [:]
     private var signingValidated: Set<UUID> = []
@@ -66,7 +56,7 @@ final class ClientCertificateStore: ObservableObject {
     private var materialWaiters: [CheckedContinuation<Void, Never>] = []
 
     private func beginMaterialOperation() throws {
-        guard !isDeletingUserData else { throw CancellationError() }
+        guard !isDeletingUserData, persistenceReady, !activity.isPreparingAccount else { throw CancellationError() }
         materialOperations += 1
     }
 
@@ -99,18 +89,14 @@ final class ClientCertificateStore: ObservableObject {
     init(
         defaults: UserDefaults = .standard,
         keychain: ClientCertificateKeychain = ClientCertificateKeychain(),
-        database: MajorTomDatabase? = nil
+        repository: ClientCertificateSyncRepository?,
+        activity: LocalPersistenceActivity
     ) {
         self.defaults = defaults
         self.keychain = keychain
-        self.database = database
+        self.repository = repository
+        self.activity = activity
         do {
-            let activeAccount = try database.map {
-                try CloudSyncRepository(database: $0).activeAccountIdentityHash()
-            } ?? nil
-            repository = database.map {
-                ClientCertificateSyncRepository(database: $0, accountIdentityHash: activeAccount)
-            }
             localSynchronizationFlags = (defaults.dictionary(forKey: localStorageFlagsKey) ?? [:])
                 .reduce(into: [:]) { result, entry in
                     if let id = UUID(uuidString: entry.key), let value = entry.value as? Bool {
@@ -147,7 +133,7 @@ final class ClientCertificateStore: ObservableObject {
                             self.persistenceReady = true
                         } catch {
                             self?.lastError = error.localizedDescription
-                            ICloudSyncStore.shared.reportLocalPersistenceFailure(error)
+                            activity.report(error)
                         }
                     }
                 }
@@ -161,46 +147,34 @@ final class ClientCertificateStore: ObservableObject {
             associations = syncState.activeAssociations
         } catch {
             persistenceReady = false
-            ICloudSyncStore.shared.reportLocalPersistenceFailure(error)
+            activity.report(error)
         }
         applyLocalStorageFlags()
         durableLocalFlags = localSynchronizationFlags
-        cloudObserver = ICloudSyncStore.shared.receivedClientCertificates.sink { [weak self] state in
-            self?.apply(state)
-        }
-        accountObserver = ICloudSyncStore.shared.activeAccountChanged.sink { [weak self] account in
-            self?.switchAccount(to: account)
-        }
+        if repository == nil { persistenceReady = false }
         Task { await repairDuplicateMetadata() }
-        ICloudSyncStore.shared.configure(
-            clientCertificates: syncState.certificates.isEmpty && syncState.associations.isEmpty
-                ? nil
-                : syncState
-        )
         refreshAvailability()
     }
 
-    private func switchAccount(to account: String) {
-        guard let database else { return }
+    func replaceRepository(_ next: ClientCertificateSyncRepository?) {
         accountRevision += 1
         catalogueRevision += 1
-        uploadTask?.cancel()
         identityCache = [:]
         signingValidated = []
         availability = [:]
-        let next = ClientCertificateSyncRepository(
-            database: database, accountIdentityHash: account
-        )
         repository = next
         persistenceReady = false
         let loaded: (state: ClientCertificateSyncState, localFlags: [UUID: Bool])
-        do { loaded = try next.load() }
+        do {
+            guard let next else { throw CocoaError(.fileReadUnknown) }
+            loaded = try next.load()
+        }
         catch {
             certificates = []
             associations = []
             localSynchronizationFlags = [:]
             syncState = ClientCertificateSyncState()
-            ICloudSyncStore.shared.reportLocalPersistenceFailure(error)
+            activity.report(error)
             return
         }
         syncState = loaded.state
@@ -359,7 +333,7 @@ final class ClientCertificateStore: ObservableObject {
         let revision = accountRevision
         await flushPendingWrites()
         guard revision == accountRevision else { throw CancellationError() }
-        guard persistenceReady, !ICloudSyncStore.shared.isClaimingLocalData else {
+        guard persistenceReady, !activity.isPreparingAccount else {
             throw CocoaError(.fileWriteUnknown)
         }
         let descriptors = certificates
@@ -559,36 +533,11 @@ final class ClientCertificateStore: ObservableObject {
     }
 
 
-    private func apply(_ incoming: ClientCertificateSyncState) {
-        guard incoming != syncState else { return }
-        catalogueRevision += 1
-        uploadTask?.cancel()
-        isApplyingRemote = true
-        let activeIDs = Set(incoming.certificates.filter { $0.deletedAt == nil }.map(\.id))
-        let removedIDs = Set(certificates.map(\.id)).subtracting(activeIDs)
-        for id in removedIDs {
-            // A remote metadata deletion must not erase private key material. Keychain
-            // has its own account and delivery lifecycle; only an explicit local delete
-            // is authoritative for destructive cleanup.
-            identityCache[id] = nil
-        }
-        certificates = incoming.activeCertificates(preservingLocalStorageFrom: certificates)
-        applyLocalStorageFlags()
-        identityCache = identityCache.filter { id, _ in
-            certificates.contains { $0.id == id }
-        }
-        signingValidated = signingValidated.filter { id in
-            certificates.contains { $0.id == id }
-        }
-        associations = incoming.activeAssociations
-        syncState = incoming
-        isApplyingRemote = false
-        // Incoming rows were committed by the sync repository. Never turn this
-        // publication back into a whole-catalogue local replacement.
-        Task { await repairDuplicateMetadata() }
+    func reloadCommittedCatalogue() async {
+        await reloadLatestCatalogue()
+        _ = await repairDuplicateMetadata()
         refreshAvailability()
     }
-
 
     private func applyLocalStorageFlags() {
         for index in certificates.indices {
@@ -632,29 +581,20 @@ final class ClientCertificateStore: ObservableObject {
         return success
     }
 
-    private func scheduleUpload(_ snapshot: ClientCertificateSyncState) {
-        uploadTask?.cancel()
-        uploadTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled else { return }
-            ICloudSyncStore.shared.updateClientCertificates(snapshot)
-        }
-    }
-
     private func commitMutation(
         _ operation: @escaping @Sendable (inout [ClientCertificateDescriptor], inout [ClientCertificateAssociation], inout [UUID: Bool]) -> Void,
         onDurableCommit: (@MainActor () -> Void)? = nil
     ) async -> Bool {
-        guard !ICloudSyncStore.shared.isClaimingLocalData else {
+        guard !activity.isPreparingAccount else {
             lastError = "Local data is being prepared for iCloud. Try again in a moment."
             return false
         }
         guard persistenceReady else {
-            ICloudSyncStore.shared.reportLocalPersistenceFailure(CocoaError(.fileReadCorruptFile))
+            activity.report(CocoaError(.fileReadCorruptFile))
             return false
         }
-        ICloudSyncStore.shared.localPersistenceBegan()
-        defer { ICloudSyncStore.shared.localPersistenceEnded() }
+        activity.begin()
+        defer { activity.end() }
         let account = accountRevision
         persistenceRevision += 1
         let revision = persistenceRevision
@@ -691,7 +631,6 @@ final class ClientCertificateStore: ObservableObject {
                 else if repository != nil { await reloadLatestCatalogue() }
             }
             guard account == accountRevision else { return false }
-            ICloudSyncStore.shared.localRecordsDidChange()
             return true
         } catch {
             if revision == persistenceRevision {
@@ -701,7 +640,7 @@ final class ClientCertificateStore: ObservableObject {
                 if account == accountRevision { await reloadLatestCatalogue() }
             }
             guard account == accountRevision else { return false }
-            ICloudSyncStore.shared.reportLocalPersistenceFailure(error)
+            activity.report(error)
             lastError = error.localizedDescription
             return false
         }
@@ -739,7 +678,7 @@ final class ClientCertificateStore: ObservableObject {
                 else { publishCommitted(committed) }
             } catch {
                 if revision == persistenceRevision { persistenceTask = nil }
-                if account == accountRevision { ICloudSyncStore.shared.reportLocalPersistenceFailure(error) }
+                if account == accountRevision { activity.report(error) }
             }
         }
     }
@@ -759,7 +698,7 @@ final class ClientCertificateStore: ObservableObject {
             guard account == accountRevision, publication == catalogueRevision, mutation == persistenceRevision else { return }
             publishCommitted(.init(state: latest.state, flags: latest.localFlags))
         } catch {
-            if account == accountRevision { ICloudSyncStore.shared.reportLocalPersistenceFailure(error) }
+            if account == accountRevision { activity.report(error) }
         }
     }
 }

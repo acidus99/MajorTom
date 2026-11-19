@@ -10,14 +10,13 @@ extension Notification.Name {
 /// Source stores stay authoritative. This disposable index owns no browsing data.
 @MainActor
 final class OmnibarStore: ObservableObject {
-    static let shared = OmnibarStore()
     @Published private(set) var revision = 0
     private var indexTask: Task<OmnibarIndex, Never>?
     private var observations: Set<AnyCancellable> = []
 
-    private init() {
-        BrowsingHistoryStore.shared.$records
-            .combineLatest(BookmarksModel.shared.$collection)
+    init(history: BrowsingHistoryStore, bookmarks: BookmarksModel) {
+        history.$records
+            .combineLatest(bookmarks.$collection)
             .sink { [weak self] history, bookmarks in
                 self?.rebuild(history: history, bookmarks: bookmarks)
             }
@@ -25,8 +24,8 @@ final class OmnibarStore: ObservableObject {
         NotificationCenter.default.publisher(for: .majorTomOmnibarTabsChanged)
             .sink { [weak self] _ in
                 self?.rebuild(
-                    history: BrowsingHistoryStore.shared.records,
-                    bookmarks: BookmarksModel.shared.collection
+                    history: history.records,
+                    bookmarks: bookmarks.collection
                 )
             }
             .store(in: &observations)

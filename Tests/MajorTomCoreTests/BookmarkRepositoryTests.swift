@@ -84,6 +84,46 @@ final class BookmarkRepositoryTests: XCTestCase {
         XCTAssertEqual(try repository.collection().allBookmarks.count, 1)
     }
 
+    func testStoreReloadMigratesLegacyFileBeforePublishingAndRetiresItOnlyAfterCommit() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let legacy = directory.appendingPathComponent("bookmarks.json")
+        var collection = BookmarkCollection()
+        let url = URL(string: "gemini://example.invalid/legacy")!
+        collection.add(title: "Retained legacy bookmark", url: url)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(collection).write(to: legacy)
+        let database = try MajorTomDatabase(inMemory: ())
+        let store = try BookmarkStore(database: database, legacyFileURL: legacy)
+        let loaded = try await store.reload()
+        XCTAssertTrue(loaded.contains(url: url))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path))
+        XCTAssertTrue(try BookmarkRepository(database: database).collection().contains(url: url))
+        let reloaded = try await store.reload()
+        XCTAssertEqual(reloaded, loaded)
+    }
+
+    func testFailedLegacyDecodeRemainsAvailableAndCannotOverwriteCurrentCollection() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let legacy = directory.appendingPathComponent("bookmarks.json")
+        try Data("invalid legacy fixture".utf8).write(to: legacy)
+        let database = try MajorTomDatabase(inMemory: ())
+        let repository = BookmarkRepository(database: database)
+        var collection = BookmarkCollection()
+        collection.add(title: "Existing", url: URL(string: "gemini://example.invalid/existing")!)
+        try repository.replace(with: collection)
+        let committedBeforeFailure = try repository.collection()
+        let store = try BookmarkStore(database: database, legacyFileURL: legacy)
+        do { _ = try await store.reload(); XCTFail("Corrupt legacy data must remain recoverable") }
+        catch is DecodingError {}
+        XCTAssertTrue(FileManager.default.fileExists(atPath: legacy.path))
+        XCTAssertEqual(try repository.collection(), committedBeforeFailure)
+    }
+
     func testRemovingFolderCascadesItsBookmarks() throws {
         let database = try MajorTomDatabase(inMemory: ())
         let repository = BookmarkRepository(database: database)

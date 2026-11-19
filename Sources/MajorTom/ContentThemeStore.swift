@@ -6,14 +6,13 @@ import MajorTomCore
 
 @MainActor
 final class ContentThemeStore: ObservableObject {
-    static let shared = ContentThemeStore()
-
     @Published private(set) var themes = ContentTheme.bundled
     @Published private(set) var resolved: ResolvedContentTheme?
     @Published private(set) var error: String?
     let themeDidChange = PassthroughSubject<Void, Never>()
 
-    private let directory = MajorTomDataScope.supportFile(named: "Themes")
+    private let directory: URL?
+    private let settings: BrowserSettingsStore
     private var watchers: [any DispatchSourceFileSystemObject] = []
     private var cancellables = Set<AnyCancellable>()
     private var appearanceObservation: NSKeyValueObservation?
@@ -23,9 +22,11 @@ final class ContentThemeStore: ObservableObject {
     private var pendingSelection: (theme: ContentTheme, appearance: ContentThemeAppearance)?
     private var catalogError: String?
 
-    private init() {
+    init(settings: BrowserSettingsStore, directory: URL?) {
+        self.settings = settings
+        self.directory = directory
         reloadThemes()
-        BrowserSettingsStore.shared.preferencesDidChange
+        settings.preferencesDidChange
             .sink { [weak self] _ in self?.resolveSelection() }
             .store(in: &cancellables)
         // Application appearance is applied to individual windows; the application's
@@ -101,7 +102,7 @@ final class ContentThemeStore: ObservableObject {
     private func resolveSelection() {
         let systemIsDark = NSApplication.shared.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let selection = ContentTheme.selected(
-            in: themes, preferences: BrowserSettingsStore.shared.preferences, systemIsDark: systemIsDark
+            in: themes, preferences: settings.preferences, systemIsDark: systemIsDark
         )
         if pendingSelection?.theme == selection.theme, pendingSelection?.appearance == selection.appearance { return }
         generation += 1

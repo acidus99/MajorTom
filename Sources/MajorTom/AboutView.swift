@@ -63,7 +63,7 @@ enum AboutWindowPresenter {
     }
 
     private static func applyAppearance(to window: NSWindow) {
-        window.appearance = switch BrowserSettingsStore.shared.preferences.applicationAppearance {
+        window.appearance = switch ApplicationServices.settings.preferences.applicationAppearance {
         case .system: nil
         case .light: NSAppearance(named: .aqua)
         case .dark: NSAppearance(named: .darkAqua)
@@ -78,7 +78,7 @@ enum AboutWindowPresenter {
 /// version — `2026.8.4 (231)` — with the full build identity beneath it. That second line
 /// is the one worth quoting in a bug report, so it is selectable and monospaced.
 struct AboutView: View {
-    @ObservedObject private var settings = BrowserSettingsStore.shared
+    @ObservedObject private var settings = ApplicationServices.settings
     @State private var midiPlayer = AboutMIDILooper()
     @State private var isLogoPressed = false
     @State private var isIconHovered = false

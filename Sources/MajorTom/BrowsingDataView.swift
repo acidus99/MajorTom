@@ -5,28 +5,14 @@ import SwiftUI
 
 @MainActor
 final class BrowsingDataController: ObservableObject {
-    static let shared = BrowsingDataController()
     @Published private(set) var action: BrowsingDataAction = .clearBrowsingData
     @Published private(set) var requestedRange: BrowsingDataTimeRange?
     let workflow: BrowsingDataWorkflow
     private var observation: AnyCancellable?
     var isClearing: Bool { workflow.isClearing }
 
-    private init() {
-        workflow = BrowsingDataWorkflow(services: BrowsingDataServices(
-            clearReusableResponses: { cutoff in
-                guard let cache = ApplicationServices.contentCache else { throw BrowsingDataWorkflowError.storageUnavailable }
-                try await cache.removeResponses(since: cutoff)
-            },
-            persistLiveSession: {
-                if !NativeTabCoordinator.shared.browsingDataModels.isEmpty {
-                    try NativeTabCoordinator.shared.persistSessionAfterClearing()
-                }
-            },
-            clearSavedVisits: { try SessionRestorationStore.shared.clearBrowsingData($0, since: $1) },
-            clearHistory: { try BrowsingHistoryStore.shared.clear(since: $0) },
-            clearInputDrafts: { try GeminiInputDraftStore.shared.clear(since: $0) }
-        ), lifetime: ApplicationWork.lifetime)
+    init(workflow: BrowsingDataWorkflow) {
+        self.workflow = workflow
         observation = workflow.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
     }
 
@@ -40,7 +26,7 @@ final class BrowsingDataController: ObservableObject {
 
     func clear(_ action: BrowsingDataAction, range: BrowsingDataTimeRange) async throws {
         do {
-            guard !UserDataDeletion.workflow.isDeleting else { throw BrowsingDataWorkflowError.operationInProgress }
+            guard !ApplicationServices.userDataDeletion.isDeleting else { throw BrowsingDataWorkflowError.operationInProgress }
             try await workflow.clear(action, range: range)
         }
         catch BrowsingDataWorkflowError.operationInProgress {
@@ -71,8 +57,8 @@ final class BrowsingDataController: ObservableObject {
 }
 
 struct BrowsingDataView: View {
-    @ObservedObject private var controller = BrowsingDataController.shared
-    @ObservedObject private var settings = BrowserSettingsStore.shared
+    @ObservedObject private var controller = ApplicationServices.browsingData
+    @ObservedObject private var settings = ApplicationServices.settings
     @Environment(\.dismissWindow) private var dismissWindow
     @State private var range: BrowsingDataTimeRange = .last24Hours
     @State private var errorMessage: String?

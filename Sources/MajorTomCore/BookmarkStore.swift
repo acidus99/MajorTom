@@ -14,6 +14,7 @@ public actor BookmarkStore {
     private let backend: Backend
     private var current: BookmarkCollection
     private var loadFailure: (any Error)?
+    private var legacyFileURL: URL?
 
     public init(fileURL: URL) {
         backend = .json(fileURL)
@@ -28,7 +29,8 @@ public actor BookmarkStore {
         }
     }
 
-    public init(database: MajorTomDatabase, accountIdentityHash: String? = nil) throws {
+    public init(database: MajorTomDatabase, accountIdentityHash: String? = nil, legacyFileURL: URL? = nil) throws {
+        self.legacyFileURL = legacyFileURL
         let repository = BookmarkRepository(
             database: database,
             accountIdentityHash: accountIdentityHash
@@ -41,6 +43,12 @@ public actor BookmarkStore {
 
     public func reload() throws -> BookmarkCollection {
         if let loadFailure { throw loadFailure }
+        if let legacyFileURL {
+            if try importLegacyJSON(at: legacyFileURL) {
+                try FileManager.default.removeItem(at: legacyFileURL)
+            }
+            self.legacyFileURL = nil
+        }
         if case .sqlite(let repository) = backend { current = try repository.collection() }
         return current
     }

@@ -1,41 +1,7 @@
-import Foundation
 import MajorTomCore
 
-/// Live services for the confirmed operation; the settings view owns only its dialog.
 @MainActor
 enum UserDataDeletion {
-    static let workflow = makeWorkflow()
-
-    private static func makeWorkflow() -> UserDataDeletionWorkflow {
-        UserDataDeletionWorkflow(services: UserDataDeletionServices(
-        accountToken: { ClientCertificateStore.shared.accountToken },
-        prepare: {
-            guard !BrowsingDataController.shared.isClearing, !UserDataImportComposition.importer.isImporting else {
-                throw BrowsingDataWorkflowError.operationInProgress
-            }
-            await ServerTrustPresentation.shared.suspendAndDrain()
-            await BrowsingDataController.shared.workflow.cancelAndDrainRequests()
-            for browser in NativeTabCoordinator.shared.browsingDataModels {
-                await browser.cancelAndDrainNativeRequests()
-            }
-        },
-        finish: { ServerTrustPresentation.shared.resumeAuthorization() },
-        deleteClientIdentities: { try await ClientCertificateStore.shared.deleteAll() },
-        deleteBookmarks: { try await BookmarksModel.shared.deleteAll() },
-        deleteCapsuleTrust: {
-            guard let store = ApplicationServices.storage.trust else {
-                throw ServerTrustAuthorityError.storeUnavailable
-            }
-            try await store.removeAllUserTrust()
-        },
-        resetHomepage: {
-            var preferences = BrowserSettingsStore.shared.preferences
-            preferences.homepage = BrowserPreferences().homepage
-            BrowserSettingsStore.shared.preferences = preferences
-        }
-        ), lifetime: ApplicationWork.lifetime)
-    }
-
     static func message(for error: any Error) -> String {
         guard case UserDataDeletionError.failed(let stage, let completed, let underlying) = error else {
             return "Another user-data operation is already running."

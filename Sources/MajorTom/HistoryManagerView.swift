@@ -9,7 +9,7 @@ struct HistoryManagerView: View {
     let openInNewTab: (URL) -> Void
     let openInNewWindow: (URL) -> Void
 
-    @ObservedObject private var history = BrowsingHistoryStore.shared
+    @ObservedObject private var history = ApplicationServices.history
     @State private var search = ""
     @State private var selection = Set<BrowsingHistoryEntry.ID>()
     @State private var sortOrder = [
