@@ -6,7 +6,8 @@
 
 Decide whether a stored response can satisfy a request, and manage reusable response
 lifetimes, capacity, eviction, and invalidation. Cache is optional and passive: it
-never initiates a request. Data Persistence owns its files, database, and storage I/O.
+never initiates a request. Cache owns its disposable database and storage I/O;
+application composition supplies its location and lifecycle.
 
 ## Boundary
 

@@ -28,9 +28,9 @@ UI sends actions to Browser and observes its state. Browser coordinates Networki
 Security and Identity, Parsing, Content Presentation, Cache, and Data Persistence.
 UI hosts the presentation surface and supplies native geometry and appearance.
 
-Networking consults Security and Identity and optionally Cache. Cache uses Data
-Persistence for storage. Security and Identity uses Data Persistence for trust and
-identity records, including a dedicated Keychain adapter. Parsing has no service
+Networking consults Security and Identity and optionally Cache. Cache owns its
+disposable response store. Security and Identity uses Data Persistence for trust and
+identity metadata repositories. Parsing has no service
 dependencies. Content Presentation consumes parsed content and settings; it reports
 link activation and resource needs to Browser instead of making requests itself.
 Data Persistence contains its own synchronization adapters, separate from browsing

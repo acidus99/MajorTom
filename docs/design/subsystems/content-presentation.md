@@ -52,8 +52,8 @@ ANSI foreground contrast of at least 4.5:1. Honor ANSI backgrounds only with an
 explicit foreground. Theme changes use retained bytes without another request and
 preserve reading state. Publish stylesheet and palette as one coherent update.
 
-Data Persistence supplies custom-theme files and change observations. Presentation
-owns metadata interpretation and CSS resolution. Custom CSS cannot fetch remote
+Presentation reads and observes custom-theme files and owns metadata interpretation
+and CSS resolution. Custom CSS cannot fetch remote
 styles, fonts, or images. See [Content themes](../content-themes.md) for the authoring
 contract and [reading specimens](../reading-test-pages.md) for visual checks.
 

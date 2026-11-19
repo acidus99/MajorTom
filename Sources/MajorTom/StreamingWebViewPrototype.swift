@@ -376,14 +376,6 @@ final class BrowserModel: ObservableObject {
         case new, reload, traversal
     }
 
-    struct TrustPrompt: Identifiable {
-        let id = UUID()
-        let title: String
-        let explanation: String
-        let identity: PresentedServerIdentity
-        let previousFingerprint: String?
-    }
-
     private struct LoadedInlineImage {
         let mimeType: String
         let byteCount: Int
@@ -441,7 +433,6 @@ final class BrowserModel: ObservableObject {
     @Published private(set) var canGoBack = false
     @Published private(set) var canGoForward = false
     @Published var validationMessage: String?
-    @Published var trustPrompt: TrustPrompt?
     @Published var inputPrompt: InputPrompt?
     @Published var clientCertificatePrompt: ClientCertificatePrompt?
     /// Set to present the Page Info panel; cleared when it is dismissed.
@@ -487,7 +478,6 @@ final class BrowserModel: ObservableObject {
     private let settings = BrowserSettingsStore.shared
     private let themes = ContentThemeStore.shared
     private let clientCertificates = ClientCertificateStore.shared
-    private let trustPolicy = ServerTrustPolicy()
     private let trustStore: TrustedIdentityStore?
     private let contentCache = SharedContentCache.shared
     private let cacheDecider = GeminiCacheDecider()
@@ -500,9 +490,8 @@ final class BrowserModel: ObservableObject {
             guard let resolved = await clientCertificates.resolvedCertificate(for: url) else { return nil }
             return MainDocumentIdentity(descriptor: resolved.descriptor, credential: resolved.tlsIdentity)
         },
-        authorizeTrust: { [weak self] identity, _ in
-            guard let self else { return false }
-            return await self.authorize(identity)
+        authorizeTrust: { identity, _ in
+            await ServerTrustPresentation.shared.authorize(identity)
         }
     )
     /// One stateful renderer per active document; beginDocument installs its palette.
@@ -513,17 +502,6 @@ final class BrowserModel: ObservableObject {
     private var documentContinuation: AsyncThrowingStream<Data, any Error>.Continuation?
     /// Rendered HTML waiting to be handed to WebKit. See `yieldToDocument`.
     private var documentBuffer = Data()
-    /// One trust question and every request waiting for its answer.
-    private struct PendingTrustDecision {
-        let prompt: TrustPrompt
-        var continuations: [CheckedContinuation<Bool, Never>]
-    }
-    /// Trust questions waiting for the reader, oldest first. Only the first is on
-    /// screen (`trustPrompt`). Navigation, the favicon probe, inline images and
-    /// downloads can all reach `authorize` at the same time. A single continuation used
-    /// to be kept here, so a second question overwrote the first and the first request
-    /// never received an answer.
-    private var pendingTrustDecisions: [PendingTrustDecision] = []
     /// This tab's position in its own history, the pages it has kept, and the reading
     /// position in each of them. Owned by Core so those rules can be tested without
     /// WebKit; see `NavigationState`.
@@ -889,9 +867,6 @@ final class BrowserModel: ObservableObject {
         documentBuffer.removeAll(keepingCapacity: false)
         activeWebDocumentURL = nil
 
-        // A prompt still on screen belongs to the request being abandoned. Declining it
-        // releases the transport that is waiting on the reader's answer.
-        declinePendingTrustDecisions()
         inputPrompt = nil
         inputValidationMessage = nil
         clientCertificatePrompt = nil
@@ -1020,7 +995,6 @@ final class BrowserModel: ObservableObject {
         }
         slowDownTask?.cancel()
         slowDownTask = nil
-        declinePendingTrustDecisions()
         clientCertificatePrompt = nil
         pendingClientCertificateChallenge = nil
 
@@ -1772,54 +1746,6 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    /// Records the reader's answer to the trust question on screen.
-    ///
-    /// - Parameter promptID: the question the sheet was showing. An answer for a
-    ///   question that is no longer first in the queue (it was declined by a
-    ///   navigation while its sheet was closing) is ignored, so it can never be applied
-    ///   to a different question.
-    func respondToTrust(allow: Bool, promptID: TrustPrompt.ID) {
-        guard let first = pendingTrustDecisions.first, first.prompt.id == promptID else { return }
-        pendingTrustDecisions.removeFirst()
-        trustPrompt = pendingTrustDecisions.first?.prompt
-        for continuation in first.continuations {
-            continuation.resume(returning: allow)
-        }
-    }
-
-    /// Queues a trust question and waits for the reader's answer.
-    ///
-    /// Requests that are asking the same question about the same presented identity
-    /// share one prompt and one answer.
-    private func requestTrustDecision(_ prompt: TrustPrompt) async -> Bool {
-        await withCheckedContinuation { continuation in
-            if let index = pendingTrustDecisions.firstIndex(where: {
-                $0.prompt.title == prompt.title && $0.prompt.identity == prompt.identity
-            }) {
-                pendingTrustDecisions[index].continuations.append(continuation)
-            } else {
-                pendingTrustDecisions.append(
-                    PendingTrustDecision(prompt: prompt, continuations: [continuation])
-                )
-                if pendingTrustDecisions.count == 1 {
-                    trustPrompt = prompt
-                }
-            }
-        }
-    }
-
-    /// Declines every waiting trust question, releasing each request that asked.
-    private func declinePendingTrustDecisions() {
-        let pending = pendingTrustDecisions
-        pendingTrustDecisions.removeAll()
-        trustPrompt = nil
-        for decision in pending {
-            for continuation in decision.continuations {
-                continuation.resume(returning: false)
-            }
-        }
-    }
-
     /// - Parameter draft: whatever had been typed, kept so returning to the same prompt
     ///   offers it again. A sensitive prompt's text is discarded rather than stored.
     func cancelInput(draft: String = "") {
@@ -2293,43 +2219,6 @@ final class BrowserModel: ObservableObject {
                         : nil
                 )
             }
-        }
-    }
-
-    private func authorize(_ identity: PresentedServerIdentity) async -> Bool {
-        let locallyTrusted = await trustStore?.identity(for: identity.endpoint)
-        let evaluation = trustPolicy.evaluate(
-            presented: identity,
-            locallyTrusted: locallyTrusted,
-            seeds: []
-        )
-
-        switch evaluation {
-        case .allowSilently(let source):
-            if let trustStore {
-                try? await trustStore.trust(identity, source: source)
-            }
-            return true
-        case .requiresApproval(let challenge):
-            if case .firstUse = challenge {
-                do {
-                    guard let trustStore else {
-                        validationMessage = "Major Tom could not open its trusted-identity store."
-                        return false
-                    }
-                    try await trustStore.trust(identity, source: .user)
-                    statusText = "Trusted \(identity.endpoint.host) on first use"
-                    return true
-                } catch {
-                    validationMessage = "Major Tom could not save this capsule's identity: \(error.localizedDescription)"
-                    return false
-                }
-            }
-            let prompt = Self.prompt(for: challenge)
-            let approved = await requestTrustDecision(prompt)
-            guard approved else { return false }
-            try? await trustStore?.trust(identity, source: .user)
-            return true
         }
     }
 
@@ -3138,46 +3027,6 @@ final class BrowserModel: ObservableObject {
         return document
     }
 
-    private static func prompt(for challenge: ServerTrustChallenge) -> TrustPrompt {
-        switch challenge {
-        case .firstUse(let presented):
-            return TrustPrompt(
-                title: "Trust This Capsule?",
-                explanation: "This is the first time Major Tom has connected to this capsule. Confirm its identity before continuing.",
-                identity: presented,
-                previousFingerprint: nil
-            )
-        case .changed(let presented, let previous):
-            return TrustPrompt(
-                title: "Capsule Identity Changed",
-                explanation: "The capsule is presenting a different public key. This can be legitimate, but it can also indicate an intercepted connection.",
-                identity: presented,
-                previousFingerprint: previous.publicKeySHA256
-            )
-        case .seedMismatch(let presented, let expected):
-            return TrustPrompt(
-                title: "Capsule Identity Does Not Match",
-                explanation: "The presented public key does not match Major Tom's prior identity information.",
-                identity: presented,
-                previousFingerprint: expected.sorted().joined(separator: "\n")
-            )
-        case .invalidCertificateDates(let presented, let issue):
-            let explanation: String
-            switch issue {
-            case .notYetValid(let date):
-                explanation = "The capsule's certificate is not valid until \(date.formatted())."
-            case .expired(let date):
-                explanation = "The capsule's certificate expired on \(date.formatted())."
-            }
-            return TrustPrompt(
-                title: "Certificate Date Warning",
-                explanation: explanation,
-                identity: presented,
-                previousFingerprint: nil
-            )
-        }
-    }
-
     private func emit(_ event: GemtextEvent, baseURL: URL) {
         if titleClaim.receive(event), let claimed = titleClaim.title {
             title = claimed
@@ -3589,9 +3438,8 @@ final class BrowserModel: ObservableObject {
                     idleTimeout: .seconds(10),
                     maximumResponseByteCount: 4 * 1_024
                 )
-            ) { [weak self] identity, _ in
-                guard let self else { return false }
-                return await self.authorize(identity)
+            ) { identity, _ in
+                await ServerTrustPresentation.shared.authorize(identity)
             }
             for try await event in events {
                 switch event {
@@ -3654,9 +3502,8 @@ final class BrowserModel: ObservableObject {
                     pageStartedAt: imagePageStartedAt,
                     prioritize: prioritize,
                     stateChanged: { activity.continuation.yield($0) }
-                ) { [weak self] identity, _ in
-                    guard let self else { return false }
-                    return await self.authorize(identity)
+                ) { identity, _ in
+                    await ServerTrustPresentation.shared.authorize(identity)
                 }
             } onCancel: {
                 activityTask.cancel()
@@ -3708,9 +3555,8 @@ final class BrowserModel: ObservableObject {
             events = transport.events(
                 for: target,
                 configuration: GeminiTransportConfiguration()
-            ) { [weak self] identity, _ in
-                guard let self else { return false }
-                return await self.authorize(identity)
+            ) { identity, _ in
+                await ServerTrustPresentation.shared.authorize(identity)
             }
         }
         var responseHeader: GeminiResponseHeader?

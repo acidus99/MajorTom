@@ -2092,6 +2092,7 @@ private struct SafariToolbarSegmentButtonStyle: ButtonStyle {
 
 @available(macOS 26.0, *)
 private struct BrowserTabView: View {
+    @ObservedObject private var trust = ServerTrustPresentation.shared
     @ObservedObject var browser: BrowserModel
     let chromeTopInset: CGFloat
     let hostWindow: NSWindow?
@@ -2428,10 +2429,21 @@ private struct BrowserTabView: View {
                 }
             )
         }
-        .sheet(item: $browser.trustPrompt) { prompt in
+        .sheet(item: Binding(
+            get: { hostWindow != nil && trust.presenterWindow === hostWindow ? trust.prompt : nil },
+            set: { _ in }
+        )) { prompt in
             TrustPromptView(prompt: prompt) { approved in
-                browser.respondToTrust(allow: approved, promptID: prompt.id)
+                trust.respond(allow: approved, promptID: prompt.id)
             }
+        }
+        .alert("Could Not Verify Capsule", isPresented: Binding(
+            get: { hostWindow != nil && trust.presenterWindow === hostWindow && trust.failure != nil },
+            set: { if !$0 { trust.failure = nil } }
+        )) {
+            Button("OK", role: .cancel) { trust.failure = nil }
+        } message: {
+            Text(trust.failure ?? "")
         }
         .sheet(item: $browser.inputPrompt) { prompt in
             CapsuleInputView(prompt: prompt, validationMessage: browser.inputValidationMessage) { outcome in
@@ -2750,7 +2762,7 @@ final class ContextMenuTarget: NSObject {
 
 @available(macOS 26.0, *)
 private struct TrustPromptView: View {
-    let prompt: BrowserModel.TrustPrompt
+    let prompt: TrustPrompt
     let completion: (Bool) -> Void
 
     var body: some View {
@@ -2782,9 +2794,8 @@ private struct TrustPromptView: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { completion(false) }
-                    .keyboardShortcut(.cancelAction)
-                Button("Trust and Continue") { completion(true) }
                     .keyboardShortcut(.defaultAction)
+                Button("Trust and Continue") { completion(true) }
             }
         }
         .padding(24)

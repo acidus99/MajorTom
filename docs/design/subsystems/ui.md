@@ -15,10 +15,10 @@ that require further input. Document themes are independent of application appea
 
 ## Boundary
 
-UI sends actions and decision replies to Browser feature components and observes
-their state. It does not access repositories, CloudKit, network transports, or trust
-stores directly. A settings edit, bookmark rename, or certificate action follows the
-same rule as navigation. UI owns the control; Browser owns the operation.
+UI observes focused application models and calls their intent methods. Those models
+hide repositories, CloudKit, network transports, and trust storage. Operations that
+span several models use a workflow coordinator; simple edits need no forwarding
+controller. UI owns controls and transient editing state, not domain records.
 
 UI hosts Content Presentation and supplies native appearance, viewport, and chrome
 geometry. Presentation reports document interactions to Browser. UI carries out

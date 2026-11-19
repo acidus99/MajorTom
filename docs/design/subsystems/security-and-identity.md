@@ -6,8 +6,8 @@
 
 Decide whether a server identity is acceptable and which client identity, if any,
 may be offered to a destination. Own trust policy, certificate interpretation,
-identity availability, and user-approved capsule/path scope. Storage mechanisms
-belong to Data Persistence, including its dedicated Keychain adapter.
+identity availability, user-approved capsule/path scope, and the Keychain adapter.
+Data Persistence supplies repositories for trust and identity metadata.
 
 ## Boundary
 
@@ -30,6 +30,10 @@ identity export is a separate operation with a UI-chosen destination.
 - One authority owns trusted identities across tabs. Failure to read or save trust
   must not silently become first use or a successful approval. Bundled policy and
   user decisions remain distinguishable. Server trust is local to this Mac.
+- Pending trust questions belong to that shared authority. Equal requests share a
+  decision; a cancelling requester detaches without declining for other requesters.
+  Decisions for one endpoint are serialized so competing first visits cannot
+  silently establish different pins.
 - Client identities are offered only within an explicitly approved destination/path
   scope. Redirects cannot expand that scope. Separate identity metadata from whether
   the actual Keychain identity is currently available.

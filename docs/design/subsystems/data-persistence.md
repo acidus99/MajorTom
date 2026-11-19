@@ -4,8 +4,7 @@
 
 ## Purpose and ownership
 
-Provide one storage boundary for the rest of the application. Own internal paths,
-SQLite/GRDB, preferences storage, Keychain access, file watching, migrations,
+Own application databases, preferences storage, session storage, migrations,
 transactions, and remote synchronization. Expose focused domain repositories, not
 raw database handles or one universal storage object.
 
@@ -16,9 +15,9 @@ publishes committed changes. It does not decide navigation or display UI.
 ## Boundary and durability
 
 Accept domain operations and return records, observations, and structured outcomes.
-Callers need not know whether data lives in SQLite, preferences, a theme file, or
-Keychain, nor which remote service carries it. UI-selected import/export destinations
-are explicit inputs; filesystem access and archive reading remain inside this boundary.
+Callers need not know whether records live in SQLite or preferences, nor which
+remote service carries them. Security owns Keychain access, Presentation owns theme
+files, and import/export workflows own their selected archives and output files.
 
 Local commits are authoritative offline and complete without waiting for remote
 propagation. A synchronized mutation commits its domain change and durable outgoing

@@ -179,6 +179,7 @@ private final class GeminiConnectionSession: @unchecked Sendable {
     private var connectionIsReady = false
     private var receivedByteCount = 0
     private var timeoutTask: Task<Void, Never>?
+    private var verificationTask: Task<Void, Never>?
 
     init(
         target: GeminiRequestTarget,
@@ -224,6 +225,10 @@ private final class GeminiConnectionSession: @unchecked Sendable {
                     complete(false)
                     return
                 }
+                guard !hasFinished, !isCancelled else {
+                    complete(false)
+                    return
+                }
                 let trust = sec_trust_copy_ref(trustReference).takeRetainedValue()
                 guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate],
                       let certificate = chain.first else {
@@ -256,14 +261,15 @@ private final class GeminiConnectionSession: @unchecked Sendable {
                 // block runs on `queue`, which owns `timeoutTask`.
                 self.timeoutTask?.cancel()
                 self.timeoutTask = nil
-                Task {
+                self.verificationTask = Task {
                     let isAllowed = await authorizeTrust(identity, certificateDER)
-                    if !isAllowed { self.trustWasDeclined = true }
+                    let allowed = isAllowed && !Task.isCancelled
                     self.queue.async {
-                        guard !self.hasFinished else { return }
-                        self.resetTimeout()
+                        self.verificationTask = nil
+                        if !allowed { self.trustWasDeclined = true }
+                        if !self.hasFinished { self.resetTimeout() }
+                        completion.call(allowed && !self.hasFinished)
                     }
-                    completion.call(isAllowed)
                 }
             },
             queue
@@ -383,6 +389,8 @@ private final class GeminiConnectionSession: @unchecked Sendable {
         hasFinished = true
         timeoutTask?.cancel()
         timeoutTask = nil
+        verificationTask?.cancel()
+        verificationTask = nil
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
