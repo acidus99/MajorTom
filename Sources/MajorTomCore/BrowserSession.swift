@@ -362,7 +362,7 @@ public final class BrowserSession: ObservableObject {
         validationMessage = nil
         internalPage = nil
         // The document is going away, so its hover state is stale.
-        hoveredLinkURL = nil
+        updateHoveredLink(nil)
         if !keepsFavicon { favicon = nil }
         isLoading = false
     }
@@ -1866,6 +1866,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     private func beginDocument(at sourceURL: URL) -> AsyncThrowingStream<Data, any Error>.Continuation {
+        updateHoveredLink(nil)
         imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
         documentContinuation?.finish()

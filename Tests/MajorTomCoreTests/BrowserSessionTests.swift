@@ -5,6 +5,21 @@ import XCTest
 
 final class BrowserSessionTests: XCTestCase {
     @MainActor
+    func testDocumentReplacementCannotReviveOldHoverWhenModifiersChange() async throws {
+        let fixture = SessionFixture()
+        defer { fixture.close() }
+        await fixture.load(fixture.a, mime: "text/gemini", bytes: Data("# Original\n".utf8))
+        fixture.session.updateHoveredLink(fixture.b.absoluteString)
+        XCTAssertNotNil(fixture.session.hoveredLinkURL)
+        fixture.session.showPageSource()
+        XCTAssertNil(fixture.session.hoveredDestination)
+        XCTAssertNil(fixture.session.hoveredLinkURL)
+        // The native modifier observer reuses this destination when Command changes.
+        fixture.session.updateHoveredLink(fixture.session.hoveredDestination, modifiers: .command)
+        XCTAssertNil(fixture.session.hoveredLinkURL)
+    }
+
+    @MainActor
     func testStreamingNavigationPreservesExactBytesAndRecordsOneFinalVisit() async throws {
         let fixture = SessionFixture()
         defer { fixture.close() }
