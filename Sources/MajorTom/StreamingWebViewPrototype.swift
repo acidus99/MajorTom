@@ -213,6 +213,7 @@ final class BrowserModel: ObservableObject {
     }
     private struct PendingHistorySwipe { let id: UUID }
     let session: BrowserSession
+    weak var hostWindow: NSWindow?
     private let presentation: BrowserWebPresentation
     var page: WebPage { presentation.page }
     var historySwipePage: WebPage { presentation.historySwipePage }
@@ -268,12 +269,6 @@ final class BrowserModel: ObservableObject {
     var openInNewTab: ((URL, Bool) -> Void)? { get { session.openInNewTab } set { session.openInNewTab = newValue } }
     var openInNewWindow: ((URL) -> Void)? { get { session.openInNewWindow } set { session.openInNewWindow = newValue } }
     var statusText: String { get { session.statusText } set { session.reportNativeResult(status: newValue) } }
-    private var currentSourceBytes: Data { session.sourceBytes }
-    private var currentMIMEType: String { session.mimeType }
-    private var responseStatus: Int? { session.currentResponseStatus }
-    private var responseMeta: String { session.currentResponseMeta }
-    private var responseWasCached: Bool? { session.currentResponseWasCached }
-    private var responseReceivedAt: Date? { session.currentResponseReceivedAt }
     private var activeWebDocumentURL: URL? { session.activeWebDocumentURL }
 
     init(restoredState: RestoredTabState? = nil, initialURL: URL? = nil) {
@@ -405,14 +400,14 @@ final class BrowserModel: ObservableObject {
     func flushBackForwardPersistence() async { await session.flushBackForwardPersistence() }
     func flushContentCacheWrites() async {}
     func handleInlineImageMessage(lineIdentifier: String, url: URL, action: String, documentURL: URL) { session.handleInlineImageMessage(lineIdentifier: lineIdentifier, url: url, action: action, documentURL: documentURL) }
-    func toggleInlineImage(lineIdentifier: String, url: URL) { session.toggleInlineImage(lineIdentifier: lineIdentifier, url: url) }
+    func toggleInlineImage(lineIdentifier: String, url: URL, documentURL: URL) { session.toggleInlineImage(lineIdentifier: lineIdentifier, url: url, documentURL: documentURL) }
     func updateImageViewportTopInset(_ inset: CGFloat) { session.updateImageViewportTopInset(Double(inset)) }
     fileprivate func recordScrollPosition(_ offset: Double, from documentURL: URL?) { session.recordScrollPosition(offset, from: documentURL) }
     fileprivate func recordPreformattedState(index: Int, collapsed: Bool, from documentURL: URL?) { session.recordPreformattedState(index: index, collapsed: collapsed, from: documentURL) }
     fileprivate func updateHoveredLink(_ href: String?, modifiers: LinkModifierKeys = []) { session.updateHoveredLink(href, modifiers: modifiers) }
     private func canOpenInApp(_ url: URL) -> Bool { session.canOpenInApp(url) }
     private func openLink(_ url: URL) { session.openLink(url) }
-    private func retrieveGeminiResource(_ url: URL) async throws -> (data: Data, mimeType: String, finalURL: URL) { try await session.retrieveGeminiResource(url) }
+    private func retrieveGeminiResource(_ url: URL, proxy: GeminiProxyConfiguration?) async throws -> (data: Data, mimeType: String, finalURL: URL) { try await session.retrieveGeminiResource(url, proxy: proxy) }
     private func friendly(_ error: any Error) -> String { session.friendly(error) }
 
     fileprivate func acceptsDocumentMessage(_ message: WKScriptMessage) -> Bool {
@@ -463,6 +458,7 @@ final class BrowserModel: ObservableObject {
     }
 
     func download(_ url: URL) {
+        let proxy = settings.preferences.proxy
         statusText = "Downloading \(url.lastPathComponent)…"
         downloadTask?.cancel()
         downloadTask = Task { [weak self] in
@@ -471,10 +467,10 @@ final class BrowserModel: ObservableObject {
                 let fetched: (data: Data, mimeType: String, finalURL: URL)
                 switch url.scheme?.lowercased() {
                 case "gemini":
-                    fetched = try await retrieveGeminiResource(url)
+                    fetched = try await retrieveGeminiResource(url, proxy: proxy)
                 case "http", "https":
-                    if settings.preferences.proxy != nil {
-                        fetched = try await retrieveGeminiResource(url)
+                    if proxy != nil {
+                        fetched = try await retrieveGeminiResource(url, proxy: proxy)
                     } else {
                         let (data, response) = try await URLSession.shared.data(from: url)
                         fetched = (data, (response.mimeType ?? "application/octet-stream").lowercased(), response.url ?? url)
@@ -513,10 +509,10 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    private static func findWebView(in view: NSView) -> WKWebView? {
-        if let webView = view as? WKWebView { return webView }
+    private static func findWebView(in view: NSView, documentURL: URL) -> WKWebView? {
+        if let webView = view as? WKWebView, webView.url == documentURL { return webView }
         for subview in view.subviews {
-            if let webView = findWebView(in: subview) { return webView }
+            if let webView = findWebView(in: subview, documentURL: documentURL) { return webView }
         }
         return nil
     }
@@ -527,10 +523,11 @@ final class BrowserModel: ObservableObject {
     }
 
     func printPage() {
-        guard committedURL != nil,
-              let window = NSApplication.shared.keyWindow,
+        guard let snapshot = session.pageSnapshot,
+              let documentURL = activeWebDocumentURL,
+              let window = hostWindow,
               let rootView = window.contentView,
-              let webView = Self.findWebView(in: rootView),
+              let webView = Self.findWebView(in: rootView, documentURL: documentURL),
               let info = NSPrintInfo.shared.copy() as? NSPrintInfo else {
             validationMessage = "Major Tom could not prepare this page for printing."
             return
@@ -538,7 +535,7 @@ final class BrowserModel: ObservableObject {
         info.horizontalPagination = .fit
         info.verticalPagination = .automatic
         let operation = webView.printOperation(with: info)
-        operation.jobTitle = title
+        operation.jobTitle = snapshot.title
         operation.showsPrintPanel = true
         operation.showsProgressPanel = true
         operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
@@ -546,9 +543,9 @@ final class BrowserModel: ObservableObject {
 
     func releaseWebViewDragTypes() async {
         for _ in 0..<20 {
-            if let window = NSApplication.shared.keyWindow ?? NSApplication.shared.windows.first,
+            if let window = hostWindow, let documentURL = activeWebDocumentURL,
                let root = window.contentView,
-               let webView = Self.findWebView(in: root) {
+               let webView = Self.findWebView(in: root, documentURL: documentURL) {
                 webView.unregisterDraggedTypes()
                 return
             }
@@ -557,17 +554,17 @@ final class BrowserModel: ObservableObject {
     }
 
     func savePage() async {
-        guard canSavePage, let committedURL else { return }
+        guard canSavePage, let snapshot = session.pageSnapshot else { return }
         // NSSavePanel.begin is modeless, so the user can keep browsing the window
         // behind it. Capture the bytes for the page that was on screen when Save was
         // invoked; re-reading the property after the await wrote the *new* page's
         // bytes into a file named after the old one.
-        let bytes = currentSourceBytes
+        let bytes = snapshot.body
         let panel = NSSavePanel()
         panel.nameFieldStringValue = BrowserFilenameSuggestion.make(
-            for: committedURL,
-            mimeType: currentMIMEType,
-            documentTitle: documentTitle
+            for: snapshot.url,
+            mimeType: snapshot.mimeType,
+            documentTitle: snapshot.documentTitle
         )
         panel.canCreateDirectories = true
         guard await panel.begin() == .OK, let destination = panel.url else { return }
@@ -584,9 +581,10 @@ final class BrowserModel: ObservableObject {
         menu.autoenablesItems = false
         contextMenuTargets.removeAll()
         let opensInApp = canOpenInApp(url)
-        if let imageLine, let expanded = session.inlineImageIsExpanded(line: imageLine, url: url) {
+        if let documentURL = activeWebDocumentURL, let imageLine,
+           let expanded = session.inlineImageIsExpanded(line: imageLine, url: url) {
             addContextMenuItem(expanded ? "Collapse Image" : "Load Image", systemImage: "photo", enabled: true, to: menu) { [weak self] in
-                self?.toggleInlineImage(lineIdentifier: imageLine, url: url)
+                self?.toggleInlineImage(lineIdentifier: imageLine, url: url, documentURL: documentURL)
             }
             menu.addItem(.separator())
         }
@@ -700,17 +698,18 @@ final class BrowserModel: ObservableObject {
     }
 
     func showPageInformation() {
-        guard let committedURL else { return }
-        var information = PageInformation(url: committedURL, status: responseStatus, meta: responseMeta,
-            byteCount: currentSourceBytes.count, mimeType: currentMIMEType, responseWasCached: responseWasCached,
-            responseReceivedAt: responseReceivedAt, identity: serverIdentity, trusted: nil,
-            clientCertificate: usedClientCertificate,
-            clientCertificateAssociation: usedClientCertificate.flatMap { certificate in
-                ClientCertificateAssociation.mostSpecific(matching: committedURL,
+        guard let snapshot = session.pageSnapshot else { return }
+        let resourceURL = ViewSourceURL.unwrap(snapshot.url) ?? snapshot.url
+        var information = PageInformation(url: snapshot.url, status: snapshot.status, meta: snapshot.meta,
+            byteCount: snapshot.body.count, mimeType: snapshot.mimeType, responseWasCached: snapshot.wasCached,
+            responseReceivedAt: snapshot.receivedAt, identity: snapshot.serverIdentity, trusted: nil,
+            clientCertificate: snapshot.clientCertificate,
+            clientCertificateAssociation: snapshot.clientCertificate.flatMap { certificate in
+                ClientCertificateAssociation.mostSpecific(matching: resourceURL,
                     in: clientCertificates.associations.filter { $0.certificateID == certificate.id })
             })
         Task {
-            if let endpoint = CapsuleEndpoint(url: committedURL) { information.trusted = await trustStore?.identity(for: endpoint) }
+            if let endpoint = CapsuleEndpoint(url: resourceURL) { information.trusted = await trustStore?.identity(for: endpoint) }
             pageInformation = information
         }
     }

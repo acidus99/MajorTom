@@ -174,6 +174,28 @@ public final class BrowserSession: ObservableObject {
         navigation.updateCurrentMetadata(title: documentTitle ?? title, favicon: favicon)
         return navigation.restorationState(zoom: pageZoom, title: title, documentTitle: documentTitle)
     }
+    public var pageSnapshot: BrowserPageSnapshot? {
+        guard let url = committedURL, let entryID = navigation.currentEntryID else { return nil }
+        return BrowserPageSnapshot(entryID: entryID, url: url, title: title, documentTitle: documentTitle,
+            mimeType: currentMIMEType, body: currentSourceBytes, completion: currentCompletion,
+            status: responseStatus, meta: responseMeta, wasCached: responseWasCached,
+            receivedAt: responseReceivedAt, serverIdentity: serverIdentity, clientCertificate: usedClientCertificate)
+    }
+
+    private var displayedResponseMetadata: BrowserResponseMetadata {
+        BrowserResponseMetadata(status: responseStatus, meta: responseMeta, wasCached: responseWasCached,
+            receivedAt: responseReceivedAt, serverIdentity: serverIdentity, clientCertificate: usedClientCertificate)
+    }
+
+    private func applyResponseMetadata(_ metadata: BrowserResponseMetadata?) {
+        responseStatus = metadata?.status
+        responseMeta = metadata?.meta ?? ""
+        responseWasCached = metadata?.wasCached
+        responseReceivedAt = metadata?.receivedAt
+        serverIdentity = metadata?.serverIdentity
+        usedClientCertificate = metadata?.clientCertificate
+    }
+
     public var sourceBytes: Data { currentSourceBytes }
     public var hoveredDestination: String? { hoveredLinkDestination }
     public func inlineImageIsExpanded(line: String, url: URL) -> Bool? {
@@ -181,10 +203,6 @@ public final class BrowserSession: ObservableObject {
         return expandedInlineImages.contains(line) && imageTasks[line] == nil
     }
     public var mimeType: String { currentMIMEType }
-    public var currentResponseStatus: Int? { responseStatus }
-    public var currentResponseMeta: String { responseMeta }
-    public var currentResponseWasCached: Bool? { responseWasCached }
-    public var currentResponseReceivedAt: Date? { responseReceivedAt }
 
     public func start() {
         guard !hasStarted else { return }
@@ -335,14 +353,6 @@ public final class BrowserSession: ObservableObject {
         retryNotBefore = nil
         validationMessage = nil
         internalPage = nil
-        // Belongs to the page being replaced. A stale identity in Page Info would
-        // describe a different capsule's certificate.
-        serverIdentity = nil
-        usedClientCertificate = nil
-        responseStatus = nil
-        responseMeta = ""
-        responseWasCached = nil
-        responseReceivedAt = nil
         // The document is going away, so its hover state is stale.
         hoveredLinkURL = nil
         if !keepsFavicon { favicon = nil }
@@ -643,6 +653,7 @@ public final class BrowserSession: ObservableObject {
             of: resourceURL,
             mimeType: currentMIMEType,
             disposition: .new,
+            responseMetadata: displayedResponseMetadata,
             receivedAt: responseReceivedAt ?? Date()
         )
     }
@@ -652,6 +663,7 @@ public final class BrowserSession: ObservableObject {
         of resourceURL: URL,
         mimeType: String,
         disposition: HistoryDisposition,
+        responseMetadata: BrowserResponseMetadata? = nil,
         receivedAt: Date = Date()
     ) {
         guard let sourceURL = ViewSourceURL.wrap(resourceURL) else { return }
@@ -659,7 +671,7 @@ public final class BrowserSession: ObservableObject {
         renderSourceDocument(bytes, at: sourceURL, mimeType: mimeType)
         let heading = "Source: \(displayTitle(for: resourceURL))"
         // commit() resets the title, so the heading is applied after it.
-        commit(sourceURL, disposition: disposition)
+        commit(sourceURL, disposition: disposition, responseMetadata: responseMetadata)
         cache(CachedPage(
             url: sourceURL,
             mimeType: mimeType,
@@ -849,6 +861,8 @@ public final class BrowserSession: ObservableObject {
         guard !Task.isCancelled else { return }
         var target = initialTarget
         var responseHeader: GeminiResponseHeader?
+        var responseMetadata: BrowserResponseMetadata?
+        var presentedIdentity: PresentedServerIdentity?
         var mimeType = ""
         var sourceBytes = Data()
         var bodyKind = BrowserContentKind.unsupported
@@ -870,9 +884,10 @@ public final class BrowserSession: ObservableObject {
                 case .connecting:
                     statusText = "Connecting securely…"
                 case .serverIdentity(let identity):
-                    serverIdentity = identity
+                    presentedIdentity = identity
                     statusText = "Verifying capsule identity…"
                 case .redirect(let next):
+                    presentedIdentity = nil
                     target = next
                     locationText = next.url.absoluteString
                 case .loadingCachedResponse:
@@ -884,10 +899,10 @@ public final class BrowserSession: ObservableObject {
                     sentClientCertificate = response.offeredCertificate
                     responseIsCached = response.origin == .cache
                     receivedAt = response.receivedAt
-                    responseStatus = header.status
-                    responseMeta = header.meta
-                    responseWasCached = responseIsCached
-                    responseReceivedAt = receivedAt
+                    responseMetadata = BrowserResponseMetadata(status: header.status, meta: header.meta,
+                        wasCached: responseIsCached, receivedAt: receivedAt,
+                        serverIdentity: responseIsCached ? nil : presentedIdentity,
+                        clientCertificate: responseIsCached ? nil : sentClientCertificate)
                     statusText = "Response \(header.status)"
 
                     if header.isInput {
@@ -911,7 +926,7 @@ public final class BrowserSession: ObservableObject {
                             showGeneratedPage(
                                 title: "Proxy Requires an Identity",
                                 message: "Major Tom does not send client certificates to Gemini proxies.",
-                                details: header.meta, url: target.url, disposition: disposition
+                                details: header.meta, url: target.url, disposition: disposition, responseMetadata: responseMetadata
                             )
                             return
                         }
@@ -976,7 +991,7 @@ public final class BrowserSession: ObservableObject {
                             message: message,
                             details: "Gemini status \(header.status)\n\(target.url.absoluteString)",
                             url: target.url,
-                            disposition: disposition,
+                            disposition: disposition, responseMetadata: responseMetadata,
                             archiveURL: DeloreanArchive.isWorthOffering(status: header.status)
                                 ? DeloreanArchive.captures(of: target.url)
                                 : nil
@@ -990,12 +1005,10 @@ public final class BrowserSession: ObservableObject {
                             message: "The capsule returned an unsupported Gemini response.",
                             details: "Status \(header.status): \(header.meta)",
                             url: target.url,
-                            disposition: disposition
+                            disposition: disposition, responseMetadata: responseMetadata
                         )
                         return
                     }
-
-                    usedClientCertificate = responseIsCached ? nil : sentClientCertificate
 
                     mimeType = response.mimeType
                     bodyKind = BrowserContentKind(mimeType: mimeType, url: target.url, showsSource: renderAsSource)
@@ -1014,7 +1027,7 @@ public final class BrowserSession: ObservableObject {
                         streamingBody = BrowserResponseBody(kind: bodyKind)
                         documentContinuation = continuation
                         continuation.yield(documentRenderer.start(kind: bodyKind, at: target.url))
-                        commit(target.url, disposition: disposition)
+                        commit(target.url, disposition: disposition, responseMetadata: responseMetadata)
                         contentStarted = true
                         statusText = "Receiving \(mimeType)…"
                     }
@@ -1046,7 +1059,7 @@ public final class BrowserSession: ObservableObject {
                                 message: "Major Tom can only show the source of a text response.",
                                 details: "\(mimeType.isEmpty ? header.meta : mimeType)\n\(sourceBytes.count) bytes",
                                 url: target.url,
-                                disposition: disposition
+                                disposition: disposition, responseMetadata: responseMetadata
                             )
                             return
                         }
@@ -1054,7 +1067,7 @@ public final class BrowserSession: ObservableObject {
                             sourceBytes,
                             of: target.url,
                             mimeType: mimeType,
-                            disposition: disposition,
+                            disposition: disposition, responseMetadata: responseMetadata,
                             receivedAt: receivedAt
                         )
                         return
@@ -1065,14 +1078,14 @@ public final class BrowserSession: ObservableObject {
                         finishCurrentDocument()
                     } else if bodyKind == .image {
                         displayedSuccessfulContent = true
-                        showImagePage(data: sourceBytes, mimeType: mimeType, url: target.url, disposition: disposition)
+                        showImagePage(data: sourceBytes, mimeType: mimeType, url: target.url, disposition: disposition, responseMetadata: responseMetadata)
                     } else {
                         showGeneratedPage(
                             title: "Unsupported Content",
                             message: "Major Tom cannot display this response type yet. No file was downloaded.",
                             details: "\(mimeType.isEmpty ? header.meta : mimeType)\n\(sourceBytes.count) bytes",
                             url: target.url,
-                            disposition: disposition
+                            disposition: disposition, responseMetadata: responseMetadata
                         )
                     }
                     isLoading = false
@@ -1116,13 +1129,13 @@ public final class BrowserSession: ObservableObject {
                 showGeneratedPage(
                     title: "Too Many Redirects",
                     message: "Major Tom stopped this navigation because the capsule redirected in a loop.",
-                    details: url.absoluteString, url: url, disposition: disposition
+                    details: url.absoluteString, url: url, disposition: disposition, responseMetadata: responseMetadata
                 )
             case .invalid(let source, let meta):
                 showGeneratedPage(
                     title: "Invalid Redirect",
                     message: "The capsule returned a redirect that Major Tom could not understand.",
-                    details: meta, url: source, disposition: disposition
+                    details: meta, url: source, disposition: disposition, responseMetadata: responseMetadata
                 )
             }
         } catch is CancellationError {
@@ -1165,7 +1178,7 @@ public final class BrowserSession: ObservableObject {
                     message: friendly(error),
                     details: target.url.absoluteString,
                     url: target.url,
-                    disposition: disposition,
+                    disposition: disposition, responseMetadata: responseMetadata,
                     archiveURL: offersArchive(after: error)
                         ? DeloreanArchive.captures(of: target.url)
                         : nil
@@ -1281,6 +1294,7 @@ public final class BrowserSession: ObservableObject {
         details: String,
         url: URL,
         disposition: HistoryDisposition,
+        responseMetadata: BrowserResponseMetadata? = nil,
         archiveURL: URL? = nil
     ) {
         currentCompletion = .complete
@@ -1288,7 +1302,7 @@ public final class BrowserSession: ObservableObject {
         continuation.yield(documentRenderer.message(title: title, message: message, details: details,
             at: url, archiveURL: archiveURL, preferences: services.preferences()))
         continuation.finish()
-        commit(url, disposition: disposition)
+        commit(url, disposition: disposition, responseMetadata: responseMetadata)
         currentSourceBytes = Data()
         currentMIMEType = ""
         canSavePage = false
@@ -1298,12 +1312,14 @@ public final class BrowserSession: ObservableObject {
         navigationTask = nil
     }
 
-    private func showImagePage(data: Data, mimeType: String, url: URL, disposition: HistoryDisposition) {
+    private func showImagePage(data: Data, mimeType: String, url: URL, disposition: HistoryDisposition,
+                               responseMetadata: BrowserResponseMetadata? = nil) {
         renderResponse(data, mimeType: mimeType, at: url)
-        commit(url, disposition: disposition)
+        commit(url, disposition: disposition, responseMetadata: responseMetadata)
     }
 
-    private func commit(_ url: URL, disposition: HistoryDisposition) {
+    private func commit(_ url: URL, disposition: HistoryDisposition, responseMetadata: BrowserResponseMetadata? = nil) {
+        applyResponseMetadata(responseMetadata)
         committedURL = url
         title = displayTitle(for: url)
         documentTitle = nil
@@ -1623,7 +1639,7 @@ public final class BrowserSession: ObservableObject {
     public func handleInlineImageMessage(lineIdentifier: String, url: URL, action: String, documentURL: URL) {
         guard activeWebDocumentURL == documentURL, inlineImageURLs[lineIdentifier] == url else { return }
         if action == "click" {
-            toggleInlineImage(lineIdentifier: lineIdentifier, url: url)
+            toggleInlineImage(lineIdentifier: lineIdentifier, url: url, documentURL: documentURL)
         } else if action == "load", !automaticImagesPaused, services.preferences().sameCapsuleImageLoading != .off,
                   let committedURL, isSameCapsule(url, committedURL),
                   !expandedInlineImages.contains(lineIdentifier) {
@@ -1631,7 +1647,8 @@ public final class BrowserSession: ObservableObject {
         }
     }
 
-    public func toggleInlineImage(lineIdentifier: String, url: URL) {
+    public func toggleInlineImage(lineIdentifier: String, url: URL, documentURL: URL) {
+        guard activeWebDocumentURL == documentURL, inlineImageURLs[lineIdentifier] == url else { return }
         if imageTasks[lineIdentifier] != nil {
             Task { await services.imageLoader?.prioritize(url) }
             return
@@ -1718,13 +1735,13 @@ public final class BrowserSession: ObservableObject {
     }
 
     public func retrieveGeminiResource(
-        _ url: URL
+        _ url: URL, proxy: GeminiProxyConfiguration?
     ) async throws -> (data: Data, mimeType: String, finalURL: URL) {
-        guard let target = GeminiRequestTarget.navigationTarget(for: url, proxy: services.preferences().proxy) else {
+        guard let target = GeminiRequestTarget.navigationTarget(for: url, proxy: proxy) else {
             throw URLError(.badURL)
         }
         let response = try await services.retriever.response(
-            for: target, proxy: services.preferences().proxy, purpose: .download
+            for: target, proxy: proxy, purpose: .download
         )
         return (response.body, response.mimeType ?? "application/octet-stream", response.url)
     }

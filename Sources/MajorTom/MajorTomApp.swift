@@ -751,6 +751,7 @@ final class NativeTabCoordinator {
     }
 
     func register(window: NSWindow, browser: BrowserModel) {
+        browser.hostWindow = window
         configure(window: window)
         let identifier = ObjectIdentifier(window)
         registeredTabs[identifier] = RegisteredTab(

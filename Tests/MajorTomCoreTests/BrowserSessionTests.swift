@@ -206,9 +206,12 @@ final class BrowserSessionTests: XCTestCase {
             } else { fixture.session.openLink(fixture.b) }
             await fixture.source.waitForRequests(2)
             fixture.source.send(1, status: 20, meta: mime, chunks: [Data("pending bytes".utf8)], completes: false)
-            await fixture.wait { fixture.session.currentResponseMeta == mime && fixture.session.isLoading }
+            let pendingStatus = sourceView ? "Receiving source…" : "Response 20"
+            await fixture.wait { fixture.session.statusText == pendingStatus && fixture.session.isLoading }
             XCTAssertEqual(fixture.session.committedURL, fixture.a)
             XCTAssertEqual(fixture.session.sourceBytes, original)
+            XCTAssertEqual(fixture.session.pageSnapshot?.meta, "text/plain")
+            XCTAssertEqual(fixture.session.pageSnapshot?.mimeType, "text/plain")
             fixture.session.stop()
             await fixture.source.waitForTermination(1)
             XCTAssertEqual(fixture.session.sourceBytes, original)
@@ -246,14 +249,76 @@ final class BrowserSessionTests: XCTestCase {
         defer { fixture.close() }
         let bytes = Data("# Retained\n".utf8)
         await fixture.load(fixture.a, mime: "text/gemini", bytes: bytes)
+        let original = try XCTUnwrap(fixture.session.pageSnapshot)
         fixture.session.openLink(fixture.b)
         await fixture.source.waitForRequests(2)
+        fixture.source.identity(1, PresentedServerIdentity(endpoint: CapsuleEndpoint(host: "other.invalid"), publicKeySHA256: "pending-fixture-key"))
         fixture.source.fail(1, GeminiTransportError.trustDeclined)
         await fixture.wait { !fixture.session.isLoading }
         XCTAssertEqual(fixture.session.committedURL, fixture.a)
         XCTAssertEqual(fixture.session.locationText, fixture.a.absoluteString)
         XCTAssertEqual(fixture.session.sourceBytes, bytes)
         XCTAssertEqual(fixture.session.restorationState.history, [fixture.a])
+        XCTAssertEqual(fixture.session.pageSnapshot?.meta, original.meta)
+        XCTAssertEqual(fixture.session.pageSnapshot?.receivedAt, original.receivedAt)
+        XCTAssertEqual(fixture.session.pageSnapshot?.serverIdentity, original.serverIdentity)
+    }
+
+    @MainActor
+    func testInvocationSnapshotSurvivesReplacementAndMetadataCommitsWithResponse() async throws {
+        let fixture = SessionFixture()
+        defer { fixture.close() }
+        let original = Data("# Original snapshot\n".utf8)
+        await fixture.load(fixture.a, mime: "text/gemini", bytes: original)
+        let snapshot = try XCTUnwrap(fixture.session.pageSnapshot)
+        await fixture.load(fixture.b, mime: "image/png", bytes: Data([1, 2, 3]))
+        XCTAssertEqual(snapshot.url, fixture.a)
+        XCTAssertEqual(snapshot.body, original)
+        XCTAssertEqual(snapshot.mimeType, "text/gemini")
+        XCTAssertEqual(fixture.session.pageSnapshot?.url, fixture.b)
+        XCTAssertEqual(fixture.session.pageSnapshot?.meta, "image/png")
+        XCTAssertNotEqual(fixture.session.pageSnapshot?.entryID, snapshot.entryID)
+        fixture.session.showInternalPage(.bookmarks)
+        XCTAssertNil(fixture.session.pageSnapshot?.status)
+        XCTAssertNil(fixture.session.pageSnapshot?.serverIdentity)
+        XCTAssertEqual(fixture.session.pageSnapshot?.body, Data())
+    }
+
+    @MainActor
+    func testGeneratedFailureCommitsItsOwnResponseMetadata() async throws {
+        let fixture = SessionFixture()
+        defer { fixture.close() }
+        await fixture.load(fixture.a, mime: "text/plain", bytes: Data("first".utf8))
+        fixture.session.openLink(fixture.b)
+        await fixture.source.waitForRequests(2)
+        fixture.source.send(1, status: 51, meta: "Fixture missing")
+        await fixture.wait { !fixture.session.isLoading }
+        XCTAssertEqual(fixture.session.pageSnapshot?.url, fixture.b)
+        XCTAssertEqual(fixture.session.pageSnapshot?.status, 51)
+        XCTAssertEqual(fixture.session.pageSnapshot?.meta, "Fixture missing")
+        XCTAssertFalse(fixture.session.canSavePage)
+    }
+
+    @MainActor
+    func testOldImageMenuCannotActOnReplacementDocumentWithReusedLinkIdentity() async throws {
+        let fixture = SessionFixture()
+        defer { fixture.close() }
+        let image = URL(string: "gemini://example.invalid/image.png")!
+        let bytes = Data("=> \(image.absoluteString) Image\n".utf8)
+        let renderer = BrowserDocumentRenderer(style: BrowserContentStyle(css: "", palette: .fallback, appearance: .dark))
+        _ = renderer.start(kind: .gemtext, at: fixture.a)
+        let fragment = renderer.render(.gemtext(.link(destination: image.absoluteString, label: "Image")),
+            at: fixture.a, preferences: BrowserPreferences(), imagesPaused: true)
+        let identifier = try XCTUnwrap(fragment.expandableLink?.identifier)
+        await fixture.load(fixture.a, mime: "text/gemini", bytes: bytes)
+        let oldDocument = try XCTUnwrap(fixture.session.activeWebDocumentURL)
+        await fixture.load(fixture.b, mime: "text/gemini", bytes: bytes)
+        let current = try XCTUnwrap(fixture.session.activeWebDocumentURL)
+        XCTAssertEqual(fixture.session.inlineImageIsExpanded(line: identifier, url: image), false)
+        fixture.session.toggleInlineImage(lineIdentifier: identifier, url: image, documentURL: oldDocument)
+        XCTAssertTrue(fixture.session.restorationState.entries.last!.presentation.expandedImages.isEmpty)
+        fixture.session.toggleInlineImage(lineIdentifier: identifier, url: image, documentURL: current)
+        XCTAssertEqual(fixture.session.restorationState.entries.last!.presentation.expandedImages, [image])
     }
 
     @MainActor
@@ -471,6 +536,7 @@ private final class SessionEventSource: @unchecked Sendable {
         if completes { continuation.yield(.completed); continuation.finish() }
     }
     func sendBody(_ index: Int, _ bytes: Data) { lock.withLock { requests[index].1 }.yield(.body(bytes)) }
+    func identity(_ index: Int, _ identity: PresentedServerIdentity) { lock.withLock { requests[index].1 }.yield(.serverIdentity(identity)) }
     func fail(_ index: Int, _ error: any Error) { lock.withLock { requests[index].1 }.finish(throwing: error) }
     func finishAll() { for request in lock.withLock({ requests }) { request.1.finish() } }
     func waitForRequests(_ count: Int) async {
