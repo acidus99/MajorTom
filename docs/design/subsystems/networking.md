@@ -25,11 +25,14 @@ Consult Security and Identity for server authorization and destination-scoped cl
 identities. Re-evaluate client identity at every redirect destination; never forward
 credentials merely because the previous request used them. If approval is needed,
 report a decision request through Browser and wait for UI's reply or cancellation.
+Only server trust suspends a live request. Input and client-identity challenges end
+the response; answering them starts another request.
 
 Optionally consult Cache using the full request context. Replayed responses enter
-the same response-handling path as live ones. Networking owns the mechanism for a
-redirect hop; Browser owns navigation intent, history, and interactive outcomes.
-Bound redirect chains and detect loops, including auxiliary retrieval.
+the same response-handling path as live ones. Networking follows redirects under
+request-purpose policy and reports hops as progress. Browser owns navigation intent,
+history, and interactive outcomes, and commits only the final destination. Bound
+redirect chains and detect loops, including auxiliary retrieval.
 
 ## Streaming and resource guarantees
 

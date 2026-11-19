@@ -76,5 +76,18 @@ fi
 # The compile is gated on its own because this is the step whose failure `swift test`
 # reports as success. `swift build --build-tests` returns nonzero for exactly that case,
 # and leaves the products `swift test` then reuses, so this is not a second full build.
-swift build --build-tests "${swift_flags[@]}" "$@"
-swift test "${swift_flags[@]}" "$@"
+test_arguments=("$@")
+build_arguments=()
+# Selection belongs to the test runner; keep shared build options on both commands.
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --filter|--skip)
+            [[ $# -ge 2 ]] || { echo "error: $1 requires a value" >&2; exit 2; }
+            shift 2
+            ;;
+        --filter=*|--skip=*) shift ;;
+        *) build_arguments+=("$1"); shift ;;
+    esac
+done
+swift build --build-tests "${swift_flags[@]}" ${build_arguments[@]+"${build_arguments[@]}"}
+swift test "${swift_flags[@]}" ${test_arguments[@]+"${test_arguments[@]}"}

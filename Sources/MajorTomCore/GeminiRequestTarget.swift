@@ -12,6 +12,19 @@ public struct GeminiRequestTarget: Equatable, Sendable {
     public let endpoint: CapsuleEndpoint
     public let requestData: Data
 
+    /// Navigation and redirect hops share the same proxy and supported-scheme rules.
+    public static func navigationTarget(for url: URL, proxy: GeminiProxyConfiguration?) -> Self? {
+        switch url.scheme?.lowercased() {
+        case "gemini":
+            return try? Self(url.absoluteString)
+        case "http", "https":
+            guard let proxy else { return nil }
+            return try? Self(proxying: url, through: proxy)
+        default:
+            return nil
+        }
+    }
+
     public init(_ input: String) throws {
         guard var components = URLComponents(string: input),
               components.scheme?.lowercased() == "gemini",

@@ -491,6 +491,20 @@ final class BrowserModel: ObservableObject {
     private let trustStore: TrustedIdentityStore?
     private let contentCache = SharedContentCache.shared
     private let cacheDecider = GeminiCacheDecider()
+    private lazy var documentRetriever = MainDocumentRetriever<ClientTLSIdentity>(
+        transportEvents: { [transport] target, identity, authorize in
+            transport.events(for: target, clientIdentity: identity, authorizeTrust: authorize)
+        },
+        cache: contentCache,
+        resolveIdentity: { [clientCertificates] url in
+            guard let resolved = await clientCertificates.resolvedCertificate(for: url) else { return nil }
+            return MainDocumentIdentity(descriptor: resolved.descriptor, credential: resolved.tlsIdentity)
+        },
+        authorizeTrust: { [weak self] identity, _ in
+            guard let self else { return false }
+            return await self.authorize(identity)
+        }
+    )
     /// One stateful renderer per active document; beginDocument installs its palette.
     private var renderer = HTMLDocumentStreamRenderer()
     private var cancellables = Set<AnyCancellable>()
@@ -1925,8 +1939,6 @@ final class BrowserModel: ObservableObject {
             await self.load(
                 target: target,
                 disposition: disposition,
-                visited: [],
-                redirectCount: 0,
                 renderAsSource: renderAsSource,
                 bypassesContentCache: disposition == .reload
             )
@@ -1934,75 +1946,32 @@ final class BrowserModel: ObservableObject {
     }
 
     private func load(
-        target: GeminiRequestTarget,
+        target initialTarget: GeminiRequestTarget,
         disposition: HistoryDisposition,
-        visited: Set<URL>,
-        redirectCount: Int,
         renderAsSource: Bool = false,
         bypassesContentCache: Bool = false
     ) async {
         await themes.waitUntilReady()
         guard !Task.isCancelled else { return }
-        guard redirectCount <= 10, !visited.contains(target.url) else {
-            showGeneratedPage(
-                title: "Too Many Redirects",
-                message: "Major Tom stopped this navigation because the capsule redirected in a loop.",
-                details: target.url.absoluteString,
-                url: target.url,
-                disposition: disposition
-            )
-            return
-        }
-
-        var nextVisited = visited
-        nextVisited.insert(target.url)
+        var target = initialTarget
         var responseHeader: GeminiResponseHeader?
         var mimeType = ""
-        let cacheGeneration = await contentCache?.writeGeneration
         var sourceBytes = Data()
         var utf8Decoder = IncrementalUTF8Decoder()
         var gemtextParser = IncrementalGemtextParser()
         var contentStarted = false
 
-        // Resolved before the cache is consulted: a request that will offer a client
-        // identity must not be answered from the shared, URL-keyed cache.
-        let resolvedClientCertificate = await clientCertificates.resolvedCertificate(for: target.url)
-        let sentClientCertificate = resolvedClientCertificate?.tlsIdentity == nil
-            ? nil
-            : resolvedClientCertificate?.descriptor
-
-        if bypassesContentCache {
-            try? await contentCache?.removeResponse(for: target.url)
-        }
-        let cachedResponse: ContentResponse?
-        if bypassesContentCache {
-            cachedResponse = nil
-        } else {
-            cachedResponse = await reusableCachedResponse(
-                for: target.url,
-                offeringClientIdentity: sentClientCertificate != nil
-            )
-        }
-        let responseIsCached = cachedResponse != nil
-        var receivedAt = cachedResponse?.receivedAt ?? Date()
+        var sentClientCertificate: ClientCertificateDescriptor?
+        var responseIsCached = false
+        var receivedAt = Date()
+        let events = documentRetriever.events(
+            for: target,
+            proxy: settings.preferences.proxy,
+            bypassesCache: bypassesContentCache
+        )
 
         do {
-            let events: AsyncThrowingStream<GeminiTransportEvent, any Error>
-            if let cachedResponse {
-                statusText = "Loading cached response…"
-                events = GeminiResponseReplay.events(for: cachedResponse)
-            } else {
-                events = transport.events(
-                    for: target,
-                    clientIdentity: resolvedClientCertificate?.tlsIdentity,
-                    configuration: GeminiTransportConfiguration()
-                ) { [weak self] identity, _ in
-                    guard let self else { return false }
-                    return await self.authorize(identity)
-                }
-            }
-
-            for try await event in events {
+            for await event in events {
                 try Task.checkCancellation()
                 switch event {
                 case .connecting:
@@ -2010,44 +1979,23 @@ final class BrowserModel: ObservableObject {
                 case .serverIdentity(let identity):
                     serverIdentity = identity
                     statusText = "Verifying capsule identity…"
-                case .responseHeader(let header):
-                    if !responseIsCached { receivedAt = Date() }
+                case .redirect(let next):
+                    target = next
+                    locationText = next.url.absoluteString
+                case .loadingCachedResponse:
+                    statusText = "Loading cached response…"
+                case .response(let response):
+                    target = response.target
+                    let header = response.header
                     responseHeader = header
+                    sentClientCertificate = response.offeredCertificate
+                    responseIsCached = response.origin == .cache
+                    receivedAt = response.receivedAt
                     responseStatus = header.status
                     responseMeta = header.meta
                     responseWasCached = responseIsCached
                     responseReceivedAt = receivedAt
                     statusText = "Response \(header.status)"
-
-                    if header.isRedirect {
-                        // Resolved against target.url, which for a proxied request is the
-                        // original http:// resource, so a proxy's relative redirect lands
-                        // on the right host and is re-proxied by makeTarget.
-                        guard let redirectURL = URL(
-                            string: header.meta.trimmingCharacters(in: .whitespacesAndNewlines),
-                            relativeTo: target.url
-                        )?.absoluteURL,
-                              let redirectTarget = makeTarget(for: redirectURL) else {
-                            showGeneratedPage(
-                                title: "Invalid Redirect",
-                                message: "The capsule returned a redirect that Major Tom could not understand.",
-                                details: header.meta,
-                                url: target.url,
-                                disposition: disposition
-                            )
-                            return
-                        }
-                        locationText = redirectTarget.url.absoluteString
-                        await load(
-                            target: redirectTarget,
-                            disposition: disposition,
-                            visited: nextVisited,
-                            redirectCount: redirectCount + 1,
-                            renderAsSource: renderAsSource,
-                            bypassesContentCache: bypassesContentCache
-                        )
-                        return
-                    }
 
                     if header.isInput {
                         let isSensitive = header.status == 11
@@ -2076,11 +2024,10 @@ final class BrowserModel: ObservableObject {
                             message: header.meta,
                             attemptedCertificate: sentClientCertificate,
                             matchingCertificateIsUnavailable:
-                                resolvedClientCertificate != nil
-                                    && resolvedClientCertificate?.descriptor.isValid() == true
-                                    && resolvedClientCertificate?.tlsIdentity == nil,
+                                response.matchedCertificate?.isValid() == true
+                                    && response.offeredCertificate == nil,
                             matchingCertificateIsInvalid:
-                                resolvedClientCertificate?.descriptor.isValid() == false
+                                response.matchedCertificate?.isValid() == false
                         )
                         isLoading = false
                         statusText = header.status == 60
@@ -2148,8 +2095,7 @@ final class BrowserModel: ObservableObject {
 
                     usedClientCertificate = responseIsCached ? nil : sentClientCertificate
 
-                    mimeType = header.meta.split(separator: ";", maxSplits: 1).first
-                        .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? ""
+                    mimeType = response.mimeType
                     if renderAsSource {
                         // No document is begun and nothing is committed yet: the source
                         // view needs the complete text, so a fetch that fails partway
@@ -2195,25 +2141,15 @@ final class BrowserModel: ObservableObject {
                         flushDocument()
                     }
 
-                case .completed:
+                case .finished(let result):
+                    switch result {
+                    case .cancelled: return
+                    case .trustDeclined: throw GeminiTransportError.trustDeclined
+                    case .failed(let error, _): throw error
+                    case .completed: break
+                    }
                     guard let header = responseHeader, header.isSuccess else { return }
                     var displayedSuccessfulContent = false
-                    if !responseIsCached {
-                        let response = ContentResponse(
-                            url: target.url,
-                            status: header.status,
-                            meta: Data(header.meta.utf8),
-                            mimeType: mimeType,
-                            body: sourceBytes,
-                            receivedAt: receivedAt
-                        )
-                        storeInContentCacheIfNeeded(
-                            response,
-                            for: target,
-                            clientIdentityOffered: sentClientCertificate != nil,
-                            generation: cacheGeneration
-                        )
-                    }
                     if renderAsSource {
                         guard mimeType.hasPrefix("text/") else {
                             showGeneratedPage(
@@ -2292,6 +2228,22 @@ final class BrowserModel: ObservableObject {
                     navigationTask = nil
                     return
                 }
+            }
+        } catch let error as MainDocumentRedirectError {
+            guard !Task.isCancelled else { return }
+            switch error {
+            case .loop(let url), .limit(let url):
+                showGeneratedPage(
+                    title: "Too Many Redirects",
+                    message: "Major Tom stopped this navigation because the capsule redirected in a loop.",
+                    details: url.absoluteString, url: url, disposition: disposition
+                )
+            case .invalid(let source, let meta):
+                showGeneratedPage(
+                    title: "Invalid Redirect",
+                    message: "The capsule returned a redirect that Major Tom could not understand.",
+                    details: meta, url: source, disposition: disposition
+                )
             }
         } catch is CancellationError {
             return
@@ -2381,22 +2333,9 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    /// Builds a request target for `url`, routing http/https through the configured
-    /// Gemini proxy when there is one.
-    ///
-    /// Every place that turns a URL into a request goes through here, so navigation,
-    /// reload, history traversal and redirect following all agree about whether the
-    /// proxy applies.
+    /// Uses the same scheme and proxy policy as Networking's redirect hops.
     private func makeTarget(for url: URL) -> GeminiRequestTarget? {
-        switch url.scheme?.lowercased() {
-        case "gemini":
-            return try? GeminiRequestTarget(url.absoluteString)
-        case "http", "https":
-            guard let proxy = settings.preferences.proxy else { return nil }
-            return try? GeminiRequestTarget(proxying: url, through: proxy)
-        default:
-            return nil
-        }
+        GeminiRequestTarget.navigationTarget(for: url, proxy: settings.preferences.proxy)
     }
 
     private func canOpenInApp(_ url: URL) -> Bool {
@@ -2837,7 +2776,7 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    /// The only way navigation and downloads may read the shared content cache.
+    /// Downloads use this eligibility check until they adopt the retrieval boundary.
     ///
     /// - A request that offers a client identity is never answered from the cache: an
     ///   entry is keyed by URL alone and was fetched without that identity.

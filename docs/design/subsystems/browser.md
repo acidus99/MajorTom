@@ -24,9 +24,10 @@ internal paths, or handle CloudKit records.
 
 For navigation, request a response from Networking, route its body to Parsing, and
 pass content updates to Presentation. Keep exact source bytes separately. Handle
-protocol outcomes such as redirects, input prompts, and client-identity challenges;
-Security owns authorization and Networking owns wire details. Replies carry workflow
-identity so a dismissed or replaced request cannot resume a newer navigation.
+interactive outcomes such as input prompts and client-identity challenges, and
+observe redirect progress without following hops itself. Security owns authorization
+and Networking owns retrieval. Replies carry workflow identity so a dismissed or
+replaced request cannot resume a newer navigation.
 
 ## Behavior and guarantees
 
