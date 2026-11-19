@@ -27,33 +27,9 @@ fileprivate enum BrowserHistorySwipeDirection {
 @available(macOS 26.0, *)
 @MainActor
 private final class ContextMenuScriptHandler: NSObject, WKScriptMessageHandler {
-    static let name = "majorTomContextMenu"
+    static let name = BrowserDocumentScript.contextMenuName
 
-    static let userScript = WKUserScript(
-        source: """
-        document.addEventListener('contextmenu', (event) => {
-            const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-            const anchor = target?.closest('a[href]');
-            const selection = window.getSelection();
-            if (!anchor && selection && !selection.isCollapsed && selection.toString().trim() !== '') {
-                // Preserve WebKit's native selected-text menu: Copy, Look Up,
-                // Translate, Speech, and Services all depend on WebKit handling it.
-                // A right-click can itself select/highlight link text before this event,
-                // so a link under the pointer must take precedence over that selection.
-                return;
-            }
-            event.preventDefault();
-            const imageLine = anchor?.closest('.link-line[data-mt-expandable]') ||
-              anchor?.closest('figure')?.previousElementSibling;
-            window.webkit.messageHandlers.\(name).postMessage({
-              href: anchor?.href ?? '', imageLine: imageLine?.matches('.link-line') ? imageLine.id : ''
-            });
-        }, true);
-        """,
-        injectionTime: .atDocumentStart,
-        forMainFrameOnly: true,
-        in: .defaultClient
-    )
+    static let userScript = BrowserDocumentScript.contextMenu
 
     weak var browser: BrowserModel?
 
@@ -61,9 +37,11 @@ private final class ContextMenuScriptHandler: NSObject, WKScriptMessageHandler {
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
+        guard browser?.acceptsDocumentMessage(message) == true else { return }
         let body = message.body as? [String: String]
         let link = body?["href"].flatMap { $0.isEmpty ? nil : URL(string: $0) }
         Task { @MainActor [weak browser] in
+            guard browser?.acceptsDocumentMessage(message) == true else { return }
             browser?.showPendingContextMenu(
                 link: link, imageLine: body?["imageLine"]
             )
@@ -81,67 +59,9 @@ private final class ContextMenuScriptHandler: NSObject, WKScriptMessageHandler {
 @available(macOS 26.0, *)
 @MainActor
 private final class LinkHoverScriptHandler: NSObject, WKScriptMessageHandler {
-    static let name = "majorTomLinkHover"
+    static let name = BrowserDocumentScript.linkHoverName
 
-    static let userScript = WKUserScript(
-        source: """
-        (() => {
-            var last = null;
-            var hoveredAnchor = null;
-            const post = (anchor, event) => {
-                const href = anchor ? anchor.href : '';
-                const value = href || '';
-                const modifiers = event ? [event.metaKey, event.shiftKey, event.altKey, event.ctrlKey] : [false, false, false, false];
-                const signature = value + '|' + modifiers.join(',');
-                if (signature === last) { return; }
-                last = signature;
-                window.webkit.messageHandlers.\(name).postMessage({
-                    href: value,
-                    command: modifiers[0],
-                    shift: modifiers[1],
-                    option: modifiers[2],
-                    control: modifiers[3]
-                });
-            };
-            const anchorFor = (node) => {
-                const element = node instanceof Element ? node : node?.parentElement;
-                return element ? element.closest('a[href]') : null;
-            };
-            // `.href` is already absolute, resolved against the document's <base>.
-            document.addEventListener('mouseover', (event) => {
-                const anchor = anchorFor(event.target);
-                hoveredAnchor = anchor;
-                post(anchor, event);
-            }, true);
-            document.addEventListener('mousemove', (event) => {
-                const anchor = anchorFor(event.target);
-                if (anchor) { post(anchor, event); }
-            }, true);
-            document.addEventListener('mouseout', (event) => {
-                if (!anchorFor(event.relatedTarget)) {
-                    hoveredAnchor = null;
-                    post(null, event);
-                }
-            }, true);
-            document.addEventListener('keydown', (event) => {
-                if (hoveredAnchor) { post(hoveredAnchor, event); }
-            }, true);
-            document.addEventListener('keyup', (event) => {
-                if (hoveredAnchor) { post(hoveredAnchor, event); }
-            }, true);
-            // Spec 18.4 covers focus as well as hover.
-            document.addEventListener('focusin', (event) => {
-                const anchor = anchorFor(event.target);
-                post(anchor, null);
-            }, true);
-            document.addEventListener('focusout', () => post(null, null), true);
-            window.addEventListener('blur', () => post(null, null));
-        })();
-        """,
-        injectionTime: .atDocumentStart,
-        forMainFrameOnly: true,
-        in: .defaultClient
-    )
+    static let userScript = BrowserDocumentScript.linkHover
 
     weak var browser: BrowserModel?
 
@@ -149,8 +69,10 @@ private final class LinkHoverScriptHandler: NSObject, WKScriptMessageHandler {
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
+        guard browser?.acceptsDocumentMessage(message) == true else { return }
         Task { @MainActor [weak browser] in
-            guard let payload = message.body as? [String: Any] else { return }
+            guard browser?.acceptsDocumentMessage(message) == true,
+                  let payload = message.body as? [String: Any] else { return }
             var modifiers: LinkModifierKeys = []
             if payload["command"] as? Bool == true { modifiers.insert(.command) }
             if payload["shift"] as? Bool == true { modifiers.insert(.shift) }
@@ -167,30 +89,9 @@ private final class LinkHoverScriptHandler: NSObject, WKScriptMessageHandler {
 @available(macOS 26.0, *)
 @MainActor
 private final class ScrollPositionScriptHandler: NSObject, WKScriptMessageHandler {
-    static let name = "majorTomScrollPosition"
+    static let name = BrowserDocumentScript.scrollPositionName
 
-    static let userScript = WKUserScript(
-        source: """
-        (() => {
-          var scheduled = false;
-          const report = () => {
-            scheduled = false;
-            window.webkit.messageHandlers.\(name).postMessage(Math.max(0, window.scrollY));
-          };
-          const schedule = () => {
-            if (scheduled) { return; }
-            scheduled = true;
-            requestAnimationFrame(report);
-          };
-          addEventListener('scroll', schedule, { passive: true });
-          addEventListener('pagehide', report);
-          addEventListener('DOMContentLoaded', schedule);
-        })();
-        """,
-        injectionTime: .atDocumentStart,
-        forMainFrameOnly: true,
-        in: .defaultClient
-    )
+    static let userScript = BrowserDocumentScript.scrollPosition
 
     weak var browser: BrowserModel?
 
@@ -198,7 +99,8 @@ private final class ScrollPositionScriptHandler: NSObject, WKScriptMessageHandle
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        guard let offset = message.body as? Double, offset.isFinite else { return }
+        guard browser?.acceptsDocumentMessage(message) == true,
+              let offset = message.body as? Double, offset.isFinite else { return }
         browser?.recordScrollPosition(offset, from: message.frameInfo.request.url)
     }
 }
@@ -208,47 +110,9 @@ private final class ScrollPositionScriptHandler: NSObject, WKScriptMessageHandle
 @available(macOS 26.0, *)
 @MainActor
 private final class LinkActivationScriptHandler: NSObject, WKScriptMessageHandler {
-    static let name = "majorTomLinkActivation"
+    static let name = BrowserDocumentScript.linkActivationName
 
-    static let userScript = WKUserScript(
-        source: """
-        (() => {
-        let suppressNextClick = false;
-        document.addEventListener('mousedown', (event) => {
-            const target = event.target instanceof Element ? event.target : event.target?.parentElement;
-            const anchor = target?.closest('a[href]');
-            if (!anchor) { return; }
-            // DOM button numbers are left=0, middle=1, right=2. Control-click is
-            // deliberately left to the context-menu handler.
-            const middle = event.button === 1;
-            const foregroundTab = event.button === 0 && event.metaKey && event.shiftKey;
-            if (!middle && !foregroundTab) { return; }
-            event.preventDefault();
-            event.stopPropagation();
-            suppressNextClick = true;
-            window.webkit.messageHandlers.\(name).postMessage({
-                href: anchor.href,
-                activation: middle ? 'newBackgroundTab' : 'newForegroundTab'
-            });
-        }, true);
-        document.addEventListener('click', (event) => {
-            if (!suppressNextClick && !(event.button === 0 && event.metaKey && event.shiftKey)) { return; }
-            event.preventDefault();
-            event.stopPropagation();
-            suppressNextClick = false;
-        }, true);
-        document.addEventListener('auxclick', (event) => {
-            if (event.button !== 1) { return; }
-            event.preventDefault();
-            event.stopPropagation();
-            suppressNextClick = false;
-        }, true);
-        })();
-        """,
-        injectionTime: .atDocumentStart,
-        forMainFrameOnly: true,
-        in: .defaultClient
-    )
+    static let userScript = BrowserDocumentScript.linkActivation
 
     weak var browser: BrowserModel?
 
@@ -256,11 +120,13 @@ private final class LinkActivationScriptHandler: NSObject, WKScriptMessageHandle
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        guard let payload = message.body as? [String: Any],
+        guard browser?.acceptsDocumentMessage(message) == true,
+              let payload = message.body as? [String: Any],
               let href = payload["href"] as? String,
               let url = URL(string: href),
               let activation = payload["activation"] as? String else { return }
         Task { @MainActor [weak browser] in
+            guard browser?.acceptsDocumentMessage(message) == true else { return }
             switch activation {
             case "newBackgroundTab":
                 browser?.activateLink(url, activation: .newBackgroundTab)
@@ -291,7 +157,8 @@ private final class InlineImageScriptHandler: NSObject, WKScriptMessageHandler {
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        guard let body = message.body as? [String: Any],
+        guard browser?.acceptsDocumentMessage(message) == true,
+              let body = message.body as? [String: Any],
               let identifier = body["id"] as? String,
               let href = body["href"] as? String,
               let url = URL(string: href),
@@ -299,6 +166,7 @@ private final class InlineImageScriptHandler: NSObject, WKScriptMessageHandler {
               let document = body["documentURL"] as? String,
               let documentURL = URL(string: document) else { return }
         Task { @MainActor [weak browser] in
+            guard browser?.acceptsDocumentMessage(message) == true else { return }
             browser?.handleInlineImageMessage(
                 lineIdentifier: identifier, url: url, action: action, documentURL: documentURL
             )
@@ -309,35 +177,9 @@ private final class InlineImageScriptHandler: NSObject, WKScriptMessageHandler {
 @available(macOS 26.0, *)
 @MainActor
 private final class PreformattedBlockStateScriptHandler: NSObject, WKScriptMessageHandler {
-    static let name = "majorTomPreformattedState"
+    static let name = BrowserDocumentScript.preformattedStateName
 
-    static let userScript = WKUserScript(
-        source: """
-        (() => {
-          const report = (block) => {
-            if (!(block instanceof HTMLDetailsElement) || !block.matches('.preformatted.is-multiline')) { return; }
-            const blocks = Array.from(document.querySelectorAll('.preformatted'));
-            const index = blocks.indexOf(block);
-            if (index < 0) { return; }
-            window.webkit.messageHandlers.\(name).postMessage({ index: index + 1, collapsed: !block.open });
-          };
-
-          // WebKit does not reliably deliver a details element's `toggle` event to a
-          // document-level listener. Observing the `open` attribute catches both ways a
-          // block changes: clicking its summary and Major Tom's click-to-collapse code.
-          new MutationObserver((records) => {
-            for (const record of records) {
-              if (record.type === 'attributes' && record.attributeName === 'open') {
-                report(record.target);
-              }
-            }
-          }).observe(document, { attributes: true, attributeFilter: ['open'], subtree: true });
-        })();
-        """,
-        injectionTime: .atDocumentStart,
-        forMainFrameOnly: true,
-        in: .defaultClient
-    )
+    static let userScript = BrowserDocumentScript.preformattedState
 
     weak var browser: BrowserModel?
 
@@ -345,7 +187,8 @@ private final class PreformattedBlockStateScriptHandler: NSObject, WKScriptMessa
         _ userContentController: WKUserContentController,
         didReceive message: WKScriptMessage
     ) {
-        guard let payload = message.body as? [String: Any],
+        guard browser?.acceptsDocumentMessage(message) == true,
+              let payload = message.body as? [String: Any],
               let index = payload["index"] as? NSNumber,
               let collapsed = payload["collapsed"] as? NSNumber else { return }
         browser?.recordPreformattedState(
@@ -699,6 +542,10 @@ final class BrowserModel: ObservableObject {
             .sink { [weak self] flags in self?.updateHoveredLinkModifiers(flags) }
             .store(in: &cancellables)
         updateNavigationAvailability()
+    }
+
+    fileprivate func acceptsDocumentMessage(_ message: WKScriptMessage) -> Bool {
+        DocumentMessageFence.accepts(message, currentDocumentURL: activeWebDocumentURL)
     }
 
     var canReload: Bool {
@@ -2372,22 +2219,13 @@ final class BrowserModel: ObservableObject {
               pendingScrollRestoration?.historyIndex == restoration.historyIndex else { return }
         do {
             _ = try await page.callJavaScript(
-                """
-                window.scrollTo(0, \(restoration.offset));
-                await new Promise(resolve => {
-                    requestAnimationFrame(() => requestAnimationFrame(resolve));
-                });
-                document.documentElement.style.setProperty('visibility', 'visible', 'important');
-                await new Promise(resolve => {
-                    requestAnimationFrame(() => requestAnimationFrame(resolve));
-                });
-                """
+                BrowserDocumentScript.restoreScroll(offset: restoration.offset)
             )
         } catch {
             // Never leave a document permanently hidden if WebKit accepted the load but
             // rejected or interrupted the restoration script.
             _ = try? await page.callJavaScript(
-                "document.documentElement.style.setProperty('visibility', 'visible', 'important');"
+                BrowserDocumentScript.revealDocument
             )
         }
         if pendingScrollRestoration?.historyIndex == restoration.historyIndex {
@@ -2400,16 +2238,8 @@ final class BrowserModel: ObservableObject {
         guard let entry = navigation.currentEntry else { return 0 }
         let collapsed = entry.presentation.collapsedPreformatted
         if !collapsed.isEmpty {
-            let indices = collapsed.map(String.init).joined(separator: ",")
             _ = try? await page.callJavaScript(
-                """
-                (() => {
-                  const collapsed = new Set([\(indices)]);
-                  document.querySelectorAll('.preformatted').forEach((block, index) => {
-                    if (collapsed.has(index + 1)) { block.open = false; }
-                  });
-                })();
-                """
+                BrowserDocumentScript.restoreCollapsed(indices: collapsed)
             )
         }
         var restoredImageCount = 0
@@ -2846,15 +2676,9 @@ final class BrowserModel: ObservableObject {
     private func applyThemeWithoutReload() {
         let css = themeCSS
         let appearance = themeAppearance.rawValue
-        guard let cssData = try? JSONEncoder().encode(css),
-              let cssLiteral = String(data: cssData, encoding: .utf8) else { return }
         Task {
             _ = try? await page.callJavaScript(
-                """
-                const theme = document.getElementById('majortom-theme');
-                document.documentElement.dataset.appearance = '\(appearance)';
-                if (theme) { theme.textContent = \(cssLiteral); }
-                """
+                BrowserDocumentScript.themeUpdate(css: css, appearance: appearance)
             )
         }
     }
@@ -2928,19 +2752,8 @@ final class BrowserModel: ObservableObject {
         document.continuation.finish()
         for try await event in navigation where event == .finished { break }
 
-        let collapsed = entry.presentation.collapsedPreformatted
-            .map(String.init)
-            .joined(separator: ",")
         _ = try? await historySwipePage.callJavaScript(
-            """
-            (() => {
-              const collapsed = new Set([\(collapsed)]);
-              document.querySelectorAll('.preformatted').forEach((block, index) => {
-                if (collapsed.has(index + 1)) { block.open = false; }
-              });
-              window.scrollTo(0, \(entry.presentation.scrollY));
-            })();
-            """
+            BrowserDocumentScript.restorePreview(collapsed: entry.presentation.collapsedPreformatted, offset: entry.presentation.scrollY)
         )
     }
 
@@ -3096,7 +2909,7 @@ final class BrowserModel: ObservableObject {
         imageViewportTopInset = inset
         Task {
             _ = try? await page.callJavaScript(
-                "window.majorTomSetImageViewport?.(\(inset));", contentWorld: .defaultClient
+                BrowserDocumentScript.imageViewport(topInset: Double(inset)), contentWorld: .defaultClient
             )
         }
     }
@@ -3160,19 +2973,7 @@ final class BrowserModel: ObservableObject {
     /// out its image yet. Wait for every restored inline image, not merely the one whose
     /// stream happened to finish last, before applying the final absolute offset.
     private func scrollCorrectionScript(offset: Double) -> String {
-        """
-        await Promise.all(Array.from(document.querySelectorAll('img[data-mt-inline-image]')).map(async (image) => {
-          if (!image.complete) {
-            await new Promise((resolve) => {
-              image.addEventListener('load', resolve, { once: true });
-              image.addEventListener('error', resolve, { once: true });
-            });
-          }
-          if (image.decode) { await image.decode().catch(() => {}); }
-        }));
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        window.scrollTo(0, \(offset));
-        """
+        BrowserDocumentScript.correctScrollAfterImages(offset: offset)
     }
 
     private func insertInlineImage(
@@ -3190,27 +2991,11 @@ final class BrowserModel: ObservableObject {
             fileName: fileName,
             figureClass: "inline-image"
         ), as: UTF8.self)
-        await runScript("""
-        (() => {
-          const line = document.getElementById(\(jsLiteral(lineIdentifier)));
-          if (!line) { return; }
-          if (!line.nextElementSibling?.classList.contains('inline-image')) {
-            line.insertAdjacentHTML('afterend', \(jsLiteral(figure)));
-          }
-        })();
-        """)
+        await runScript(BrowserDocumentScript.insertImage(lineIdentifier: lineIdentifier, figure: figure))
     }
 
     private func removeInlineImage(lineIdentifier: String) async {
-        await runScript("""
-        (() => {
-          const line = document.getElementById(\(jsLiteral(lineIdentifier)));
-          if (!line) { return; }
-          line.classList.remove('is-loading');
-          const figure = line.nextElementSibling;
-          if (figure?.classList.contains('inline-image')) { figure.remove(); }
-        })();
-        """)
+        await runScript(BrowserDocumentScript.removeImage(lineIdentifier: lineIdentifier))
     }
 
     private func setImageState(lineIdentifier: String, state: GeminiImageLoader.State, documentURL: URL) async {
@@ -3226,18 +3011,7 @@ final class BrowserModel: ObservableObject {
         metadata: LoadedInlineImage
     ) async {
         let size = formattedByteCount(metadata.byteCount)
-        await runScript("""
-        (() => {
-          const image = document.getElementById(\(jsLiteral(figureIdentifier)))
-            ?.querySelector('img[data-mt-inline-image]');
-          if (!image) { return; }
-          image.dataset.mtMime = \(jsLiteral(metadata.mimeType));
-          image.dataset.mtSize = \(jsLiteral(size));
-          const line = image.closest('figure')?.previousElementSibling;
-          if (line?.matches('.link-line')) { line.dataset.mtImageLoaded = 'true'; }
-          window.majorTomEnhanceInlineImage?.(image);
-        })();
-        """)
+        await runScript(BrowserDocumentScript.imageMetadata(figureIdentifier: figureIdentifier, mimeType: metadata.mimeType, size: size))
     }
 
     private func inlineImageFileName(for url: URL, fallback: String?) -> String {
@@ -3274,14 +3048,6 @@ final class BrowserModel: ObservableObject {
 
     private func runScript(_ source: String) async {
         _ = try? await page.callJavaScript(source, contentWorld: .defaultClient)
-    }
-
-    /// Encodes a Swift string as a JavaScript string literal, so page content can never
-    /// break out of the script being evaluated.
-    private func jsLiteral(_ value: String) -> String {
-        guard let data = try? JSONEncoder().encode(value),
-              let literal = String(data: data, encoding: .utf8) else { return "\"\"" }
-        return literal
     }
 
     private func refreshFavicon(forCapsuleAt url: URL) async {
