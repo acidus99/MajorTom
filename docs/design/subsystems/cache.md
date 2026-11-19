@@ -26,7 +26,8 @@ bytes as a complete reusable response.
 
 - Successful complete Gemini images are fresh for 24 hours. Valid favicon observations
   and confirmed completed unacceptable favicon answers are remembered for 30 days;
-  failed or interrupted checks are not negative observations.
+  inconclusive checks temporarily suppress repeated probes while preserving known
+  bookmark icons.
 - Do not retain client-certificate-authenticated response bodies. Request context
   still matters for deciding eligibility; a broader key is not permission to cache
   personalized content.

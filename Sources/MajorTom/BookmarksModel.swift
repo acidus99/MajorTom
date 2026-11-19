@@ -89,12 +89,11 @@ final class BookmarksModel: ObservableObject {
         guard faviconRefreshTask == nil else { return }
         faviconRefreshTask = Task { [weak self] in
             defer { self?.faviconRefreshTask = nil }
-            let responses = (try? await SharedContentCache.shared?.freshResponses(ofType: .favicon)) ?? []
+            let responses = await GeminiFaviconLoader.cachedObservations(cache: SharedContentCache.shared)
             var known: [CapsuleEndpoint: String] = [:]
             var observations: [CapsuleEndpoint: BookmarkFaviconSnapshot] = [:]
-            for response in responses {
-                guard let endpoint = CapsuleEndpoint(url: response.url),
-                      let emoji = GeminiFavicon.parse(response: response) else { continue }
+            for (endpoint, response) in responses {
+                guard let emoji = response.emoji else { continue }
                 known[endpoint] = emoji
                 observations[endpoint] = BookmarkFaviconSnapshot(
                     emoji: emoji, fetchedAt: response.receivedAt
@@ -118,9 +117,10 @@ final class BookmarksModel: ObservableObject {
             let snapshot: BookmarkFaviconSnapshot?
             if let endpoint = CapsuleEndpoint(url: url),
                let faviconURL = GeminiFavicon.url(for: endpoint),
-               let response = try? await SharedContentCache.shared?.freshResponse(for: faviconURL) {
+               let response = await GeminiFaviconLoader.cachedObservation(for: faviconURL, cache: SharedContentCache.shared),
+               response.kind != .unknown {
                 snapshot = BookmarkFaviconSnapshot(
-                    emoji: GeminiFavicon.parse(response: response),
+                    emoji: response.emoji,
                     fetchedAt: response.receivedAt
                 )
             } else {

@@ -481,8 +481,8 @@ final class BrowserModel: ObservableObject {
     private let trustStore: TrustedIdentityStore?
     private let contentCache = SharedContentCache.shared
     private lazy var resourceRetriever = GeminiResourceRetriever<ClientTLSIdentity>(
-        transportEvents: { [transport] target, identity, authorize in
-            transport.events(for: target, clientIdentity: identity, authorizeTrust: authorize)
+        transportEvents: { [transport] target, identity, configuration, authorize in
+            transport.events(for: target, clientIdentity: identity, configuration: configuration, authorizeTrust: authorize)
         },
         cache: contentCache,
         resolveIdentity: { [clientCertificates] url in
@@ -493,6 +493,9 @@ final class BrowserModel: ObservableObject {
             await ServerTrustPresentation.shared.authorize(identity)
         }
     )
+    private lazy var faviconLoader = GeminiFaviconLoader(cache: contentCache) { [resourceRetriever] target in
+        try await resourceRetriever.response(for: target, purpose: .favicon)
+    }
     /// One stateful renderer per active document; beginDocument installs its palette.
     private var renderer = HTMLDocumentStreamRenderer()
     private var cancellables = Set<AnyCancellable>()
@@ -508,7 +511,6 @@ final class BrowserModel: ObservableObject {
     private let backForwardCache = SharedBackForwardCacheStore.shared
     private var backForwardDebounceTask: Task<Void, Never>?
     private var backForwardWriteTask: Task<Void, Never>?
-    private var contentCacheWriteTask: Task<Void, Never>?
     private var browsingDataGeneration: UInt64 = 0
     private var isClearingBrowsingData = false
     private var currentResponseCanBeCached = true
@@ -1208,7 +1210,6 @@ final class BrowserModel: ObservableObject {
 
     func drainWritesForClearing() async {
         await backForwardWriteTask?.value
-        await contentCacheWriteTask?.value
     }
 
     func finishClearing() {
@@ -1216,7 +1217,6 @@ final class BrowserModel: ObservableObject {
     }
 
     func flushContentCacheWrites() async {
-        await contentCacheWriteTask?.value
     }
 
     private func prepareScrollRestoration(for index: Int) {
@@ -2673,17 +2673,6 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    private func enqueueContentCacheWrite(
-        _ operation: @escaping @Sendable () async -> Void
-    ) {
-        let previous = contentCacheWriteTask
-        contentCacheWriteTask = Task {
-            await previous?.value
-            guard !Task.isCancelled else { return }
-            await operation()
-        }
-    }
-
     private static func needsPresentationRestoration(_ state: HistoryPresentationState) -> Bool {
         state.scrollY > 0 || !state.expandedImages.isEmpty || !state.collapsedPreformatted.isEmpty
     }
@@ -3295,100 +3284,25 @@ final class BrowserModel: ObservableObject {
         return literal
     }
 
-    private enum FaviconProbe {
-        case found(String, ContentResponse)
-        /// The capsule answered, but not with a conforming favicon.
-        case absent(receivedAt: Date)
-        /// The probe never got an answer, so nothing may be concluded or cached.
-        case failed
-    }
-
-    /// Brings `favicon` up to date for the capsule just navigated to, fetching
-    /// `favicon.txt` only when nothing fresh is cached.
-    ///
-    /// The RFC forbids prefetching: a client may not ask for a favicon until the user has
-    /// navigated to that server. This is called after a page commits, which is exactly
-    /// that moment.
     private func refreshFavicon(forCapsuleAt url: URL) async {
         guard !isClearingBrowsingData else { return }
         let generation = browsingDataGeneration
-        let cacheGeneration = await contentCache?.writeGeneration
-        guard generation == browsingDataGeneration else { return }
-        guard settings.preferences.showsFavicons else {
+        guard settings.preferences.showsFavicons,
+              url.scheme?.lowercased() == "gemini",
+              let endpoint = CapsuleEndpoint(url: url) else {
             favicon = nil
             return
         }
-        // Only real capsules. A proxied http page is fetched over a connection to the
-        // proxy, and the proxy's favicon is not the site's.
-        guard url.scheme?.lowercased() == "gemini",
-              let endpoint = CapsuleEndpoint(url: url),
-              let faviconURL = GeminiFavicon.url(for: endpoint),
-              let probeTarget = try? GeminiRequestTarget(faviconURL.absoluteString) else {
-            favicon = nil
-            return
-        }
-
-        if let response = try? await contentCache?.freshResponse(for: faviconURL) {
-            guard generation == browsingDataGeneration else { return }
-            let emoji = GeminiFavicon.parse(response: response)
-            if emoji == nil, response.status != 51 {
-                let negative = GeminiFavicon.negativeResponse(
-                    for: faviconURL,
-                    receivedAt: response.receivedAt
-                )
-                enqueueContentCacheWrite { [contentCache] in
-                    _ = try? await contentCache?.store(
-                        negative,
-                        resourceType: .favicon,
-                        lifetime: GeminiFavicon.cacheLifetime,
-                        generation: cacheGeneration
-                    )
-                }
-            }
-            favicon = emoji
-            navigation.updateCurrentMetadata(title: documentTitle ?? title, favicon: favicon)
-            persistCurrentBackForwardEntry()
-            BookmarksModel.shared.updateFavicon(
-                emoji,
-                for: endpoint,
-                fetchedAt: response.receivedAt
-            )
-            return
-        }
-        favicon = nil
-
-        let probe = await self.probeFavicon(probeTarget)
+        let observation = await faviconLoader.observation(for: endpoint)
         guard generation == browsingDataGeneration else { return }
-        switch probe {
-        case .failed:
-            // A connection that never completed says nothing about whether a favicon
-            // exists and must not create a negative cache entry.
+        switch observation.kind {
+        case .unknown:
             return
-        case .found(let emoji, let response):
-            enqueueContentCacheWrite { [contentCache] in
-                _ = try? await contentCache?.store(
-                    response,
-                    resourceType: .favicon,
-                    lifetime: GeminiFavicon.cacheLifetime,
-                        generation: cacheGeneration
-                )
-            }
-            BookmarksModel.shared.updateFavicon(emoji, for: endpoint, fetchedAt: response.receivedAt)
+        case .found(let emoji):
+            BookmarksModel.shared.updateFavicon(emoji, for: endpoint, fetchedAt: observation.receivedAt)
             applyFaviconIfStillCurrent(emoji, endpoint: endpoint)
-        case .absent(let receivedAt):
-            let negative = GeminiFavicon.negativeResponse(
-                for: faviconURL,
-                receivedAt: receivedAt
-            )
-            enqueueContentCacheWrite { [contentCache] in
-                _ = try? await contentCache?.store(
-                    negative,
-                    resourceType: .favicon,
-                    lifetime: GeminiFavicon.cacheLifetime,
-                        generation: cacheGeneration
-                )
-            }
-            BookmarksModel.shared.updateFavicon(nil, for: endpoint, fetchedAt: receivedAt)
+        case .absent:
+            BookmarksModel.shared.updateFavicon(nil, for: endpoint, fetchedAt: observation.receivedAt)
             applyFaviconIfStillCurrent(nil, endpoint: endpoint)
         }
     }
@@ -3401,56 +3315,6 @@ final class BrowserModel: ObservableObject {
         favicon = emoji
         navigation.updateCurrentMetadata(title: documentTitle ?? title, favicon: emoji)
         persistCurrentBackForwardEntry()
-    }
-
-    private func probeFavicon(_ target: GeminiRequestTarget) async -> FaviconProbe {
-        var body = Data()
-        var responseHeader: GeminiResponseHeader?
-        var receivedAt = Date()
-        var completed = false
-        do {
-            let events = transport.events(
-                for: target,
-                // A favicon is one emoji. A capsule that answers this path with a large
-                // body is misbehaving, and there is no reason to read it.
-                configuration: GeminiTransportConfiguration(
-                    idleTimeout: .seconds(10),
-                    maximumResponseByteCount: 4 * 1_024
-                )
-            ) { identity, _ in
-                await ServerTrustPresentation.shared.authorize(identity)
-            }
-            for try await event in events {
-                switch event {
-                case .responseHeader(let header):
-                    responseHeader = header
-                    receivedAt = Date()
-                case .body(let data):
-                    body.append(data)
-                case .completed:
-                    completed = true
-                default:
-                    break
-                }
-            }
-        } catch {
-            return .failed
-        }
-        guard completed, let responseHeader else { return .failed }
-        let mime = responseHeader.meta.split(separator: ";", maxSplits: 1).first
-            .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-        let response = ContentResponse(
-            url: target.url,
-            status: responseHeader.status,
-            meta: Data(responseHeader.meta.utf8),
-            mimeType: mime,
-            body: body,
-            receivedAt: receivedAt
-        )
-        guard let emoji = GeminiFavicon.parse(response: response) else {
-            return .absent(receivedAt: receivedAt)
-        }
-        return .found(emoji, response)
     }
 
     private func loadInlineImage(

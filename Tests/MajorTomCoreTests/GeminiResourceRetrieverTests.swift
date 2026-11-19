@@ -12,6 +12,24 @@ final class GeminiResourceRetrieverTests: XCTestCase {
     private let url = URL(string: "gemini://example.com/start")!
     private let bytes = fixtureBytes
 
+    func testFaviconRequestsAreAnonymousBoundedAndDoNotFollowRedirects() async throws {
+        let source = ScriptedDocumentSource { _ in [.responseHeader(try fixtureHeader(31, "/redirect"))] }
+        let retriever = makeRetriever(source.events, resolve: { _ in
+            XCTFail("Favicon probes must remain anonymous")
+            return nil
+        })
+        do {
+            _ = try await retriever.response(for: target(), purpose: .favicon)
+            XCTFail("A favicon redirect is an inconclusive observation")
+        } catch GeminiRetrievalError.responseStatus(let header) {
+            XCTAssertEqual(header.status, 31)
+        }
+        XCTAssertEqual(source.requests.count, 1)
+        XCTAssertNil(source.requests.first?.credential)
+        XCTAssertEqual(source.requests.first?.configuration.maximumResponseByteCount, 4 * 1_024)
+        XCTAssertEqual(source.requests.first?.configuration.idleTimeout, .seconds(10))
+    }
+
     func testDownloadThroughProxyPreservesReturnedRepresentationAndRelativeRedirect() async throws {
         let converted = Data("# Converted fixture\n".utf8)
         let source = ScriptedDocumentSource { target in
@@ -386,7 +404,7 @@ final class GeminiResourceRetrieverTests: XCTestCase {
             return false
         }
         let identity = PresentedServerIdentity(endpoint: CapsuleEndpoint(host: "example.com"), publicKeySHA256: String(repeating: "a", count: 64))
-        let retriever = GeminiResourceRetriever<String>(transportEvents: { _, _, authorize in
+        let retriever = GeminiResourceRetriever<String>(transportEvents: { _, _, _, authorize in
             AsyncThrowingStream { continuation in
                 let work = Task {
                     _ = await authorize(identity, Data())
@@ -464,7 +482,11 @@ final class GeminiResourceRetrieverTests: XCTestCase {
 }
 
 private final class ScriptedDocumentSource: @unchecked Sendable {
-    struct Request: Sendable { let target: GeminiRequestTarget; let credential: String? }
+    struct Request: Sendable {
+        let target: GeminiRequestTarget
+        let credential: String?
+        let configuration: GeminiTransportConfiguration
+    }
     private let lock = NSLock()
     private var recorded: [Request] = []
     private let script: @Sendable (GeminiRequestTarget) throws -> [GeminiTransportEvent]
@@ -475,8 +497,8 @@ private final class ScriptedDocumentSource: @unchecked Sendable {
         self.script = script
         self.error = error
     }
-    func events(_ target: GeminiRequestTarget, _ credential: String?, _ authorize: @escaping GeminiTransport.TrustAuthorization) -> AsyncThrowingStream<GeminiTransportEvent, any Error> {
-        lock.withLock { recorded.append(Request(target: target, credential: credential)) }
+    func events(_ target: GeminiRequestTarget, _ credential: String?, _ configuration: GeminiTransportConfiguration, _ authorize: @escaping GeminiTransport.TrustAuthorization) -> AsyncThrowingStream<GeminiTransportEvent, any Error> {
+        lock.withLock { recorded.append(Request(target: target, credential: credential, configuration: configuration)) }
         return AsyncThrowingStream { continuation in
             do {
                 for event in try script(target) { continuation.yield(event) }
@@ -496,7 +518,7 @@ private final class ControlledDocumentSource: Sendable {
         continuation = pair.continuation
         continuation.onTermination = { _ in onTermination() }
     }
-    func events(_ target: GeminiRequestTarget, _ credential: String?, _ authorize: @escaping GeminiTransport.TrustAuthorization) -> AsyncThrowingStream<GeminiTransportEvent, any Error> { stream }
+    func events(_ target: GeminiRequestTarget, _ credential: String?, _ configuration: GeminiTransportConfiguration, _ authorize: @escaping GeminiTransport.TrustAuthorization) -> AsyncThrowingStream<GeminiTransportEvent, any Error> { stream }
 }
 
 private func collect(

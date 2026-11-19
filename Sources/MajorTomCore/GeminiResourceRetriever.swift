@@ -3,8 +3,14 @@ import Foundation
 public enum GeminiRetrievalPurpose: Sendable {
     case navigation
     case download
+    case favicon
 
-    var redirectLimit: Int { self == .navigation ? 10 : 5 }
+    var redirectLimit: Int { self == .navigation ? 10 : (self == .favicon ? 0 : 5) }
+    var configuration: GeminiTransportConfiguration {
+        self == .favicon
+            ? GeminiTransportConfiguration(idleTimeout: .seconds(10), maximumResponseByteCount: 4 * 1_024)
+            : GeminiTransportConfiguration()
+    }
 }
 
 public enum GeminiRetrievalError: Error, Sendable {
@@ -32,6 +38,7 @@ public struct GeminiRetrievalResponse: Sendable {
         case identityRequired
         case temporaryFailure
         case permanentFailure
+        case redirect
     }
 
     public let target: GeminiRequestTarget
@@ -76,7 +83,7 @@ public enum GeminiRetrievalEvent: Sendable {
 /// presentation, or decision state. Each subscription owns and cancels its source.
 public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
     public typealias TransportEvents = @Sendable (
-        GeminiRequestTarget, Credential?, @escaping GeminiTransport.TrustAuthorization
+        GeminiRequestTarget, Credential?, GeminiTransportConfiguration, @escaping GeminiTransport.TrustAuthorization
     ) -> AsyncThrowingStream<GeminiTransportEvent, any Error>
     public typealias IdentityResolver = @Sendable (URL) async -> GeminiRetrievalIdentity<Credential>?
 
@@ -172,14 +179,14 @@ public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
                 let generation = await cache?.writeGeneration
                 let isDirectGemini = target.url.scheme?.lowercased() == "gemini"
                     && CapsuleEndpoint(url: target.url) == target.endpoint
-                let identity = isDirectGemini ? await resolveIdentity(target.url) : nil
+                let identity = isDirectGemini && purpose != .favicon ? await resolveIdentity(target.url) : nil
                 try Task.checkCancellation()
                 let offered = identity?.credential == nil ? nil : identity?.descriptor
                 let cached: ContentResponse?
                 if bypassesCache {
                     try? await cache?.removeResponse(for: target.url)
                     cached = nil
-                } else if offered == nil,
+                } else if purpose != .favicon, offered == nil,
                           let response = try? await cache?.freshResponse(for: target.url),
                           let status = response.status, status / 10 == 2 {
                     cached = response
@@ -192,7 +199,7 @@ public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
                     continuation.yield(.loadingCachedResponse)
                     events = GeminiResponseReplay.events(for: cached)
                 } else {
-                    events = transportEvents(target, identity?.credential, authorizeTrust)
+                    events = transportEvents(target, identity?.credential, purpose.configuration, authorizeTrust)
                 }
                 var response: GeminiRetrievalResponse?
                 var cacheBody = Data()
@@ -206,7 +213,7 @@ public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
                     case .serverIdentity(let identity):
                         continuation.yield(.serverIdentity(identity))
                     case .responseHeader(let header):
-                        if header.isRedirect {
+                        if header.isRedirect && purpose != .favicon {
                             guard let url = URL(
                                 string: header.meta.trimmingCharacters(in: .whitespacesAndNewlines),
                                 relativeTo: target.url
@@ -227,6 +234,7 @@ public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
                             outcome = .success(mimeType: mime)
                         case 4: outcome = .temporaryFailure
                         case 5: outcome = .permanentFailure
+                        case 3: outcome = .redirect
                         default: outcome = .identityRequired
                         }
                         let metadata = GeminiRetrievalResponse(
@@ -237,7 +245,7 @@ public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
                             offeredCertificate: offered
                         )
                         response = metadata
-                        if cached == nil {
+                        if cached == nil && purpose != .favicon {
                             cacheDecision = GeminiCacheDecider().decision(
                                 for: target,
                                 response: ContentResponse(
