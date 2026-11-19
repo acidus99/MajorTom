@@ -499,7 +499,17 @@ final class BrowserModel: ObservableObject {
     private var documentContinuation: AsyncThrowingStream<Data, any Error>.Continuation?
     /// Rendered HTML waiting to be handed to WebKit. See `yieldToDocument`.
     private var documentBuffer = Data()
-    private var trustContinuation: CheckedContinuation<Bool, Never>?
+    /// One trust question and every request waiting for its answer.
+    private struct PendingTrustDecision {
+        let prompt: TrustPrompt
+        var continuations: [CheckedContinuation<Bool, Never>]
+    }
+    /// Trust questions waiting for the reader, oldest first. Only the first is on
+    /// screen (`trustPrompt`). Navigation, the favicon probe, inline images and
+    /// downloads can all reach `authorize` at the same time. A single continuation used
+    /// to be kept here, so a second question overwrote the first and the first request
+    /// never received an answer.
+    private var pendingTrustDecisions: [PendingTrustDecision] = []
     /// This tab's position in its own history, the pages it has kept, and the reading
     /// position in each of them. Owned by Core so those rules can be tested without
     /// WebKit; see `NavigationState`.
@@ -865,11 +875,9 @@ final class BrowserModel: ObservableObject {
         documentBuffer.removeAll(keepingCapacity: false)
         activeWebDocumentURL = nil
 
-        // A prompt still on screen belongs to the request being abandoned. Resuming the
-        // continuation releases the transport that is waiting on the reader's answer.
-        trustContinuation?.resume(returning: false)
-        trustContinuation = nil
-        trustPrompt = nil
+        // A prompt still on screen belongs to the request being abandoned. Declining it
+        // releases the transport that is waiting on the reader's answer.
+        declinePendingTrustDecisions()
         inputPrompt = nil
         inputValidationMessage = nil
         clientCertificatePrompt = nil
@@ -998,9 +1006,7 @@ final class BrowserModel: ObservableObject {
         }
         slowDownTask?.cancel()
         slowDownTask = nil
-        trustContinuation?.resume(returning: false)
-        trustContinuation = nil
-        trustPrompt = nil
+        declinePendingTrustDecisions()
         clientCertificatePrompt = nil
         pendingClientCertificateChallenge = nil
 
@@ -1739,10 +1745,52 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    func respondToTrust(allow: Bool) {
+    /// Records the reader's answer to the trust question on screen.
+    ///
+    /// - Parameter promptID: the question the sheet was showing. An answer for a
+    ///   question that is no longer first in the queue (it was declined by a
+    ///   navigation while its sheet was closing) is ignored, so it can never be applied
+    ///   to a different question.
+    func respondToTrust(allow: Bool, promptID: TrustPrompt.ID) {
+        guard let first = pendingTrustDecisions.first, first.prompt.id == promptID else { return }
+        pendingTrustDecisions.removeFirst()
+        trustPrompt = pendingTrustDecisions.first?.prompt
+        for continuation in first.continuations {
+            continuation.resume(returning: allow)
+        }
+    }
+
+    /// Queues a trust question and waits for the reader's answer.
+    ///
+    /// Requests that are asking the same question about the same presented identity
+    /// share one prompt and one answer.
+    private func requestTrustDecision(_ prompt: TrustPrompt) async -> Bool {
+        await withCheckedContinuation { continuation in
+            if let index = pendingTrustDecisions.firstIndex(where: {
+                $0.prompt.title == prompt.title && $0.prompt.identity == prompt.identity
+            }) {
+                pendingTrustDecisions[index].continuations.append(continuation)
+            } else {
+                pendingTrustDecisions.append(
+                    PendingTrustDecision(prompt: prompt, continuations: [continuation])
+                )
+                if pendingTrustDecisions.count == 1 {
+                    trustPrompt = prompt
+                }
+            }
+        }
+    }
+
+    /// Declines every waiting trust question, releasing each request that asked.
+    private func declinePendingTrustDecisions() {
+        let pending = pendingTrustDecisions
+        pendingTrustDecisions.removeAll()
         trustPrompt = nil
-        trustContinuation?.resume(returning: allow)
-        trustContinuation = nil
+        for decision in pending {
+            for continuation in decision.continuations {
+                continuation.resume(returning: false)
+            }
+        }
     }
 
     /// - Parameter draft: whatever had been typed, kept so returning to the same prompt
@@ -2313,10 +2361,7 @@ final class BrowserModel: ObservableObject {
                 }
             }
             let prompt = Self.prompt(for: challenge)
-            let approved = await withCheckedContinuation { continuation in
-                trustContinuation = continuation
-                trustPrompt = prompt
-            }
+            let approved = await requestTrustDecision(prompt)
             guard approved else { return false }
             try? await trustStore?.trust(identity, source: .user)
             return true

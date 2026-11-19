@@ -2430,7 +2430,7 @@ private struct BrowserTabView: View {
         }
         .sheet(item: $browser.trustPrompt) { prompt in
             TrustPromptView(prompt: prompt) { approved in
-                browser.respondToTrust(allow: approved)
+                browser.respondToTrust(allow: approved, promptID: prompt.id)
             }
         }
         .sheet(item: $browser.inputPrompt) { prompt in
