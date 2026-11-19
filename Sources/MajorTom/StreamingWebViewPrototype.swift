@@ -2719,6 +2719,15 @@ final class BrowserModel: ObservableObject {
             "displayCachedPage url=\(cached.url.absoluteString, privacy: .public) bytes=\(cached.body.count) modelIndex=\(self.navigation.historyIndex)"
         )
         navigationTask?.cancel()
+        // Showing a retained page is a different visit from the one being left, so the
+        // per-visit state that `beginNavigation` resets for a network load is reset here
+        // too. Without this, pressing Stop once left automatic image loading paused on
+        // every page reached by Back or Forward, and a "slow down" answer on one page
+        // kept Reload disabled on the next.
+        automaticImagesPaused = false
+        slowDownTask?.cancel()
+        slowDownTask = nil
+        retryNotBefore = nil
         if pendingScrollRestoration == nil, navigation.currentEntry != nil {
             pendingScrollRestoration = (
                 historyIndex: navigation.historyIndex,
