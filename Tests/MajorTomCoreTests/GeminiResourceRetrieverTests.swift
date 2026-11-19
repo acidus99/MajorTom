@@ -8,9 +8,57 @@ private func fixtureHeader(_ status: Int = 20, _ meta: String = "text/gemini") t
     try GeminiResponseHeader(status: status, meta: meta)
 }
 
-final class MainDocumentRetrieverTests: XCTestCase {
+final class GeminiResourceRetrieverTests: XCTestCase {
     private let url = URL(string: "gemini://example.com/start")!
     private let bytes = fixtureBytes
+
+    func testDownloadThroughProxyPreservesReturnedRepresentationAndRelativeRedirect() async throws {
+        let converted = Data("# Converted fixture\n".utf8)
+        let source = ScriptedDocumentSource { target in
+            target.url.path.hasSuffix("start")
+                ? [.responseHeader(try fixtureHeader(31, "converted"))]
+                : [.responseHeader(try fixtureHeader(20, "text/gemini; charset=utf-8")), .body(converted), .completed]
+        }
+        let proxy = GeminiProxyConfiguration(host: "proxy.example", port: 1965)
+        let original = URL(string: "https://example.com/directory/start")!
+        let response = try await makeRetriever(source.events).response(
+            for: GeminiRequestTarget(proxying: original, through: proxy), proxy: proxy, purpose: .download
+        )
+        XCTAssertEqual(response.body, converted)
+        XCTAssertEqual(response.mimeType, "text/gemini")
+        XCTAssertEqual(response.url.absoluteString, "https://example.com/directory/converted")
+        XCTAssertEqual(source.requests.map(\.target.endpoint.host), ["proxy.example", "proxy.example"])
+        XCTAssertTrue(source.requests.allSatisfy { $0.credential == nil })
+    }
+
+    func testDownloadsStopAfterFiveRedirects() async throws {
+        let source = ScriptedDocumentSource { target in
+            let hop = Int(target.url.lastPathComponent) ?? 0
+            return [.responseHeader(try fixtureHeader(31, "/\(hop + 1)"))]
+        }
+        do {
+            _ = try await makeRetriever(source.events).response(for: target(), purpose: .download)
+            XCTFail("Expected redirect limit")
+        } catch let error as GeminiRetrievalRedirectError {
+            XCTAssertEqual(error, .limit(URL(string: "gemini://example.com/6")!))
+        }
+        XCTAssertEqual(source.requests.count, 6)
+    }
+
+    func testDownloadReevaluatesClientIdentityAtEveryDestination() async throws {
+        let descriptor = certificate()
+        let source = ScriptedDocumentSource { target in
+            target.url.host == "example.com"
+                ? [.responseHeader(try fixtureHeader(31, "gemini://other.example/file"))]
+                : [.responseHeader(try fixtureHeader()), .body(fixtureBytes), .completed]
+        }
+        let retriever = makeRetriever(source.events, resolve: { destination in
+            destination.host == "example.com" ? GeminiRetrievalIdentity(descriptor: descriptor, credential: "fixture") : nil
+        })
+        let response = try await retriever.response(for: target(), purpose: .download)
+        XCTAssertEqual(response.body, bytes)
+        XCTAssertEqual(source.requests.map(\.credential), ["fixture", nil])
+    }
 
     func testProxiedHTTPDoesNotDiscloseAGeminiScopedIdentity() async throws {
         let descriptor = certificate()
@@ -21,7 +69,7 @@ final class MainDocumentRetrieverTests: XCTestCase {
         let retriever = makeRetriever(source.events, resolve: { destination in
             // Uses the same actual scope matcher as ClientCertificateStore resolution.
             guard scope.matches(destination) else { return nil }
-            return MainDocumentIdentity(descriptor: descriptor, credential: "synthetic-secret")
+            return GeminiRetrievalIdentity(descriptor: descriptor, credential: "synthetic-secret")
         })
         for scheme in ["http", "https"] {
             let resource = URL(string: "\(scheme)://example.com/private/file")!
@@ -90,7 +138,7 @@ final class MainDocumentRetrieverTests: XCTestCase {
         guard case .finished(.failed(let loopError, false)) = loopEvents.last else {
             return XCTFail("Expected redirect-loop failure")
         }
-        XCTAssertEqual(loopError as? MainDocumentRedirectError, .loop(url))
+        XCTAssertEqual(loopError as? GeminiRetrievalRedirectError, .loop(url))
         XCTAssertEqual(loop.requests.count, 1)
 
         let chain = ScriptedDocumentSource { target in
@@ -101,7 +149,7 @@ final class MainDocumentRetrieverTests: XCTestCase {
         guard case .finished(.failed(let limitError, false)) = events.last else {
             return XCTFail("Expected redirect-limit failure")
         }
-        XCTAssertEqual(limitError as? MainDocumentRedirectError, .limit(URL(string: "gemini://example.com/11")!))
+        XCTAssertEqual(limitError as? GeminiRetrievalRedirectError, .limit(URL(string: "gemini://example.com/11")!))
         XCTAssertEqual(chain.requests.count, 11)
     }
 
@@ -117,8 +165,8 @@ final class MainDocumentRetrieverTests: XCTestCase {
         }
         let retriever = makeRetriever(source.events, resolve: { url in
             switch url.host {
-            case "example.com": MainDocumentIdentity(descriptor: first, credential: "first")
-            case "other.example": MainDocumentIdentity(descriptor: second, credential: "second")
+            case "example.com": GeminiRetrievalIdentity(descriptor: first, credential: "first")
+            case "other.example": GeminiRetrievalIdentity(descriptor: second, credential: "second")
             default: nil
             }
         })
@@ -151,7 +199,7 @@ final class MainDocumentRetrieverTests: XCTestCase {
         guard case .finished(.failed(let error, false)) = events.last else {
             return XCTFail("Expected invalid redirect")
         }
-        XCTAssertEqual(error as? MainDocumentRedirectError, .invalid(source: url, meta: "file:///fixture"))
+        XCTAssertEqual(error as? GeminiRetrievalRedirectError, .invalid(source: url, meta: "file:///fixture"))
         XCTAssertTrue(responses(events).isEmpty)
     }
 
@@ -198,7 +246,7 @@ final class MainDocumentRetrieverTests: XCTestCase {
             [.responseHeader(try fixtureHeader(20, "image/png")), .body(personalized), .completed]
         }
         let retriever = makeRetriever(source.events, cache: cache, resolve: { _ in
-            MainDocumentIdentity(descriptor: descriptor, credential: "fixture")
+            GeminiRetrievalIdentity(descriptor: descriptor, credential: "fixture")
         })
         let events = await collect(retriever.events(for: try target()))
         XCTAssertEqual(source.requests.first?.credential, "fixture")
@@ -245,9 +293,9 @@ final class MainDocumentRetrieverTests: XCTestCase {
         var invalid = valid
         invalid.notAfter = .distantPast
         for selection in [
-            MainDocumentIdentity(descriptor: valid, credential: "fixture"),
-            MainDocumentIdentity<String>(descriptor: valid, credential: nil),
-            MainDocumentIdentity<String>(descriptor: invalid, credential: nil)
+            GeminiRetrievalIdentity(descriptor: valid, credential: "fixture"),
+            GeminiRetrievalIdentity<String>(descriptor: valid, credential: nil),
+            GeminiRetrievalIdentity<String>(descriptor: invalid, credential: nil)
         ] {
             let source = ScriptedDocumentSource { _ in [.responseHeader(try fixtureHeader(61, "fixture"))] }
             let events = await collect(makeRetriever(source.events, resolve: { _ in selection }).events(for: try target()))
@@ -299,7 +347,7 @@ final class MainDocumentRetrieverTests: XCTestCase {
             let source = ControlledDocumentSource(onTermination: { terminated.fulfill() })
             let stream = makeRetriever(source.events).events(for: try target())
             let task = Task {
-                var result: [MainDocumentEvent] = []
+                var result: [GeminiRetrievalEvent] = []
                 for await event in stream {
                     result.append(event)
                     switch event {
@@ -338,7 +386,7 @@ final class MainDocumentRetrieverTests: XCTestCase {
             return false
         }
         let identity = PresentedServerIdentity(endpoint: CapsuleEndpoint(host: "example.com"), publicKeySHA256: String(repeating: "a", count: 64))
-        let retriever = MainDocumentRetriever<String>(transportEvents: { _, _, authorize in
+        let retriever = GeminiResourceRetriever<String>(transportEvents: { _, _, authorize in
             AsyncThrowingStream { continuation in
                 let work = Task {
                     _ = await authorize(identity, Data())
@@ -386,24 +434,24 @@ final class MainDocumentRetrieverTests: XCTestCase {
         try await cache.store(ContentResponse(url: url, status: 20, meta: Data("image/png".utf8), mimeType: "image/png", body: bytes, receivedAt: receivedAt), resourceType: .image, lifetime: 86_400)
     }
     private func makeRetriever(
-        _ source: @escaping MainDocumentRetriever<String>.TransportEvents,
+        _ source: @escaping GeminiResourceRetriever<String>.TransportEvents,
         cache: ContentCache? = nil,
-        resolve: @escaping MainDocumentRetriever<String>.IdentityResolver = { _ in nil }
-    ) -> MainDocumentRetriever<String> {
-        MainDocumentRetriever(transportEvents: source, cache: cache, resolveIdentity: resolve, authorizeTrust: { _, _ in true })
+        resolve: @escaping GeminiResourceRetriever<String>.IdentityResolver = { _ in nil }
+    ) -> GeminiResourceRetriever<String> {
+        GeminiResourceRetriever(transportEvents: source, cache: cache, resolveIdentity: resolve, authorizeTrust: { _, _ in true })
     }
-    private func responses(_ events: [MainDocumentEvent]) -> [MainDocumentResponse] {
+    private func responses(_ events: [GeminiRetrievalEvent]) -> [GeminiRetrievalResponse] {
         events.compactMap { if case .response(let response) = $0 { return response }; return nil }
     }
-    private func body(_ events: [MainDocumentEvent]) -> Data {
+    private func body(_ events: [GeminiRetrievalEvent]) -> Data {
         events.reduce(into: Data()) { if case .body(let data) = $1 { $0.append(data) } }
     }
-    private func assertCompleted(_ events: [MainDocumentEvent], file: StaticString = #filePath, line: UInt = #line) {
+    private func assertCompleted(_ events: [GeminiRetrievalEvent], file: StaticString = #filePath, line: UInt = #line) {
         let terminals = events.filter { if case .finished = $0 { return true }; return false }
         XCTAssertEqual(terminals.count, 1, file: file, line: line)
         guard case .finished(.completed) = events.last else { return XCTFail("Expected completed retrieval", file: file, line: line) }
     }
-    private func responseSequence(_ events: [MainDocumentEvent]) -> [String] {
+    private func responseSequence(_ events: [GeminiRetrievalEvent]) -> [String] {
         events.compactMap {
             switch $0 {
             case .response(let metadata): "header:\(metadata.header.status):\(metadata.header.meta)"
@@ -452,12 +500,12 @@ private final class ControlledDocumentSource: Sendable {
 }
 
 private func collect(
-    _ stream: AsyncStream<MainDocumentEvent>,
-    observe: @escaping @Sendable (MainDocumentEvent) -> Void = { _ in }
-) async -> [MainDocumentEvent] {
+    _ stream: AsyncStream<GeminiRetrievalEvent>,
+    observe: @escaping @Sendable (GeminiRetrievalEvent) -> Void = { _ in }
+) async -> [GeminiRetrievalEvent] {
     let finished = XCTestExpectation(description: "Retrieval terminates")
     let task = Task {
-        var result: [MainDocumentEvent] = []
+        var result: [GeminiRetrievalEvent] = []
         for await event in stream { result.append(event); observe(event) }
         finished.fulfill()
         return result

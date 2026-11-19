@@ -480,15 +480,14 @@ final class BrowserModel: ObservableObject {
     private let clientCertificates = ClientCertificateStore.shared
     private let trustStore: TrustedIdentityStore?
     private let contentCache = SharedContentCache.shared
-    private let cacheDecider = GeminiCacheDecider()
-    private lazy var documentRetriever = MainDocumentRetriever<ClientTLSIdentity>(
+    private lazy var resourceRetriever = GeminiResourceRetriever<ClientTLSIdentity>(
         transportEvents: { [transport] target, identity, authorize in
             transport.events(for: target, clientIdentity: identity, authorizeTrust: authorize)
         },
         cache: contentCache,
         resolveIdentity: { [clientCertificates] url in
             guard let resolved = await clientCertificates.resolvedCertificate(for: url) else { return nil }
-            return MainDocumentIdentity(descriptor: resolved.descriptor, credential: resolved.tlsIdentity)
+            return GeminiRetrievalIdentity(descriptor: resolved.descriptor, credential: resolved.tlsIdentity)
         },
         authorizeTrust: { identity, _ in
             await ServerTrustPresentation.shared.authorize(identity)
@@ -1545,12 +1544,12 @@ final class BrowserModel: ObservableObject {
                 case "gemini":
                     fetched = try await retrieveGeminiResource(url)
                 case "http", "https":
-                    let (data, response) = try await URLSession.shared.data(from: url)
-                    fetched = (
-                        data,
-                        (response.mimeType ?? "application/octet-stream").lowercased(),
-                        response.url ?? url
-                    )
+                    if settings.preferences.proxy != nil {
+                        fetched = try await retrieveGeminiResource(url)
+                    } else {
+                        let (data, response) = try await URLSession.shared.data(from: url)
+                        fetched = (data, (response.mimeType ?? "application/octet-stream").lowercased(), response.url ?? url)
+                    }
                 case "file":
                     fetched = (
                         try Data(contentsOf: url),
@@ -1890,7 +1889,7 @@ final class BrowserModel: ObservableObject {
         var sentClientCertificate: ClientCertificateDescriptor?
         var responseIsCached = false
         var receivedAt = Date()
-        let events = documentRetriever.events(
+        let events = resourceRetriever.events(
             for: target,
             proxy: settings.preferences.proxy,
             bypassesCache: bypassesContentCache
@@ -2164,7 +2163,7 @@ final class BrowserModel: ObservableObject {
                     return
                 }
             }
-        } catch let error as MainDocumentRedirectError {
+        } catch let error as GeminiRetrievalRedirectError {
             guard !Task.isCancelled else { return }
             switch error {
             case .loop(let url), .limit(let url):
@@ -2674,47 +2673,6 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    /// Downloads use this eligibility check until they adopt the retrieval boundary.
-    ///
-    /// - A request that offers a client identity is never answered from the cache: an
-    ///   entry is keyed by URL alone and was fetched without that identity.
-    /// - Only successful responses are replayed. The favicon feature records "this
-    ///   capsule has no favicon" as a synthesized status 51 under the favicon's URL.
-    ///   That is bookkeeping, not something the capsule sent, and must never be shown
-    ///   to the reader as a page or saved as a download.
-    private func reusableCachedResponse(
-        for url: URL,
-        offeringClientIdentity: Bool
-    ) async -> ContentResponse? {
-        guard !offeringClientIdentity,
-              let response = try? await contentCache?.freshResponse(for: url),
-              let status = response.status,
-              status / 10 == 2 else { return nil }
-        return response
-    }
-
-    private func storeInContentCacheIfNeeded(
-        _ response: ContentResponse,
-        for target: GeminiRequestTarget,
-        clientIdentityOffered: Bool,
-        generation: UInt64?
-    ) {
-        guard let contentCache else { return }
-        guard case .store(let resourceType, let lifetime) = cacheDecider.decision(
-            for: target,
-            response: response,
-            clientIdentityOffered: clientIdentityOffered
-        ) else { return }
-        enqueueContentCacheWrite {
-            _ = try? await contentCache.store(
-                response,
-                resourceType: resourceType,
-                lifetime: lifetime,
-                generation: generation
-            )
-        }
-    }
-
     private func enqueueContentCacheWrite(
         _ operation: @escaping @Sendable () async -> Void
     ) {
@@ -2761,6 +2719,18 @@ final class BrowserModel: ObservableObject {
     }
 
     private func friendly(_ error: any Error) -> String {
+        if let error = error as? GeminiRetrievalError {
+            switch error {
+            case .responseStatus(let header): return "The capsule returned Gemini status \(header.status): \(header.meta)"
+            case .incompleteResponse: return "The response ended before it completed."
+            }
+        }
+        if let error = error as? GeminiRetrievalRedirectError {
+            switch error {
+            case .loop, .limit: return "The capsule redirected too many times or in a loop."
+            case .invalid(_, let meta): return "The capsule returned a redirect Major Tom could not understand: \(meta)"
+            }
+        }
         if let transportError = error as? GeminiTransportError {
             switch transportError {
             case .certificateUnavailable:
@@ -3538,86 +3508,15 @@ final class BrowserModel: ObservableObject {
     }
 
     private func retrieveGeminiResource(
-        _ url: URL,
-        redirects: Int = 0
+        _ url: URL
     ) async throws -> (data: Data, mimeType: String, finalURL: URL) {
-        guard redirects <= 5 else {
-            throw GeminiTransportError.connectionFailed(.message("The capsule redirected too many times."))
-        }
-        guard let target = try? GeminiRequestTarget(url.absoluteString) else {
+        guard let target = GeminiRequestTarget.navigationTarget(for: url, proxy: settings.preferences.proxy) else {
             throw URLError(.badURL)
         }
-        let cacheGeneration = await contentCache?.writeGeneration
-        var body = Data()
-        var mimeType = "application/octet-stream"
-        // Downloads never offer a client identity.
-        let cachedResponse = await reusableCachedResponse(
-            for: target.url,
-            offeringClientIdentity: false
+        let response = try await resourceRetriever.response(
+            for: target, proxy: settings.preferences.proxy, purpose: .download
         )
-        let responseIsCached = cachedResponse != nil
-        var receivedAt = cachedResponse?.receivedAt ?? Date()
-        let events: AsyncThrowingStream<GeminiTransportEvent, any Error>
-        if let cachedResponse {
-            events = GeminiResponseReplay.events(for: cachedResponse)
-        } else {
-            events = transport.events(
-                for: target,
-                configuration: GeminiTransportConfiguration()
-            ) { identity, _ in
-                await ServerTrustPresentation.shared.authorize(identity)
-            }
-        }
-        var responseHeader: GeminiResponseHeader?
-        var completed = false
-        for try await event in events {
-            switch event {
-            case .responseHeader(let header):
-                if !responseIsCached { receivedAt = Date() }
-                responseHeader = header
-                // A download that redirects previously died with "Gemini status 31".
-                if header.isRedirect {
-                    let meta = header.meta.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard let next = URL(string: meta, relativeTo: url)?.absoluteURL else {
-                        throw GeminiTransportError.connectionFailed(.message(
-                            "The capsule returned a redirect Major Tom could not understand: \(header.meta)"
-                        ))
-                    }
-                    return try await retrieveGeminiResource(next, redirects: redirects + 1)
-                }
-                guard header.isSuccess else {
-                    throw GeminiTransportError.connectionFailed(.message(
-                        "The capsule returned Gemini status \(header.status): \(header.meta)"
-                    ))
-                }
-                // Trim and lowercase, or the charset parameter and stray whitespace
-                // defeat BrowserFilenameSuggestion's extension mapping.
-                mimeType = header.meta.split(separator: ";", maxSplits: 1).first
-                    .map { $0.trimmingCharacters(in: .whitespaces).lowercased() } ?? mimeType
-            case .body(let data):
-                body.append(data)
-            case .completed:
-                completed = true
-            default:
-                break
-            }
-        }
-        guard completed, let responseHeader else {
-            throw GeminiTransportError.connectionFailed(.message(
-                "The response ended before it completed."
-            ))
-        }
-        if !responseIsCached {
-            storeInContentCacheIfNeeded(ContentResponse(
-                url: target.url,
-                status: responseHeader.status,
-                meta: Data(responseHeader.meta.utf8),
-                mimeType: mimeType,
-                body: body,
-                receivedAt: receivedAt
-            ), for: target, clientIdentityOffered: false, generation: cacheGeneration)
-        }
-        return (body, mimeType, url)
+        return (response.body, response.mimeType ?? "application/octet-stream", response.url)
     }
 
     // Both defined once in MajorTomCore, so link hints and inline-image loading can

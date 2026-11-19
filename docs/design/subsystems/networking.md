@@ -44,6 +44,8 @@ redirect chains and detect loops, including auxiliary retrieval.
   malformed-response, and protocol failures using structured errors for UI wording.
 - All resource paths obey trust, destination scope, redirects, cancellation, and
   applicable size limits. Downloads do not bypass security.
+- HTTP(S) downloads use the configured Gemini proxy when present and save the
+  representation it returns. Client identities remain limited to direct Gemini.
 - Inline images use a shared queue per capsule with one transfer at a time.
   Request starts respect the configured 1–60 second interval (default two seconds).
   Fresh hits bypass the queue. Duplicate requests share work, with independent

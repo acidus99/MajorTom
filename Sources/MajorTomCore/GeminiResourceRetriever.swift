@@ -1,8 +1,20 @@
 import Foundation
 
+public enum GeminiRetrievalPurpose: Sendable {
+    case navigation
+    case download
+
+    var redirectLimit: Int { self == .navigation ? 10 : 5 }
+}
+
+public enum GeminiRetrievalError: Error, Sendable {
+    case responseStatus(GeminiResponseHeader)
+    case incompleteResponse
+}
+
 /// A matched identity can exist even when its credential is unavailable or invalid.
 /// The opaque credential is supplied to transport only; it never enters response data.
-public struct MainDocumentIdentity<Credential: Sendable>: Sendable {
+public struct GeminiRetrievalIdentity<Credential: Sendable>: Sendable {
     public let descriptor: ClientCertificateDescriptor
     public let credential: Credential?
 
@@ -12,7 +24,7 @@ public struct MainDocumentIdentity<Credential: Sendable>: Sendable {
     }
 }
 
-public struct MainDocumentResponse: Sendable {
+public struct GeminiRetrievalResponse: Sendable {
     public enum Origin: Sendable { case live, cache }
     public enum Outcome: Equatable, Sendable {
         case success(mimeType: String)
@@ -36,13 +48,13 @@ public struct MainDocumentResponse: Sendable {
     }
 }
 
-public enum MainDocumentRedirectError: Error, Equatable, Sendable {
+public enum GeminiRetrievalRedirectError: Error, Equatable, Sendable {
     case loop(URL)
     case limit(URL)
     case invalid(source: URL, meta: String)
 }
 
-public enum MainDocumentResult: Sendable {
+public enum GeminiRetrievalResult: Sendable {
     case completed
     case cancelled
     case trustDeclined
@@ -50,23 +62,23 @@ public enum MainDocumentResult: Sendable {
     case failed(error: any Error, receivedBody: Bool)
 }
 
-public enum MainDocumentEvent: Sendable {
+public enum GeminiRetrievalEvent: Sendable {
     case connecting(CapsuleEndpoint)
     case serverIdentity(PresentedServerIdentity)
     case redirect(GeminiRequestTarget)
     case loadingCachedResponse
-    case response(MainDocumentResponse)
+    case response(GeminiRetrievalResponse)
     case body(Data)
-    case finished(MainDocumentResult)
+    case finished(GeminiRetrievalResult)
 }
 
-/// Retrieves one main document, including its redirects. It owns no tab, parsing,
+/// Retrieves a response under its request-purpose policy. It owns no tab, parsing,
 /// presentation, or decision state. Each subscription owns and cancels its source.
-public struct MainDocumentRetriever<Credential: Sendable>: Sendable {
+public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
     public typealias TransportEvents = @Sendable (
         GeminiRequestTarget, Credential?, @escaping GeminiTransport.TrustAuthorization
     ) -> AsyncThrowingStream<GeminiTransportEvent, any Error>
-    public typealias IdentityResolver = @Sendable (URL) async -> MainDocumentIdentity<Credential>?
+    public typealias IdentityResolver = @Sendable (URL) async -> GeminiRetrievalIdentity<Credential>?
 
     private let transportEvents: TransportEvents
     private let cache: ContentCache?
@@ -88,12 +100,13 @@ public struct MainDocumentRetriever<Credential: Sendable>: Sendable {
     public func events(
         for target: GeminiRequestTarget,
         proxy: GeminiProxyConfiguration? = nil,
-        bypassesCache: Bool = false
-    ) -> AsyncStream<MainDocumentEvent> {
+        bypassesCache: Bool = false,
+        purpose: GeminiRetrievalPurpose = .navigation
+    ) -> AsyncStream<GeminiRetrievalEvent> {
         AsyncStream { continuation in
             let task = Task {
                 let result = await retrieve(
-                    target, proxy: proxy, bypassesCache: bypassesCache,
+                    target, proxy: proxy, bypassesCache: bypassesCache, purpose: purpose,
                     continuation: continuation
                 )
                 continuation.yield(.finished(result))
@@ -103,12 +116,45 @@ public struct MainDocumentRetriever<Credential: Sendable>: Sendable {
         }
     }
 
+    /// Collects a complete resource for workflows such as explicit downloads.
+    /// The same streaming pipeline owns redirects, credentials and cache eligibility.
+    public func response(
+        for target: GeminiRequestTarget,
+        proxy: GeminiProxyConfiguration? = nil,
+        purpose: GeminiRetrievalPurpose = .download
+    ) async throws -> ContentResponse {
+        var metadata: GeminiRetrievalResponse?
+        var body = Data()
+        for await event in events(for: target, proxy: proxy, purpose: purpose) {
+            try Task.checkCancellation()
+            switch event {
+            case .response(let response):
+                guard response.header.isSuccess else { throw GeminiRetrievalError.responseStatus(response.header) }
+                metadata = response
+            case .body(let data): body.append(data)
+            case .finished(.completed):
+                guard let metadata else { throw GeminiRetrievalError.incompleteResponse }
+                return ContentResponse(
+                    url: metadata.target.url, status: metadata.header.status, meta: Data(metadata.header.meta.utf8),
+                    mimeType: metadata.mimeType, body: body, receivedAt: metadata.receivedAt
+                )
+            case .finished(.cancelled): throw CancellationError()
+            case .finished(.trustDeclined): throw GeminiTransportError.trustDeclined
+            case .finished(.failed(let error, _)): throw error
+            default: break
+            }
+        }
+        try Task.checkCancellation()
+        throw GeminiRetrievalError.incompleteResponse
+    }
+
     private func retrieve(
         _ initialTarget: GeminiRequestTarget,
         proxy: GeminiProxyConfiguration?,
         bypassesCache: Bool,
-        continuation: AsyncStream<MainDocumentEvent>.Continuation
-    ) async -> MainDocumentResult {
+        purpose: GeminiRetrievalPurpose,
+        continuation: AsyncStream<GeminiRetrievalEvent>.Continuation
+    ) async -> GeminiRetrievalResult {
         var target = initialTarget
         var visited = Set<URL>()
         var redirects = 0
@@ -117,10 +163,10 @@ public struct MainDocumentRetriever<Credential: Sendable>: Sendable {
             while true {
                 try Task.checkCancellation()
                 guard !visited.contains(target.url) else {
-                    throw MainDocumentRedirectError.loop(target.url)
+                    throw GeminiRetrievalRedirectError.loop(target.url)
                 }
-                guard redirects <= 10 else {
-                    throw MainDocumentRedirectError.limit(target.url)
+                guard redirects <= purpose.redirectLimit else {
+                    throw GeminiRetrievalRedirectError.limit(target.url)
                 }
                 visited.insert(target.url)
                 let generation = await cache?.writeGeneration
@@ -148,7 +194,7 @@ public struct MainDocumentRetriever<Credential: Sendable>: Sendable {
                 } else {
                     events = transportEvents(target, identity?.credential, authorizeTrust)
                 }
-                var response: MainDocumentResponse?
+                var response: GeminiRetrievalResponse?
                 var cacheBody = Data()
                 var cacheDecision = ContentCacheDecision.doNotStore
                 var redirectTarget: GeminiRequestTarget?
@@ -166,13 +212,13 @@ public struct MainDocumentRetriever<Credential: Sendable>: Sendable {
                                 relativeTo: target.url
                             )?.absoluteURL,
                                   let next = GeminiRequestTarget.navigationTarget(for: url, proxy: proxy) else {
-                                throw MainDocumentRedirectError.invalid(source: target.url, meta: header.meta)
+                                throw GeminiRetrievalRedirectError.invalid(source: target.url, meta: header.meta)
                             }
                             redirectTarget = next
                             continuation.yield(.redirect(next))
                             break
                         }
-                        let outcome: MainDocumentResponse.Outcome
+                        let outcome: GeminiRetrievalResponse.Outcome
                         switch header.category {
                         case 1: outcome = .inputRequired(isSensitive: header.status == 11)
                         case 2:
@@ -183,7 +229,7 @@ public struct MainDocumentRetriever<Credential: Sendable>: Sendable {
                         case 5: outcome = .permanentFailure
                         default: outcome = .identityRequired
                         }
-                        let metadata = MainDocumentResponse(
+                        let metadata = GeminiRetrievalResponse(
                             target: target, header: header, outcome: outcome,
                             origin: cached == nil ? .live : .cache,
                             receivedAt: cached?.receivedAt ?? Date(),
