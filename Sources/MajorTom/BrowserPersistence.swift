@@ -18,6 +18,12 @@ enum SharedTrustedIdentityStore {
                 legacyFileURL: legacyFileURL
             )
         }
+        // The JSON file is the authority only until it has been imported into the
+        // database, which deletes it. Once it is gone, an unavailable database must
+        // not be replaced by a new, empty store: every capsule would then look like a
+        // first visit and a changed key would be trusted without a warning. Returning
+        // nil makes `BrowserModel.authorize` refuse the connection instead.
+        guard FileManager.default.fileExists(atPath: legacyFileURL.path) else { return nil }
         return try? TrustedIdentityStore(fileURL: legacyFileURL)
     }()
 }

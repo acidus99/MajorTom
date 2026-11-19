@@ -228,6 +228,32 @@ final class ServerTrustPolicyTests: XCTestCase {
         XCTAssertNil(removedIdentity)
     }
 
+    func testTrustDecisionThatCannotBeSavedIsNotKeptInMemory() async throws {
+        // Prevents a failed save from leaving a pin in memory only: the next connection
+        // would be allowed silently, and the pin would vanish at the next launch.
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MajorTomTrustTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // A regular file where the store expects its parent directory makes every save
+        // fail without needing a special test hook.
+        let blocker = directory.appendingPathComponent("not-a-directory")
+        try Data("x".utf8).write(to: blocker)
+        let file = blocker.appendingPathComponent("trusted-identities.json")
+
+        let store = try TrustedIdentityStore(fileURL: file)
+        let presented = validIdentity(fingerprint: fingerprint)
+
+        do {
+            try await store.trust(presented, source: .user, at: now)
+            XCTFail("Saving beneath a regular file should fail")
+        } catch {
+            // Expected: the decision could not be written.
+        }
+        let remembered = await store.identity(for: endpoint)
+        XCTAssertNil(remembered)
+    }
+
     func testImportedTrustAddsOnlyMissingDecisions() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("MajorTomTrustTests-\(UUID().uuidString)", isDirectory: true)

@@ -59,6 +59,8 @@ public actor TrustedIdentityStore {
         source: TrustedServerIdentity.Source,
         at date: Date = Date()
     ) throws {
+        // Kept so a decision that fails to reach disk can be undone in memory.
+        let recordsBeforeChange = records
         let decisionChanged: Bool
         if var existing = records[presented.endpoint],
            existing.publicKeySHA256.caseInsensitiveCompare(presented.publicKeySHA256) == .orderedSame {
@@ -96,7 +98,15 @@ public actor TrustedIdentityStore {
         if decisionChanged {
             pendingSightingFlush?.cancel()
             pendingSightingFlush = nil
-            try persist()
+            do {
+                try persist()
+            } catch {
+                // A decision that was not saved must not be honoured from memory. If it
+                // were, the next connection would be allowed silently and the pin would
+                // then vanish at the next launch.
+                records = recordsBeforeChange
+                throw error
+            }
             changeHandler?(sortedIdentities())
         } else {
             scheduleSightingFlush()
@@ -115,6 +125,7 @@ public actor TrustedIdentityStore {
         source: TrustedServerIdentity.Source = .user,
         at date: Date = Date()
     ) throws -> Int {
+        let recordsBeforeChange = records
         var additions = 0
         for presented in presentedIdentities where records[presented.endpoint] == nil {
             records[presented.endpoint] = TrustedServerIdentity(
@@ -132,7 +143,12 @@ public actor TrustedIdentityStore {
         guard additions > 0 else { return 0 }
         pendingSightingFlush?.cancel()
         pendingSightingFlush = nil
-        try persist()
+        do {
+            try persist()
+        } catch {
+            records = recordsBeforeChange
+            throw error
+        }
         changeHandler?(sortedIdentities())
         return additions
     }
@@ -165,10 +181,16 @@ public actor TrustedIdentityStore {
     }
 
     public func removeTrust(for endpoint: CapsuleEndpoint) throws {
+        let recordsBeforeChange = records
         records.removeValue(forKey: endpoint)
         pendingSightingFlush?.cancel()
         pendingSightingFlush = nil
-        try persist()
+        do {
+            try persist()
+        } catch {
+            records = recordsBeforeChange
+            throw error
+        }
         changeHandler?(sortedIdentities())
     }
 
@@ -179,8 +201,14 @@ public actor TrustedIdentityStore {
         guard retained.count != records.count else { return }
         pendingSightingFlush?.cancel()
         pendingSightingFlush = nil
+        let recordsBeforeChange = records
         records = retained
-        try persist()
+        do {
+            try persist()
+        } catch {
+            records = recordsBeforeChange
+            throw error
+        }
         changeHandler?(sortedIdentities())
     }
 
