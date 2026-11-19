@@ -9,7 +9,6 @@ private let browserNavigationLogger = Logger(subsystem: "dev.gemi.major-tom", ca
 public final class BrowserSession: ObservableObject {
     public enum HistoryDisposition: Equatable { case new, reload, traversal }
     private struct LoadedInlineImage { let mimeType: String; let byteCount: Int }
-    private struct DecodedDataImage { let data: Data; let mimeType: String }
     public struct InputPrompt: Identifiable {
         public let id = UUID()
         public let target: GeminiRequestTarget
@@ -85,7 +84,9 @@ public final class BrowserSession: ObservableObject {
     public var downloadURL: ((URL) -> Void)?
     private let services: BrowserSessionServices
     private let presentation: any BrowserPresentationSink
-    private var renderer = HTMLDocumentStreamRenderer()
+    private var documentRenderer = BrowserDocumentRenderer(style: BrowserContentStyle(
+        css: ContentThemeStylesheets.base, palette: .fallback, appearance: .dark
+    ))
     private var lastPreferences: BrowserPreferences
     private var backForwardCache: BackForwardCacheStore? { services.backForwardCache }
     private var navigationTask: Task<Void, Never>?
@@ -125,6 +126,8 @@ public final class BrowserSession: ObservableObject {
     private var hasStarted = false
     private var currentSourceBytes = Data()
     private var currentMIMEType = ""
+    private var currentCompletion = PageCompletionState.complete
+    private var streamingBody: BrowserResponseBody?
     /// Tracks what has named the current document while the opening Gemtext lines stream
     /// in. A heading can replace an earlier preformatted caption; discovery is limited to
     /// the first fifteen Gemtext lines.
@@ -134,7 +137,6 @@ public final class BrowserSession: ObservableObject {
     private var inlineImageURLs: [String: URL] = [:]
     private var imageViewportTopInset: Double = 0
     private var imagePageStartedAt = ContinuousClock.now
-    private var linkSequence = 0
     private var expandedInlineImages: Set<String> = []
     private var expandableImageLines: [URL: String] = [:]
     private var slowDownTask: Task<Void, Never>?
@@ -288,7 +290,7 @@ public final class BrowserSession: ObservableObject {
             openFile(committedURL, disposition: .reload)
             return
         }
-        if let committedURL, decodedDataImage(committedURL.absoluteString) != nil {
+        if let committedURL, InlineDataImagePayload.decode(committedURL.absoluteString) != nil {
             openDataImage(committedURL, disposition: .reload)
             return
         }
@@ -320,6 +322,7 @@ public final class BrowserSession: ObservableObject {
         slowDownTask = nil
         documentContinuation?.finish()
         documentContinuation = nil
+        streamingBody = nil
         documentBuffer.removeAll(keepingCapacity: false)
         activeWebDocumentURL = nil
         presentation.invalidateDocument()
@@ -451,6 +454,7 @@ public final class BrowserSession: ObservableObject {
         // entry of a fully loaded page as .stopped and dropped its title.
         guard wasLoading else { return }
 
+        if let committedURL { finishStreamingBody(at: committedURL) }
         finishCurrentDocument(message: "Loading was stopped.")
         if wasStreamingIntoDocument, let committedURL, !currentSourceBytes.isEmpty {
             cache(CachedPage(
@@ -652,7 +656,7 @@ public final class BrowserSession: ObservableObject {
     ) {
         guard let sourceURL = ViewSourceURL.wrap(resourceURL) else { return }
         abandonScrollRestoration(for: disposition)
-        renderSourceDocument(bytes, at: sourceURL)
+        renderSourceDocument(bytes, at: sourceURL, mimeType: mimeType)
         let heading = "Source: \(displayTitle(for: resourceURL))"
         // commit() resets the title, so the heading is applied after it.
         commit(sourceURL, disposition: disposition)
@@ -678,27 +682,8 @@ public final class BrowserSession: ObservableObject {
         navigationTask = nil
     }
 
-    private func renderSourceDocument(_ bytes: Data, at sourceURL: URL) {
-        let source = String(decoding: bytes, as: UTF8.self)
-        let continuation = beginDocument(at: sourceURL)
-        continuation.yield(renderer.documentStart(themeCSS: themeCSS, kind: .source, appearance: themeAppearance))
-        continuation.yield(Data(HTMLDocumentStreamRenderer.sourceStart.utf8))
-
-        // Batch lines so a large source is a few dozen scheme-handler writes rather
-        // than one per line, while still streaming.
-        var batch = ""
-        for line in SourceLineSplitter.lines(of: source) {
-            batch += HTMLDocumentStreamRenderer.sourceLine(line)
-            if batch.utf8.count >= 32 * 1_024 {
-                continuation.yield(Data(batch.utf8))
-                batch = ""
-            }
-        }
-        if !batch.isEmpty { continuation.yield(Data(batch.utf8)) }
-
-        continuation.yield(Data(HTMLDocumentStreamRenderer.sourceEnd.utf8))
-        continuation.yield(renderer.documentEnd())
-        continuation.finish()
+    private func renderSourceDocument(_ bytes: Data, at sourceURL: URL, mimeType: String) {
+        renderResponse(bytes, mimeType: mimeType, at: sourceURL)
     }
 
     public func updateHoveredLink(_ href: String?, modifiers: LinkModifierKeys = []) {
@@ -812,7 +797,7 @@ public final class BrowserSession: ObservableObject {
             openFile(url, disposition: .traversal)
             return
         }
-        if decodedDataImage(url.absoluteString) != nil {
+        if InlineDataImagePayload.decode(url.absoluteString) != nil {
             openDataImage(url, disposition: .traversal)
             return
         }
@@ -866,7 +851,7 @@ public final class BrowserSession: ObservableObject {
         var responseHeader: GeminiResponseHeader?
         var mimeType = ""
         var sourceBytes = Data()
-        var bodyInterpreter = BrowserResponseBody(kind: .unsupported)
+        var bodyKind = BrowserContentKind.unsupported
         var contentStarted = false
 
         var sentClientCertificate: ClientCertificateDescriptor?
@@ -1013,30 +998,22 @@ public final class BrowserSession: ObservableObject {
                     usedClientCertificate = responseIsCached ? nil : sentClientCertificate
 
                     mimeType = response.mimeType
-                    bodyInterpreter = BrowserResponseBody(kind: BrowserContentKind(
-                        mimeType: mimeType, url: target.url, showsSource: renderAsSource
-                    ))
+                    bodyKind = BrowserContentKind(mimeType: mimeType, url: target.url, showsSource: renderAsSource)
                     if renderAsSource {
                         // No document is begun and nothing is committed yet: the source
                         // view needs the complete text, so a fetch that fails partway
                         // leaves the page currently on screen untouched.
                         statusText = "Receiving source\u{2026}"
-                    } else if bodyInterpreter.kind.streamsText {
+                    } else if bodyKind.streamsText {
                         currentSourceBytes = Data()
                         currentMIMEType = mimeType
+                        currentCompletion = .complete
                         canSavePage = false
                         canShowSource = false
                         let continuation = beginDocument(at: target.url)
+                        streamingBody = BrowserResponseBody(kind: bodyKind)
                         documentContinuation = continuation
-                        continuation.yield(renderer.documentStart(
-                            themeCSS: themeCSS,
-                            baseURL: target.url,
-                            kind: bodyInterpreter.kind == .gemtext ? .gemtext : .plainText,
-                            appearance: themeAppearance
-                        ))
-                        if bodyInterpreter.kind == .plainText {
-                            continuation.yield(renderer.beginPlainText())
-                        }
+                        continuation.yield(documentRenderer.start(kind: bodyKind, at: target.url))
                         commit(target.url, disposition: disposition)
                         contentStarted = true
                         statusText = "Receiving \(mimeType)…"
@@ -1050,7 +1027,7 @@ public final class BrowserSession: ObservableObject {
                     if contentStarted { currentSourceBytes = sourceBytes }
                     // Source view renders once, from the finished bytes.
                     guard !renderAsSource else { continue }
-                    emit(bodyInterpreter.receive(data), baseURL: target.url)
+                    emit(streamingBody?.receive(data) ?? [], baseURL: target.url)
                     flushDocument()
 
                 case .finished(let result):
@@ -1082,12 +1059,11 @@ public final class BrowserSession: ObservableObject {
                         )
                         return
                     }
-                    if bodyInterpreter.kind.streamsText {
+                    if bodyKind.streamsText {
                         displayedSuccessfulContent = true
-                        emit(bodyInterpreter.finish(), baseURL: target.url)
-                        if bodyInterpreter.kind == .plainText { yieldToDocument(renderer.endPlainText()) }
+                        finishStreamingBody(at: target.url)
                         finishCurrentDocument()
-                    } else if bodyInterpreter.kind == .image {
+                    } else if bodyKind == .image {
                         displayedSuccessfulContent = true
                         showImagePage(data: sourceBytes, mimeType: mimeType, url: target.url, disposition: disposition)
                     } else {
@@ -1163,8 +1139,7 @@ public final class BrowserSession: ObservableObject {
         } catch {
             guard !Task.isCancelled else { return }
             if contentStarted {
-                emit(bodyInterpreter.finish(), baseURL: target.url)
-                if bodyInterpreter.kind == .plainText { yieldToDocument(renderer.endPlainText()) }
+                finishStreamingBody(at: target.url)
                 finishCurrentDocument(message: "The connection ended before the response completed: \(friendly(error))")
                 currentSourceBytes = sourceBytes
                 currentMIMEType = mimeType
@@ -1206,7 +1181,7 @@ public final class BrowserSession: ObservableObject {
     public func canOpenInApp(_ url: URL) -> Bool {
         url.isFileURL
             || makeTarget(for: url) != nil
-            || decodedDataImage(url.absoluteString) != nil
+            || InlineDataImagePayload.decode(url.absoluteString) != nil
     }
 
     public func openLink(_ url: URL) {
@@ -1216,7 +1191,7 @@ public final class BrowserSession: ObservableObject {
         } else if url.isFileURL {
             // Relative links inside a local document resolve to file URLs.
             openFile(url)
-        } else if decodedDataImage(url.absoluteString) != nil {
+        } else if InlineDataImagePayload.decode(url.absoluteString) != nil {
             openDataImage(url)
         } else {
             openExternalURL(url)
@@ -1227,7 +1202,7 @@ public final class BrowserSession: ObservableObject {
         _ url: URL,
         disposition: HistoryDisposition = .new
     ) {
-        guard let decoded = decodedDataImage(url.absoluteString) else { return }
+        guard let decoded = InlineDataImagePayload.decode(url.absoluteString) else { return }
         beginNavigation(disposition: disposition)
 
         currentSourceBytes = decoded.data
@@ -1285,10 +1260,16 @@ public final class BrowserSession: ObservableObject {
         documentBuffer.removeAll(keepingCapacity: true)
     }
 
+    private func finishStreamingBody(at url: URL) {
+        guard var body = streamingBody else { return }
+        streamingBody = nil
+        emit(body.finish(), baseURL: url)
+    }
+
     private func finishCurrentDocument(message: String? = nil) {
         guard let continuation = documentContinuation else { return }
         flushDocument()
-        continuation.yield(renderer.documentEnd(incompleteMessage: message))
+        continuation.yield(documentRenderer.finish(message: message))
         continuation.finish()
         documentContinuation = nil
         documentBuffer.removeAll(keepingCapacity: false)
@@ -1302,28 +1283,10 @@ public final class BrowserSession: ObservableObject {
         disposition: HistoryDisposition,
         archiveURL: URL? = nil
     ) {
+        currentCompletion = .complete
         let continuation = beginDocument(at: url)
-        continuation.yield(renderer.documentStart(
-            themeCSS: themeCSS,
-            baseURL: url,
-            kind: .message,
-            appearance: themeAppearance
-        ))
-        continuation.yield(renderer.renderMessage(title: title, message: message, details: details))
-        // Rendered through the ordinary link renderer, so it looks and behaves like any
-        // other Gemtext link: the navigation decider handles the click with no extra
-        // machinery, and it picks up the usual hint glyph.
-        if let archiveURL {
-            continuation.yield(renderer.render(
-                .link(
-                    destination: archiveURL.absoluteString,
-                    label: "Check for previous versions of this page"
-                ),
-                options: services.preferences().renderingOptions,
-                baseURL: url
-            ))
-        }
-        continuation.yield(renderer.documentEnd())
+        continuation.yield(documentRenderer.message(title: title, message: message, details: details,
+            at: url, archiveURL: archiveURL, preferences: services.preferences()))
         continuation.finish()
         commit(url, disposition: disposition)
         currentSourceBytes = Data()
@@ -1335,18 +1298,8 @@ public final class BrowserSession: ObservableObject {
         navigationTask = nil
     }
 
-    private func showImagePage(
-        data: Data,
-        mimeType: String,
-        url: URL,
-        disposition: HistoryDisposition
-    ) {
-        let continuation = beginDocument(at: url)
-        continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: url, kind: .image, appearance: themeAppearance))
-        let source = URL(string: "data:\(mimeType);base64,\(data.base64EncodedString())")!
-        continuation.yield(renderer.renderStandaloneImage(source: source))
-        continuation.yield(renderer.documentEnd())
-        continuation.finish()
+    private func showImagePage(data: Data, mimeType: String, url: URL, disposition: HistoryDisposition) {
+        renderResponse(data, mimeType: mimeType, at: url)
         commit(url, disposition: disposition)
     }
 
@@ -1414,6 +1367,7 @@ public final class BrowserSession: ObservableObject {
         locationText = cached.url.absoluteString
         currentSourceBytes = cached.body
         currentMIMEType = cached.mimeType
+        currentCompletion = cached.completion
         // Successful body-bearing cache entries from older releases predate persisted
         // headers. Gemini defines 20 as the ordinary success response, so retain useful
         // Page Info for those sessions while preserving exact 2x codes going forward.
@@ -1430,7 +1384,7 @@ public final class BrowserSession: ObservableObject {
         canSavePage = !cached.body.isEmpty
         canShowSource = cached.mimeType.hasPrefix("text/") && !ViewSourceURL.isViewSource(cached.url)
         if ViewSourceURL.isViewSource(cached.url) {
-            renderSourceDocument(cached.body, at: cached.url)
+            renderSourceDocument(cached.body, at: cached.url, mimeType: cached.mimeType)
         } else {
             renderCurrentContent()
         }
@@ -1442,6 +1396,7 @@ public final class BrowserSession: ObservableObject {
     }
 
     private func cache(_ page: CachedPage) {
+        currentCompletion = page.completion
         guard currentResponseCanBeCached, !isClearingBrowsingData else { return }
         if page.clientCertificateID == nil {
             navigation.cache(page)
@@ -1615,142 +1570,54 @@ public final class BrowserSession: ObservableObject {
 
     private func renderCurrentContent() {
         guard let url = committedURL else { return }
-        let kind = BrowserContentKind(mimeType: currentMIMEType, url: url)
-        switch kind {
-        case .source:
-            renderSourceDocument(currentSourceBytes, at: url)
-        case .gemtext, .plainText:
-            let continuation = beginDocument(at: url)
-            documentContinuation = continuation
-            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: url,
-                kind: kind == .gemtext ? .gemtext : .plainText, appearance: themeAppearance))
-            if kind == .plainText { continuation.yield(renderer.beginPlainText()) }
-            emit(BrowserResponseBody.events(for: currentSourceBytes, kind: kind), baseURL: url)
-            if kind == .plainText { yieldToDocument(renderer.endPlainText()) }
-            finishCurrentDocument()
-        case .image:
-            showImagePage(data: currentSourceBytes, mimeType: currentMIMEType, url: url, disposition: .reload)
-        case .unsupported:
-            let continuation = beginDocument(at: url)
-            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: url,
-                kind: .message, appearance: themeAppearance))
-            continuation.yield(renderer.renderMessage(title: "Unsupported Content",
-                message: "Major Tom cannot display this response type yet. No file was downloaded.",
-                details: "\(currentMIMEType.isEmpty ? responseMeta : currentMIMEType)\n\(currentSourceBytes.count) bytes"))
-            continuation.yield(renderer.documentEnd())
-            continuation.finish()
+        renderResponse(currentSourceBytes, mimeType: currentMIMEType, at: url,
+            responseMeta: responseMeta, completion: currentCompletion)
+    }
+
+    private func renderResponse(_ bytes: Data, mimeType: String, at url: URL,
+                                responseMeta: String? = nil, completion: PageCompletionState = .complete) {
+        currentCompletion = completion
+        let continuation = beginDocument(at: url)
+        documentContinuation = continuation
+        documentRenderer.renderComplete(bytes, mimeType: mimeType, at: url, responseMeta: responseMeta,
+            preferences: services.preferences(), imagesPaused: automaticImagesPaused, completion: completion) { fragment in
+            consume(fragment)
         }
+        flushDocument()
+        continuation.finish()
+        documentContinuation = nil
+        documentBuffer.removeAll(keepingCapacity: false)
     }
 
     private func historySwipeDocument(_ cached: CachedPage?, entry: BackForwardEntry) -> Data {
-        let renderer = HTMLDocumentStreamRenderer(contentPalette: contentPalette)
+        // Preview styling cannot inherit the active document's hidden restoration state.
+        let renderer = BrowserDocumentRenderer(style: services.contentStyle(pageZoom, false, imageViewportTopInset))
         guard let cached else {
-            var document = renderer.documentStart(
-                themeCSS: themeCSS,
-                baseURL: entry.url,
-                kind: .history,
-                appearance: themeAppearance
-            )
-            document.append(Data("<h1>\(HTMLDocumentStreamRenderer.escape(entry.title ?? displayTitle(for: entry.url)))</h1>".utf8))
-            document.append(renderer.documentEnd())
-            return document
+            return renderer.historyPlaceholder(title: entry.title ?? displayTitle(for: entry.url), at: entry.url)
         }
-
-        let kind = BrowserContentKind(mimeType: cached.mimeType, url: cached.url)
-        let documentKind: HTMLDocumentKind
-        switch kind {
-        case .gemtext: documentKind = .gemtext
-        case .plainText: documentKind = .plainText
-        case .source: documentKind = .source
-        case .image: documentKind = .image
-        case .unsupported: documentKind = .message
-        }
-        var document = renderer.documentStart(themeCSS: themeCSS, baseURL: cached.url,
-            kind: documentKind, appearance: themeAppearance)
-        if kind == .source {
-            document.append(Data(HTMLDocumentStreamRenderer.sourceStart.utf8))
-            for line in SourceLineSplitter.lines(of: String(decoding: cached.body, as: UTF8.self)) {
-                document.append(Data(HTMLDocumentStreamRenderer.sourceLine(line).utf8))
-            }
-            document.append(Data(HTMLDocumentStreamRenderer.sourceEnd.utf8))
-        } else if kind.streamsText {
-            if kind == .plainText { document.append(renderer.beginPlainText()) }
-            for event in BrowserResponseBody.events(for: cached.body, kind: kind) {
-                switch event {
-                case .gemtext(let semantic):
-                    document.append(renderer.render(semantic, options: services.preferences().renderingOptions, baseURL: cached.url))
-                case .text(let text): document.append(renderer.renderPlainTextChunk(text))
-                }
-            }
-            if kind == .plainText { document.append(renderer.endPlainText()) }
-        } else if kind == .image {
-            let source = URL(string: "data:\(cached.mimeType);base64,\(cached.body.base64EncodedString())")!
-            document.append(renderer.renderStandaloneImage(source: source))
-        } else {
-            document.append(renderer.renderMessage(title: "Unsupported Content",
-                message: "Major Tom cannot display this response type yet. No file was downloaded.",
-                details: "\(cached.mimeType.isEmpty ? cached.responseMeta ?? "" : cached.mimeType)\n\(cached.body.count) bytes"))
-        }
-        document.append(renderer.documentEnd())
-        return document
+        var data = Data()
+        renderer.renderComplete(cached.body, mimeType: cached.mimeType, at: cached.url,
+            responseMeta: cached.responseMeta, preferences: services.preferences(), imagesPaused: true,
+            isPreview: true, completion: cached.completion) { data.append($0.data) }
+        return data
     }
 
     private func emit(_ events: [BrowserBodyEvent], baseURL: URL) {
         for event in events {
-            switch event {
-            case .gemtext(let semantic): emit(semantic, baseURL: baseURL)
-            case .text(let text): yieldToDocument(renderer.renderPlainTextChunk(text))
-            }
+            consume(documentRenderer.render(event, at: baseURL, preferences: services.preferences(), imagesPaused: automaticImagesPaused))
         }
     }
 
-    private func emit(_ event: GemtextEvent, baseURL: URL) {
-        if titleClaim.receive(event), let claimed = titleClaim.title {
-            title = claimed
-            documentTitle = claimed
+    private func consume(_ fragment: BrowserRenderedFragment) {
+        if let semantic = fragment.semantic, titleClaim.receive(semantic), let title = titleClaim.title {
+            self.title = title
+            documentTitle = title
         }
-        var linkIdentifier: String?
-        var isExpandableImage = false
-        var imageLoading: SameCapsuleImageLoading = .off
-        if case .link(let destination, _) = event {
-            linkSequence += 1
-            linkIdentifier = "mt-link-\(linkSequence)"
-            isExpandableImage = GemtextLinkHint.isInlineImageCandidate(destination: destination, relativeTo: baseURL)
-            if isExpandableImage,
-               let url = URL(string: destination, relativeTo: baseURL)?.absoluteURL,
-               let linkIdentifier {
-                expandableImageLines[url] = linkIdentifier
-                inlineImageURLs[linkIdentifier] = url
-                if !automaticImagesPaused, isSameCapsule(url, baseURL) {
-                    imageLoading = services.preferences().sameCapsuleImageLoading
-                }
-            }
+        if let link = fragment.expandableLink {
+            expandableImageLines[link.url] = link.identifier
+            inlineImageURLs[link.identifier] = link.url
         }
-        yieldToDocument(renderer.render(
-            event,
-            options: services.preferences().renderingOptions,
-            baseURL: baseURL,
-            linkIdentifier: linkIdentifier,
-            isExpandableImage: isExpandableImage,
-            imageLoading: imageLoading
-        ))
-        // Network images are submitted by the page after their link has been parsed.
-        // Data images already contain their bytes and never enter the requestor.
-        guard case .link(let destination, let label) = event,
-              services.preferences().automaticallyLoadsDataImages,
-              destination.lowercased().hasPrefix("data:image/"),
-              let dataURL = URL(string: destination) else { return }
-        let fileName = label ?? "Inline image"
-        let metadata = inlineDataImageMetadata(destination)
-        yieldToDocument(renderer.renderInlineImage(
-            resourceURL: dataURL,
-            linkURL: dataURL,
-            altText: fileName,
-            figureIdentifier: "mt-inline-\(linkIdentifier ?? String(linkSequence))",
-            fileName: fileName,
-            mimeType: metadata?.mimeType,
-            sizeDescription: metadata.map { formattedByteCount($0.byteCount) }
-        ))
+        yieldToDocument(fragment.data)
     }
 
     public func handleInlineImageMessage(lineIdentifier: String, url: URL, action: String, documentURL: URL) {
@@ -1818,28 +1685,6 @@ public final class BrowserSession: ObservableObject {
         ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
     }
 
-    private func inlineDataImageMetadata(_ source: String) -> LoadedInlineImage? {
-        guard let decoded = decodedDataImage(source) else { return nil }
-        return LoadedInlineImage(mimeType: decoded.mimeType, byteCount: decoded.data.count)
-    }
-
-    private func decodedDataImage(_ source: String) -> DecodedDataImage? {
-        guard let comma = source.firstIndex(of: ",") else { return nil }
-        let header = String(source[..<comma])
-        guard header.lowercased().hasPrefix("data:image/") else { return nil }
-        let mimeType = header.dropFirst("data:".count).split(separator: ";", maxSplits: 1)
-            .first.map(String.init)?.lowercased() ?? "image/*"
-        let payload = String(source[source.index(after: comma)...])
-        let data: Data?
-        if header.lowercased().contains(";base64") {
-            data = Data(base64Encoded: payload, options: .ignoreUnknownCharacters)
-        } else {
-            data = payload.removingPercentEncoding?.data(using: .utf8)
-        }
-        guard let data else { return nil }
-        return DecodedDataImage(data: data, mimeType: mimeType)
-    }
-
     private func refreshFavicon(forCapsuleAt url: URL) async {
         guard !isClearingBrowsingData else { return }
         let generation = browsingDataGeneration
@@ -1896,7 +1741,6 @@ public final class BrowserSession: ObservableObject {
         BrowserPageTitle.fallback(for: url)
     }
 
-
     public var canCheckArchive: Bool {
         committedURL.map { DeloreanArchive.captures(of: $0) != nil } ?? false
     }
@@ -1946,10 +1790,10 @@ public final class BrowserSession: ObservableObject {
         imageTasks.values.forEach { $0.cancel() }
         imageTasks.removeAll()
         documentContinuation?.finish()
-        renderer = HTMLDocumentStreamRenderer(contentPalette: contentPalette)
+        streamingBody = nil
+        documentRenderer = BrowserDocumentRenderer(style: contentStyle)
         documentContinuation = nil
         documentBuffer.removeAll(keepingCapacity: false)
-        linkSequence = 0
         expandedInlineImages.removeAll()
         expandableImageLines.removeAll()
         inlineImageURLs.removeAll()
@@ -2024,10 +1868,8 @@ public final class BrowserSession: ObservableObject {
         let figure = "mt-inline-\(lineIdentifier)"
         let name = inlineImageFileName(for: url, fallback: nil)
         let resource = presentation.createImageResource()
-        let html = String(decoding: renderer.renderInlineImage(
-            resourceURL: resource.url, linkURL: url, altText: name, figureIdentifier: figure,
-            fileName: name, figureClass: "inline-image"
-        ), as: UTF8.self)
+        let html = documentRenderer.inlineImage(resourceURL: resource.url, linkURL: url,
+            figureIdentifier: figure, fileName: name)
         await presentation.updateDocument(.insertImage(line: lineIdentifier, figure: html), at: documentURL)
         let metadata = await loadInlineImage(url, lineIdentifier: lineIdentifier, prioritize: prioritize, resource: resource)
         guard !Task.isCancelled, activeWebDocumentURL == documentURL else { return }
@@ -2081,9 +1923,6 @@ public final class BrowserSession: ObservableObject {
             && (navigation.currentEntry?.presentation).map(Self.needsPresentationRestoration) == true
         return services.contentStyle(pageZoom, hides, imageViewportTopInset)
     }
-    private var contentPalette: ContentThemePalette { contentStyle.palette }
-    private var themeAppearance: ContentThemeAppearance { contentStyle.appearance }
-    private var themeCSS: String { contentStyle.css }
 }
 
 private extension NavigationState.Disposition {

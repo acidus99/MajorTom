@@ -64,5 +64,5 @@ Use WebKit tests for CSP, theme resolution, contrast, accessibility structure, l
 updates, selection, and stale document messages. Check both content appearances and
 multiple widths/zoom levels. Do not assert copied HTML/CSS implementation literals.
 
-Code landmarks: `HTMLDocumentStreamRenderer.swift`, `ContentTheme.swift`, and the
+Code landmarks: `BrowserDocumentRenderer.swift`, `HTMLDocumentStreamRenderer.swift`, `ContentTheme.swift`, and the
 presentation scripts and `ContentThemeResolver.swift` in AppKitSupport.

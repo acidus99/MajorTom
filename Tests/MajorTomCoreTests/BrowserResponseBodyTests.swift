@@ -46,4 +46,14 @@ final class BrowserResponseBodyTests: XCTestCase {
             XCTAssertTrue(BrowserResponseBody.events(for: Data([0xFF, 0x00, 0x1B, 0x3C]), kind: kind).isEmpty)
         }
     }
+
+    func testEmbeddedImageInterpretationPreservesBytesAndRejectsOtherSchemes() {
+        let bytes = Data([0, 255, 1, 2])
+        let encoded = "data:image/png;base64,\(bytes.base64EncodedString())"
+        XCTAssertEqual(InlineDataImagePayload.decode(encoded)?.data, bytes)
+        XCTAssertEqual(InlineDataImagePayload.decode(encoded)?.mimeType, "image/png")
+        XCTAssertEqual(InlineDataImagePayload.decode("data:image/svg+xml,%3Csvg%3E%3C%2Fsvg%3E")?.data, Data("<svg></svg>".utf8))
+        XCTAssertNil(InlineDataImagePayload.decode("data:text/html,<script>fixture</script>"))
+        XCTAssertNil(InlineDataImagePayload.decode("gemini://example.invalid/image.png"))
+    }
 }

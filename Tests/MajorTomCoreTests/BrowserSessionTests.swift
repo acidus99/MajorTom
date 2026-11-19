@@ -52,7 +52,7 @@ final class BrowserSessionTests: XCTestCase {
         fixture.source.sendBody(0, Data([0x9A, 0x80]))
         XCTAssertFalse(fixture.session.isLoading)
         XCTAssertEqual(fixture.session.sourceBytes, partial)
-        XCTAssertEqual(fixture.session.restorationState.cachedPages.first?.completion, .stopped)
+        XCTAssertEqual(fixture.session.restorationState.cachedPages.first(where: { $0.url == fixture.a })?.completion, .stopped)
         XCTAssertTrue(fixture.visits.isEmpty)
     }
 
@@ -94,8 +94,14 @@ final class BrowserSessionTests: XCTestCase {
             defer { fixture.close() }
             let bytes = Data("# Exact fixture for \(mime)\n".utf8)
             await fixture.load(fixture.a, mime: mime, bytes: bytes)
+            let liveURL = try XCTUnwrap(fixture.session.activeWebDocumentURL)
+            await fixture.surface.waitForCompletedLoad(liveURL)
+            let live = fixture.surface.documents[liveURL]
             await fixture.load(fixture.b, mime: "text/plain", bytes: Data("other".utf8))
             fixture.session.goBack()
+            let replayURL = try XCTUnwrap(fixture.session.activeWebDocumentURL)
+            await fixture.surface.waitForCompletedLoad(replayURL)
+            XCTAssertEqual(fixture.surface.documents[replayURL], live, "Live and retained \(mime) must produce equivalent presentation")
             XCTAssertEqual(fixture.session.committedURL, fixture.a)
             XCTAssertEqual(fixture.session.sourceBytes, bytes)
             XCTAssertEqual(fixture.session.mimeType, mime)
@@ -207,6 +213,31 @@ final class BrowserSessionTests: XCTestCase {
             await fixture.source.waitForTermination(1)
             XCTAssertEqual(fixture.session.sourceBytes, original)
         }
+    }
+
+    @MainActor
+    func testStopFinishesUnterminatedTextAndReplaysTheSameStoppedDocument() async throws {
+        let fixture = SessionFixture()
+        defer { fixture.close() }
+        let bytes = Data("# Finished heading\nPartial tail 🚀".utf8)
+        fixture.session.openLink(fixture.a)
+        await fixture.source.waitForRequests(1)
+        fixture.source.send(0, status: 20, meta: "text/gemini", chunks: [bytes], completes: false)
+        await fixture.wait { fixture.session.sourceBytes == bytes }
+        fixture.session.stop()
+        XCTAssertEqual(fixture.session.title, "Finished heading")
+        let liveURL = try XCTUnwrap(fixture.session.activeWebDocumentURL)
+        await fixture.surface.waitForCompletedLoad(liveURL)
+        let live = fixture.surface.documents[liveURL]
+        XCTAssertTrue(String(decoding: try XCTUnwrap(live), as: UTF8.self).contains("Partial tail 🚀"),
+            "Stop must present the unfinished last source line")
+        await fixture.load(fixture.b, mime: "text/plain", bytes: Data("other".utf8))
+        fixture.session.goBack()
+        let replayURL = try XCTUnwrap(fixture.session.activeWebDocumentURL)
+        await fixture.surface.waitForCompletedLoad(replayURL)
+        XCTAssertEqual(fixture.surface.documents[replayURL], live)
+        XCTAssertEqual(fixture.session.sourceBytes, bytes)
+        XCTAssertEqual(fixture.session.restorationState.cachedPages.first(where: { $0.url == fixture.a })?.completion, .stopped)
     }
 
     @MainActor

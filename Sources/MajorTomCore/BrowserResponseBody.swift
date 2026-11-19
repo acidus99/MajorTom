@@ -53,3 +53,23 @@ public struct BrowserResponseBody: Sendable {
         return body.receive(bytes) + body.finish()
     }
 }
+
+/// Decoding an embedded image is content interpretation, independent of retrieval.
+public struct InlineDataImagePayload: Sendable {
+    public let data: Data
+    public let mimeType: String
+
+    public static func decode(_ source: String) -> InlineDataImagePayload? {
+        guard let comma = source.firstIndex(of: ",") else { return nil }
+        let header = String(source[..<comma])
+        guard header.lowercased().hasPrefix("data:image/") else { return nil }
+        let mime = header.dropFirst("data:".count).split(separator: ";", maxSplits: 1)
+            .first.map(String.init)?.lowercased() ?? "image/*"
+        let payload = String(source[source.index(after: comma)...])
+        let bytes: Data?
+        if header.lowercased().contains(";base64") { bytes = Data(base64Encoded: payload, options: .ignoreUnknownCharacters) }
+        else { bytes = payload.removingPercentEncoding?.data(using: .utf8) }
+        guard let bytes else { return nil }
+        return InlineDataImagePayload(data: bytes, mimeType: mime)
+    }
+}
