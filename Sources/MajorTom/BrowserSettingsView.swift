@@ -289,7 +289,7 @@ private struct DataManagementSettingsView: View {
     @ObservedObject private var browsingData = BrowsingDataController.shared
     @State private var browsingRange: BrowsingDataTimeRange = .last24Hours
     @State private var cacheRange: BrowsingDataTimeRange = .last24Hours
-    @State private var isDeletingUserData = false
+    @ObservedObject private var userDataDeletion = UserDataDeletion.workflow
 
     var body: some View {
         Form {
@@ -323,7 +323,7 @@ private struct DataManagementSettingsView: View {
                             confirmDeleteUserData()
                         }
                         .help("Permanently delete bookmarks, client identities, and local capsule trust, and reset the homepage.")
-                        if isDeletingUserData {
+                        if userDataDeletion.isDeleting {
                             ProgressView().controlSize(.small)
                             Text("Deleting…").foregroundStyle(.secondary)
                         }
@@ -332,7 +332,7 @@ private struct DataManagementSettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .disabled(browsingData.isClearing || isDeletingUserData)
+        .disabled(browsingData.isClearing || userDataDeletion.isDeleting)
     }
 
     private func clearingRow(_ action: BrowsingDataAction, range: Binding<BrowsingDataTimeRange>) -> some View {
@@ -389,17 +389,14 @@ private struct DataManagementSettingsView: View {
     }
 
     private func deleteUserData() async {
-        isDeletingUserData = true
-        defer { isDeletingUserData = false }
         do {
-            try await ClientCertificateStore.shared.deleteAll()
-            try await BookmarksModel.shared.deleteAll()
-            try await SharedTrustedIdentityStore.shared?.removeAllUserTrust()
-            var preferences = store.preferences
-            preferences.homepage = BrowserPreferences().homepage
-            store.preferences = preferences
+            try await userDataDeletion.delete()
         } catch {
-            let alert = NSAlert(error: error)
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Could Not Delete All User Data"
+            alert.informativeText = UserDataDeletion.message(for: error)
+            alert.addButton(withTitle: "OK")
             alert.runModal()
         }
     }

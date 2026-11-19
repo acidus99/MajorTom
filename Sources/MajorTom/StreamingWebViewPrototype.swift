@@ -228,6 +228,7 @@ final class BrowserModel: ObservableObject {
     private let trustStore = SharedTrustedIdentityStore.shared
     private var cancellables = Set<AnyCancellable>()
     private var downloadTask: Task<Void, Never>?
+    private var downloadPanel: NSSavePanel?
     private var contextMenuTargets: [ContextMenuTarget] = []
     private weak var pendingContextMenuView: NSView?
     private var pendingContextMenuLocation: NSPoint?
@@ -458,10 +459,18 @@ final class BrowserModel: ObservableObject {
         menu.addItem(item)
     }
 
+    func cancelAndDrainNativeRequests() async {
+        let task = downloadTask
+        task?.cancel()
+        downloadPanel?.cancel(nil)
+        await task?.value
+    }
+
     func download(_ url: URL) {
         let proxy = settings.preferences.proxy
         statusText = "Downloading \(url.lastPathComponent)…"
         downloadTask?.cancel()
+        downloadPanel?.cancel(nil)
         downloadTask = Task { [weak self] in
             guard let self else { return }
             do {
@@ -488,6 +497,8 @@ final class BrowserModel: ObservableObject {
                 try Task.checkCancellation()
 
                 let panel = NSSavePanel()
+                downloadPanel = panel
+                defer { if downloadPanel === panel { downloadPanel = nil } }
                 // Name from the FINAL url, so a redirected download is not named after
                 // the URL that redirected.
                 panel.nameFieldStringValue = BrowserFilenameSuggestion.make(
@@ -499,6 +510,7 @@ final class BrowserModel: ObservableObject {
                     statusText = "Download cancelled"
                     return
                 }
+                try Task.checkCancellation()
                 try fetched.data.write(to: destination, options: .atomic)
                 statusText = "Downloaded \(destination.lastPathComponent)"
             } catch is CancellationError {

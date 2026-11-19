@@ -39,7 +39,10 @@ final class BrowsingDataController: ObservableObject {
     }
 
     func clear(_ action: BrowsingDataAction, range: BrowsingDataTimeRange) async throws {
-        do { try await workflow.clear(action, range: range) }
+        do {
+            guard !UserDataDeletion.workflow.isDeleting else { throw BrowsingDataWorkflowError.operationInProgress }
+            try await workflow.clear(action, range: range)
+        }
         catch BrowsingDataWorkflowError.operationInProgress {
             throw NSError(domain: "BrowsingData", code: 2, userInfo: [
                 NSLocalizedDescriptionKey: "Another clearing operation is already running."

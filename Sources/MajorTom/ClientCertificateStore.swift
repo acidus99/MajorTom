@@ -61,6 +61,30 @@ final class ClientCertificateStore: ObservableObject {
     private var catalogueRevision = 0
     private var initializationTask: Task<Void, Never>?
 
+    private var isDeletingUserData = false
+    private var materialOperations = 0
+    private var materialWaiters: [CheckedContinuation<Void, Never>] = []
+
+    private func beginMaterialOperation() throws {
+        guard !isDeletingUserData else { throw CancellationError() }
+        materialOperations += 1
+    }
+
+    private func endMaterialOperation() {
+        materialOperations -= 1
+        if materialOperations == 0 {
+            let waiters = materialWaiters
+            materialWaiters.removeAll()
+            for waiter in waiters { waiter.resume() }
+        }
+    }
+
+    private func drainMaterialOperations() async {
+        if materialOperations > 0 {
+            await withCheckedContinuation { materialWaiters.append($0) }
+        }
+    }
+
     var accountToken: UInt64 { accountRevision }
 
     /// Capture UI intent before scheduling, not when its asynchronous body starts.
@@ -212,22 +236,37 @@ final class ClientCertificateStore: ObservableObject {
     }
 
     func create(_ request: ClientCertificateCreationRequest) async throws -> ClientCertificateDescriptor {
+        try beginMaterialOperation()
+        defer { endMaterialOperation() }
         let revision = accountRevision
         let keychain = self.keychain
-        let descriptor = try await Task.detached(priority: .userInitiated) {
-            try keychain.create(request)
-        }.value
-        guard revision == accountRevision else { throw CancellationError() }
-        guard await commitMutation({ certificates, _, flags in
-            certificates.append(descriptor)
-            flags[descriptor.id] = descriptor.synchronizesWithICloud
-        }) else { throw CocoaError(.fileWriteUnknown) }
-        availability[descriptor.id] = true
-        signingValidated.insert(descriptor.id)
-        return descriptor
+        let id = UUID()
+        var materialWasCommitted = false
+        do {
+            let descriptor = try await Task.detached(priority: .userInitiated) {
+                try keychain.create(request, id: id)
+            }.value
+            guard revision == accountRevision else { throw CancellationError() }
+            guard await commitMutation({ certificates, _, flags in
+                certificates.append(descriptor)
+                flags[descriptor.id] = descriptor.synchronizesWithICloud
+            }, onDurableCommit: { materialWasCommitted = true }) else { throw CocoaError(.fileWriteUnknown) }
+            availability[descriptor.id] = true
+            signingValidated.insert(descriptor.id)
+            return descriptor
+        } catch {
+            // Only this operation owns this newly allocated UUID. Never roll back
+            // by fingerprint: that could remove an existing or synchronized key.
+            if !materialWasCommitted {
+                _ = try? await Task.detached { try keychain.delete(id: id) }.value
+            }
+            throw error
+        }
     }
 
     func importIdentity(_ imported: ClientCertificateImport) async throws -> ClientCertificateDescriptor {
+        try beginMaterialOperation()
+        defer { endMaterialOperation() }
         let revision = accountRevision
         let digest = CertificateDetails.sha256(certificateDER: imported.certificateDER)
         if let existing = certificates.first(where: { $0.certificateSHA256 == digest }) {
@@ -258,24 +297,36 @@ final class ClientCertificateStore: ObservableObject {
             return descriptor
         }
         let keychain = self.keychain
-        let descriptor = try await Task.detached(priority: .userInitiated) {
-            try keychain.importIdentity(imported)
-        }.value
-        guard revision == accountRevision else { throw CancellationError() }
-        guard await commitMutation({ certificates, _, flags in
-            certificates.append(descriptor)
-            flags[descriptor.id] = descriptor.synchronizesWithICloud
-        }) else { throw CocoaError(.fileWriteUnknown) }
-        availability[descriptor.id] = true
-        signingValidated.insert(descriptor.id)
-        return descriptor
+        let id = UUID()
+        var materialWasCommitted = false
+        do {
+            let descriptor = try await Task.detached(priority: .userInitiated) {
+                try keychain.importIdentity(imported, id: id)
+            }.value
+            guard revision == accountRevision else { throw CancellationError() }
+            guard await commitMutation({ certificates, _, flags in
+                certificates.append(descriptor)
+                flags[descriptor.id] = descriptor.synchronizesWithICloud
+            }, onDurableCommit: { materialWasCommitted = true }) else { throw CocoaError(.fileWriteUnknown) }
+            availability[descriptor.id] = true
+            signingValidated.insert(descriptor.id)
+            return descriptor
+        } catch {
+            if !materialWasCommitted {
+                _ = try? await Task.detached { try keychain.delete(id: id) }.value
+            }
+            throw error
+        }
     }
 
     func removeFromMajorTom(_ descriptor: ClientCertificateDescriptor) async {
+        guard !isDeletingUserData else { return }
         await removeMetadata(for: descriptor)
     }
 
     func deleteIdentity(_ descriptor: ClientCertificateDescriptor) async throws {
+        try beginMaterialOperation()
+        defer { endMaterialOperation() }
         let revision = accountRevision
         let keychain = self.keychain
         try await Task.detached(priority: .userInitiated) {
@@ -302,7 +353,15 @@ final class ClientCertificateStore: ObservableObject {
     /// the main actor, then metadata is changed once so iCloud receives one coherent set
     /// of deletion tombstones.
     func deleteAll() async throws {
+        guard !isDeletingUserData else { throw CancellationError() }
+        isDeletingUserData = true
+        defer { isDeletingUserData = false }
         let revision = accountRevision
+        await flushPendingWrites()
+        guard revision == accountRevision else { throw CancellationError() }
+        guard persistenceReady, !ICloudSyncStore.shared.isClaimingLocalData else {
+            throw CocoaError(.fileWriteUnknown)
+        }
         let descriptors = certificates
         let keychain = self.keychain
         try await Task.detached(priority: .userInitiated) {
@@ -327,7 +386,8 @@ final class ClientCertificateStore: ObservableObject {
         with url: URL,
         scope: ClientCertificateScopeChoice
     ) async -> Bool {
-        guard let endpoint = CapsuleEndpoint(url: url) else { return false }
+        guard !isDeletingUserData, url.scheme?.lowercased() == "gemini",
+              let endpoint = CapsuleEndpoint(url: url) else { return false }
         let association: ClientCertificateAssociation?
         switch scope {
         case .entireCapsule:
@@ -355,6 +415,7 @@ final class ClientCertificateStore: ObservableObject {
 
     @discardableResult
     func stopUsing(for url: URL) async -> Bool {
+        guard !isDeletingUserData else { return false }
         guard ClientCertificateAssociation.mostSpecific(
             matching: url,
             in: associations
@@ -371,10 +432,12 @@ final class ClientCertificateStore: ObservableObject {
     }
 
     func removeAssociation(id: UUID) async {
+        guard !isDeletingUserData else { return }
         _ = await commitMutation { _, associations, _ in associations.removeAll { $0.id == id } }
     }
 
     func changeAssociationScope(id: UUID, to scope: ClientCertificateScopeChoice) async {
+        guard !isDeletingUserData else { return }
         _ = await commitMutation { _, associations, _ in
         guard var association = associations.first(where: { $0.id == id }),
               association.scope != scope else { return }
@@ -398,10 +461,11 @@ final class ClientCertificateStore: ObservableObject {
     /// exportIdentityPEM have always detached the same keychain; the read path used to
     /// run it inline and block the main actor while a page was being opened.
     func resolvedCertificate(for url: URL) async -> ResolvedClientCertificate? {
+        guard !isDeletingUserData, url.scheme?.lowercased() == "gemini" else { return nil }
         let revision = accountRevision
         await flushPendingWrites()
         await reloadLatestCatalogue()
-        guard revision == accountRevision else { return nil }
+        guard !isDeletingUserData, revision == accountRevision else { return nil }
         guard let association = ClientCertificateAssociation.mostSpecific(
             matching: url,
             in: associations
@@ -426,7 +490,7 @@ final class ClientCertificateStore: ObservableObject {
                         return nil
                     }
                 }.value
-                guard revision == accountRevision,
+                guard !isDeletingUserData, revision == accountRevision,
                       associations.contains(association), certificates.contains(descriptor) else { return nil }
                 if let identity {
                     identityCache[id] = identity
@@ -578,7 +642,8 @@ final class ClientCertificateStore: ObservableObject {
     }
 
     private func commitMutation(
-        _ operation: @escaping @Sendable (inout [ClientCertificateDescriptor], inout [ClientCertificateAssociation], inout [UUID: Bool]) -> Void
+        _ operation: @escaping @Sendable (inout [ClientCertificateDescriptor], inout [ClientCertificateAssociation], inout [UUID: Bool]) -> Void,
+        onDurableCommit: (@MainActor () -> Void)? = nil
     ) async -> Bool {
         guard !ICloudSyncStore.shared.isClaimingLocalData else {
             lastError = "Local data is being prepared for iCloud. Try again in a moment."
@@ -615,6 +680,7 @@ final class ClientCertificateStore: ObservableObject {
         persistenceTask = task
         do {
             let committed = try await task.value
+            onDurableCommit?()
             guard account == accountRevision else {
                 if revision == persistenceRevision { persistenceTask = nil }
                 return false
@@ -658,6 +724,7 @@ final class ClientCertificateStore: ObservableObject {
     }
 
     func flushPendingWrites() async {
+        await drainMaterialOperations()
         await initializationTask?.value
         while let task = persistenceTask {
             let account = accountRevision

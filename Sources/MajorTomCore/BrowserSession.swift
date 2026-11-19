@@ -485,6 +485,14 @@ public final class BrowserSession: ObservableObject {
         if let committedURL { locationText = committedURL.absoluteString }
     }
 
+    public func cancelAndDrainRequests() async {
+        let navigation = navigationTask
+        let images = Array(imageTasks.values)
+        stop()
+        await navigation?.value
+        for image in images { await image.value }
+    }
+
     public func goBack() {
         browserNavigationLogger.notice(
             "goBack requested modelIndex=\(self.navigation.historyIndex) canBack=\(self.navigation.canGoBack) current=\(self.committedURL?.absoluteString ?? "nil", privacy: .public)"

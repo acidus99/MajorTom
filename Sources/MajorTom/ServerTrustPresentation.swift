@@ -70,6 +70,13 @@ final class ServerTrustPresentation: ObservableObject {
         authority.respond(to: promptID, allow: allow)
     }
 
+    func suspendAndDrain() async {
+        failure = nil
+        await authority.suspendAndDrain()
+    }
+
+    func resumeAuthorization() { authority.resumeAuthorization() }
+
     private func selectPresenter(excluding excluded: NSWindow? = nil) {
         guard prompt != nil || failure != nil else { presenterWindow = nil; return }
         if let presenterWindow, presenterWindow !== excluded, presenterWindow.isVisible { return }

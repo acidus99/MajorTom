@@ -161,6 +161,74 @@ final class ServerTrustAuthorityTests: XCTestCase {
         XCTAssertFalse(allowed)
     }
 
+    func testSuspensionDrainsAcceptedSaveBeforeTrustCanBeDeleted() async throws {
+        let store = try makeStore()
+        let firstIdentity = identity()
+        let gate = TrustWriteGate()
+        defer { Task { await gate.release() } }
+        let date = now
+        let authority = ServerTrustAuthority(read: { await store.identity(for: $0) }, save: { identity, source in
+            if identity == firstIdentity { await gate.wait() }
+            // An accepted database transaction need not honor caller cancellation.
+            try await Task.detached { try await store.trust(identity, source: source) }.value
+        }, now: { date })
+        let request = Task { try await authority.authorize(firstIdentity) }
+        await wait([gate.entered])
+        var didDrain = false
+        let drained = XCTestExpectation(description: "Accepted trust write drained")
+        let suspension = Task {
+            await authority.suspendAndDrain()
+            didDrain = true
+            drained.fulfill()
+        }
+        do { _ = try await value(request); XCTFail("Suspension must detach requesters") } catch is CancellationError {}
+        XCTAssertFalse(didDrain, "Deletion must wait for the accepted transaction")
+        do { _ = try await authority.authorize(identity(key: "b")); XCTFail("Authorization must stay suspended") } catch is CancellationError {}
+        await gate.release()
+        await wait([drained])
+        await suspension.value
+        let accepted = await store.identity(for: endpoint)
+        XCTAssertEqual(accepted?.publicKeySHA256, firstIdentity.publicKeySHA256)
+        try await store.removeAllUserTrust()
+        authority.resumeAuthorization()
+        let replacement = identity(key: "b")
+        let allowed = try await authority.authorize(replacement)
+        XCTAssertTrue(allowed)
+        let retained = await store.identity(for: endpoint)
+        XCTAssertEqual(retained?.publicKeySHA256, replacement.publicKeySHA256)
+    }
+
+    func testSuspensionWithdrawsDecisionsAndForgetsDateExceptions() async throws {
+        let store = try makeStore()
+        let authority = makeAuthority(store)
+        let firstShown = XCTestExpectation(description: "Initial date decision")
+        authority.decisionChanged = { if $0 != nil { firstShown.fulfill() } }
+        let initial = Task { try await authority.authorize(identity(expired: true)) }
+        await wait([firstShown])
+        let oldID = try XCTUnwrap(authority.pendingDecision).id
+        await authority.suspendAndDrain()
+        do { _ = try await value(initial); XCTFail("Pending decision must be cancelled") } catch is CancellationError {}
+        XCTAssertNil(authority.pendingDecision)
+        authority.respond(to: oldID, allow: true)
+        authority.resumeAuthorization()
+        let shown = XCTestExpectation(description: "Fresh date decision")
+        authority.decisionChanged = { if $0 != nil { shown.fulfill() } }
+        let next = Task { try await authority.authorize(identity(expired: true)) }
+        await wait([shown])
+        authority.respond(to: try XCTUnwrap(authority.pendingDecision).id, allow: true)
+        let nextAllowed = try await value(next)
+        XCTAssertTrue(nextAllowed)
+        await authority.suspendAndDrain()
+        authority.resumeAuthorization()
+        let repeated = XCTestExpectation(description: "Deletion boundary forgot exception")
+        authority.decisionChanged = { if $0 != nil { repeated.fulfill() } }
+        let afterReset = Task { try await authority.authorize(identity(expired: true)) }
+        await wait([repeated])
+        authority.respond(to: try XCTUnwrap(authority.pendingDecision).id, allow: false)
+        let afterResetAllowed = try await value(afterReset)
+        XCTAssertFalse(afterResetAllowed)
+    }
+
     private func value(_ task: Task<Bool, any Error>) async throws -> Bool {
         let finished = XCTestExpectation(description: "Authorization finishes")
         let observer = Task {
@@ -187,5 +255,21 @@ final class ServerTrustAuthorityTests: XCTestCase {
     private func wait(_ expectations: [XCTestExpectation]) async {
         let result = await XCTWaiter.fulfillment(of: expectations, timeout: 3)
         XCTAssertEqual(result, .completed)
+    }
+}
+
+private actor TrustWriteGate {
+    nonisolated let entered = XCTestExpectation(description: "Durable trust write entered")
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var isOpen = false
+    func wait() async {
+        entered.fulfill()
+        if isOpen { return }
+        await withCheckedContinuation { continuation = $0 }
+    }
+    func release() {
+        isOpen = true
+        continuation?.resume()
+        continuation = nil
     }
 }

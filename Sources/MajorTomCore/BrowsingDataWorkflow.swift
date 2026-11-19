@@ -57,6 +57,10 @@ public final class BrowsingDataWorkflow: ObservableObject {
         if let clearing { session.prepareForClearing(clearing.action, since: clearing.cutoff) }
     }
 
+    public func cancelAndDrainRequests() async {
+        for session in liveSessions { await session.cancelAndDrainRequests() }
+    }
+
     public func clear(_ action: BrowsingDataAction, range: BrowsingDataTimeRange) async throws {
         guard !isClearing else { throw BrowsingDataWorkflowError.operationInProgress }
         let cutoff = range.cutoff(at: services.now())

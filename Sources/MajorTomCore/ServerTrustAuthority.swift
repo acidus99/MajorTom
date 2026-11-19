@@ -49,6 +49,8 @@ public final class ServerTrustAuthority {
     private var workers: [CapsuleEndpoint: Task<Void, Never>] = [:]
     private var decisions: [PendingDecision] = []
     private var dateExceptions = Set<DateException>()
+    private var isSuspended = false
+    private var authorizationGeneration: UInt64 = 0
 
     public init(read: @escaping Read, save: @escaping Save, now: @escaping @Sendable () -> Date = { Date() }) {
         self.read = read
@@ -57,11 +59,13 @@ public final class ServerTrustAuthority {
     }
 
     public func authorize(_ identity: PresentedServerIdentity) async throws -> Bool {
+        guard !isSuspended else { throw CancellationError() }
+        let generation = authorizationGeneration
         let waiterID = UUID()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
-                guard !Task.isCancelled else {
+                guard !Task.isCancelled, !isSuspended, generation == authorizationGeneration else {
                     continuation.resume(throwing: CancellationError())
                     return
                 }
@@ -81,6 +85,21 @@ public final class ServerTrustAuthority {
         decisionChanged?(pendingDecision)
         pending.continuation.resume(returning: allow)
     }
+
+    /// Destructive trust changes wait for accepted writes, including stores that
+    /// cannot cancel a transaction already running. No old write can follow deletion.
+    public func suspendAndDrain() async {
+        isSuspended = true
+        authorizationGeneration &+= 1
+        let active = Array(workers.values)
+        let waiterIDs = requests.flatMap { $0.waiters.keys }
+        for waiterID in waiterIDs { cancel(waiterID) }
+        for worker in active { worker.cancel() }
+        for worker in active { await worker.value }
+        dateExceptions.removeAll()
+    }
+
+    public func resumeAuthorization() { isSuspended = false }
 
     private func startWorker(for endpoint: CapsuleEndpoint) {
         guard workers[endpoint] == nil else { return }
@@ -130,6 +149,7 @@ public final class ServerTrustAuthority {
         }
         try Task.checkCancellation()
         try await save(identity, source)
+        try Task.checkCancellation()
         if let dateException { dateExceptions.insert(dateException) }
         return true
     }
