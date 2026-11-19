@@ -1,61 +1,37 @@
-Functionality:
-	
-* Translation via MacOS local API.
-	French test page: gemini://ploum.net/2026-08-03-offpunk_manifesto.gmi
-	Always Translate Content option?
-	
-* CSS theme management: import, duplicate, and live sample previews (file-based themes implemented).
+Highest priority first within each section. The human chooses the next task;
+agents may suggest Features or Bugs. Unverified reports need reproduction.
 
-* More Tabs
-	Safari has a ton of option on close tab, close tab to the right, close all other tabs, etc
-	
-* Titan Support
-* Import From Browser (Already have 2 clients. Maybe a generic bookmarks import?)
+## Features
 
-* Add a TOC/Outline view, using headings
-	Maybe as a floating/collapible side panel?
+- [Reading Improvements] - [Improve plain-text presentation and actions for unsupported non-text content; agree on examples first.]
+- [Local Translation] - [Explore macOS APIs and Always Translate. Test: gemini://ploum.net/2026-08-03-offpunk_manifesto.gmi]
+- [Theme Management] - [Import, duplicate, and preview CSS themes.]
+- [Tab Commands] - [Review Safari-style commands such as Close Tabs to the Right; identify remaining gaps.]
+- [Outline] - [Navigate headings in a collapsible or floating panel.]
+- [Bookmarks Import] - [A generic import format alongside Lagrange and Alhena.]
+- [Settings Organization] - [Improve Quality of Life grouping and wording.]
+- [Favorites Discoverability] - [Decide whether the first bookmark should reveal the Favorites Bar.]
+- [Connection Feedback] - [Use the lower-right status area for connection progress; clear it when loaded and preserve link previews.]
+- [Offline Browsing] - [Deliberate access to retained content beyond Back/Forward.]
+- [Subscriptions and Feeds] - [Page subscriptions, a feeds view, and Atom/RSS presented as a gemlog.]
+- [Titan Support] - [Discuss upload workflows, identity handling, and confirmation.]
+- [Ordered Lists] - [Conservative recognition without altering source.]
 
-* add that capsule structural/tree view 
+## Bugs
 
-* store cache internally as WARC? export it?
-* offline mode?
-* subscribe to page?
-* feeds view?
-* convert ATOM/RSS to gemlog page
-* Viewing text content make it better
-* viewing non-text content, what to do?
-* view source: on binary file show a hex editor?
-* Detecting Ordered Lists
-* Missing "Close Tab" from File menu
+- [Cloud Sync Release Gate] - [Two signed Macs: push, fresh fetch/reconnect, legacy import, delete-wins, offline edits/sign-out/account switching, Cloud Tabs, KVS, and Keychain arrival order.]
+- [Unsupported-Content History] - [Back/Forward can leave the wrong content displayed. Test: gemini://jsreed5.org/about/contact/publickey.pgp]
+- [Accessibility Audit] - [Check primary actions with keyboard and VoiceOver, focus order, labels, and state; fix confirmed failures.]
+- [Proxy Failures] - [Give useful recovery guidance when the configured HTTP proxy is unreachable.]
+- [Error Pages] - [Identify and fix unclear failure/recovery interactions using specific examples.]
+- [Certificate Manager Targeting] - [Unverified: opening from Settings/About, or with no browser window, can fail.]
+- [Dock Reopening] - [Unverified: clicking the Dock icon with no windows creates two; also check last-window quit behavior.]
+- [Close Tab Menu] - [Unverified: reported missing File > Close Tab; check visibility, selected-tab targeting, and Option variants.]
 
-* A pixelated astronaut, like Chrome's dino?
-	I could use him for different error messages, with different expressions
-	I could have a fun game on no internet connection
-		side scrolling infinite runner, on a planet? duck UFOs, jump of rocks?
+## Crazy Ideas
 
-Reworking/Bugs:
-	
-* clicking on "Manged client certs" if a browser window is not in focus (e.g. looking at settings, or probably about) doesn't work.
-	
-* Accessibility audit: verify every primary browser action works with the keyboard and VoiceOver, including focus order and meaningful control labels/state.
-
-* Should we show the favorites bar once they have added at least one bookmark? What do web browsers do?
-
-* only use the hover text in the bottom right to show connections info. Have it disappear once the page is loaded
-	
-* Organization of the "Quality of life improvements" settings is a bit rough
-
-* Error screens are not great
-* If HTTP proxy is enabled, but you can't connect to it, error page is not helpful	
-
-* if you go to "unsupported content", and go back and forth, the content doesn't change
-	Test page: gemini://jsreed5.org/about/contact/publickey.pgp
-
-
-things to check:
-
-- Cloud sync release gate: on two developer-signed Macs, verify push wakeups, first-account v1
-  import, strict delete-wins conflicts, sign-out/offline edits, account switching, Cloud Tabs,
-  iCloud Key-Value Store preferences, and Keychain metadata arriving before/after key material.
-
-- If no windows, clicking on the icon in dock opens 2 windows (I think if no windows, I close the app right now)
+- [Capsule Map] - [A structural/tree view; explore the source of its data and its purpose.]
+- [WARC] - [Cache export or archival storage; identify a concrete use case.]
+- [Binary Source View] - [A hex viewer, possibly an editor; discuss whether editing belongs in a browser.]
+- [Astronaut Mascot] - [A pixel astronaut with expressions for error screens.]
+- [Offline Game] - [An astronaut runner with UFOs and rocks.]

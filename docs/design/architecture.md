@@ -1,481 +1,75 @@
-# Major Tom Architecture
+# Architecture
 
-Status: Current design
+Major Tom is a native macOS 26 Gemini browser. Its architecture keeps browser
+behavior testable without windows, network connections, or a signed iCloud account.
+The goal and working principles live in [AGENTS.md](../../AGENTS.md).
 
-Major Tom is a macOS 26 Swift application. This document records the durable boundaries in the implementation. User-facing behavior is defined by the [product specification](major-tom-specification.md).
+## Subsystems
 
-## Design goals
-
-- Keep protocol, trust, parsing, persistence, and presentation independently testable.
-- Stream content from the network to the reader without losing source fidelity or UI responsiveness.
-- Keep state isolated per tab and durable state independent of UI objects.
-- Use macOS frameworks and avoid cross-platform browser abstractions.
-- Treat untrusted capsule content as data, never as application instructions.
-
-## Modules
-
-| Module | Responsibility |
+| Subsystem | Responsibility |
 | --- | --- |
-| `MajorTomCore` | Gemini protocol, URL handling, response streaming, trust, parsing, document models, persistence types, and testable browser rules. |
-| `MajorTomAppKitSupport` | Narrow AppKit bridges used where SwiftUI does not provide the required native behavior. |
-| `MajorTom` | SwiftUI application shell, windows, tabs, menus, settings, browser views, and composition of Core services. |
-
-The application shell observes state and sends user intent. It does not parse Gemini, make trust decisions, or embed persistence policy in views.
-
-### Native tab controls
-
-AppKit owns Major Tom's window tabs and Tab Overview. When AppKit lazily creates its
-native tab bar after a second window joins the group, Major Tom hides AppKit's Add Tab
-button and reconnects the native tab track directly to the tab bar's normal trailing
-inset. The tab bar remains full-width and contains only tabs; it is never resized. New
-tabs remain available through the File menu and Command-T. Show Tab Overview is a
-SwiftUI navigation-bar action immediately after Reload or Stop. The full-width tab-track
-layout remains installed while Tab Overview is visible so AppKit's exit animation never
-reveals the removed Add Tab slot. The private `NSTabBar` and `NSTabBarTrackView` class names and native
-Add Tab action are used only to locate the relevant views; Major Tom invokes no private
-selectors. A permanent nonactivating panel supplies the overview's top-right icon-only
-Hide Tab Overview button and is ordered in or out as overview visibility changes.
-
-### Native window restoration
-
-The browser `WindowGroup` suppresses its automatic launch presentation. At application
-launch, the native tab coordinator loads the saved session, constructs every `NSWindow`
-without ordering it onscreen, applies saved frames and native tab groups, and then presents
-the completed window set with the saved key window in front. When no usable session exists,
-the coordinator creates one ordinary new window. This keeps SwiftUI's default centered scene
-from appearing before the saved layout and retains the `WindowGroup` for scene commands and
-later system-driven window creation. Browser-window sizing is enforced at the `NSWindow`
-boundary because attaching a SwiftUI hosting controller can replace a manually constructed
-window's requested frame with its fitting size. Saved and newly created frames are normalized
-against the visible frames of the currently connected displays before presentation and
-persistence.
-
-### Native navigation controls
-
-SwiftUI composes the navigation bar and its connected functional groups. Standalone
-actions such as Reload and Stop use one compact circular interactive-glass surface. A
-pointer hover subtly tints that surface, while SwiftUI retains its pressed state, keyboard
-focus, and accessibility behavior. Connected groups use SwiftUI glass containers with
-compact independent actions because neither SwiftUI nor AppKit provides a public
-equivalent connected-pill control.
-
-The address field uses an `AddressTextField` AppKit bridge to retain the native field
-editor while selecting only the appended inline-completion suffix. A nonactivating
-child panel presents native AppKit buttons and labels without taking keyboard focus.
-`AddressSuggestionsView` uses explicit frames with AppKit alone owning panel geometry;
-unchanged frames are not reapplied. SwiftUI hosting in this transient panel caused
-recursive constraint/layout invalidation during row and selection changes, so this is
-an intentional narrow AppKit bridge. The bridge
-handles suggestion arrows, Return, and Escape; ordinary editing, input methods, Undo,
-selection, and Tab traversal remain native. The existing Command-L route targets this
-field. The panel is dismissed on focus loss, window deactivation, and outside clicks.
-
-`OmnibarIndex` in Core prepares an immutable, deduplicated collection from history,
-bookmarks, and local-tab snapshots. It owns matching, ranking, and conservative Gemini
-address-prefix completion independently of UI and persistence. `OmnibarStore` observes
-the app's existing in-memory history and bookmark mirrors and tab-change notifications,
-rebuilding the shared index off the main actor. Each field searches that prepared index
-off the main actor, maintaining only the highest-ranked few matches. No per-keystroke
-database, CloudKit, favicon, or transport requests occur. Source revisions invalidate
-visible rows and inline completion before rebuilding; per-field generations and source
-revisions reject stale search results. Keyboard selection is retained by destination ID
-when that destination survives an update.
-The shared index retains all tab IDs for a destination. Each field supplies its own
-registered tab ID when searching; result projection excludes that ID without changing
-the shared index or dropping another tab open at the same URL. This applies equally to
-initial suggestions, typed matches, and inline-completion metadata.
-
-## Navigation and content flow
-
-The application delegate's single local key monitor routes Command-Option-Up and
-Command-Option-Shift-Up to the same selected-tab commands as History > Up One Level
-and Capsule Root, before the content responder can consume the arrow keys. Routing is
-limited to browser windows without a sheet or modal dialog. Bare Command-Up/Down
-remain native document scrolling commands.
-
-```text
-User intent
-  → tab navigation controller
-  → Gemini transport
-  → TLS trust decision
-  → response decoder
-  → UTF-8 decoder and content parser
-  → semantic document stream
-  → controlled WebKit presentation
-```
-
-The transport emits typed progress, server-identity, header, body, completion, cancellation, truncation, and failure events. The decoder retains exact response bytes and explicit completion state. Parsers tolerate arbitrary chunk boundaries and keep incomplete characters and structures until they can be interpreted safely.
-
-The tab owns its committed page, pending destination, history position, active request, progress, scroll state, zoom, and document state. Tabs do not share live navigation state. Major Tom's tab history is authoritative for toolbar, menu, and trackpad Back/Forward traversal. The presentation bridge disables WebKit's private Back/Forward gesture and translates a qualifying horizontal trackpad gesture into the same tab-controller action; WebKit's retained document list is never consulted because it is neither durable across relaunch nor guaranteed to match the model after cached traversal.
-
-A second, noninteractive WebView renders the adjacent cached model entry during a swipe. Forward moves that staged surface over the active page; Back moves the active surface aside to reveal the staged page underneath. The model cursor commits only when the gesture commits, and the entire momentum stream remains claimed so one physical swipe cannot traverse more than one entry.
-
-## Trust and persistence
-
-The trust service computes SHA-256 SPKI fingerprints and resolves first-use, changed-key, and certificate-date decisions before content is accepted. The UI presents a decision; the trust service records it.
-
-Persistent records use domain types, never views, WebKit objects, or network tasks. Local stores are authoritative while offline. CloudKit mirrors selected durable user intent; Keychain holds client identities and their private keys. `CKSyncEngine` incrementally fetches changes from Major Tom's private custom zone and resumes from a durable serialized token. Local edits commit their domain row and an immutable canonical model snapshot in a generation-numbered outbox entry in one SQLite transaction. Generations are retained independently of removable outbox rows, so a late acknowledgement cannot remove a newer edit. Outgoing retries re-envelope that immutable model with the newest server metadata, preserving unknown fields. Confirmed server deletion wins over edits. Up to Date is emitted only after a successful fetch/send cycle has drained the durable CloudKit outbox; it does not claim KVS or Keychain propagation. Complete and incomplete responses remain distinct throughout persistence and caching.
-
-Major Tom's local persistence is moving behind a GRDB-backed SQLite boundary in staged,
-independently migratable changes. `MajorTomDatabase` owns connection policy, transactions,
-integrity checks, and ordered schema migrations; domain repositories own their tables and
-queries. SwiftUI views and CloudKit adapters do not issue SQL. Existing JSON and UserDefaults
-stores remain authoritative until the migration for their particular data class has committed
-and been verified, so installing an intermediate build never performs a partial user-data move.
-
-Global history and Gemini input drafts are the first domain records behind this boundary.
-`history_visits` records individual visit dates and titles so time-limited deletion can preserve
-older visits to the same URL. `history_entries` remains its URL-level summary for presentation:
-last observed title, last visit and count, pruned to one year. Migration v15 seeds existing
-aggregate counts at their only known (last-visit) date; it does not invent earlier timestamps. The native `about:history`
-table observes this repository-backed global list directly; sorting and filtering are
-presentation concerns, while deletion remains a repository transaction. Only completed,
-displayable new navigations and reloads reach the recorder. `gemini_input_drafts` keys
-unsubmitted text by prompt URL and stores
-an explicit fourteen-day expiration. Both tables are local-only. A one-time transactional
-import folds the former append-only UserDefaults history blob into URL rows before removing
-that legacy local value. Each recorded navigation or draft edit changes only its row rather than
-rewriting an encoded collection.
-
-Bookmarks use normalized `bookmark_folders` and `bookmarks` tables. A collection mutation is
-diffed against those rows inside one transaction, so editing one title or favicon changes one
-row rather than rewriting the collection. Each bookmark optionally carries a timestamped
-favicon observation; an absent observation is distinct from an unknown one. The existing JSON
-file is imported once with an in-transaction marker and removed only after the imported rows
-can be read. The same optional snapshot travels inside the record-level bookmark CloudKit
-payload; older payloads decode it as unknown.
-
-Cloud sync state lives in `cloud_sync_state`, `cloud_pending_changes`, and
-`cloud_record_state`, keyed by a SHA-256 hash of the iCloud account identity. Record metadata
-includes archived CloudKit system fields and the last server payload, allowing conflict retries
-to retain change tags and fields written by a newer app. Each CloudKit type has exactly one
-encrypted `payload` field containing a schema-tagged JSON envelope. Record names are stable UUIDs.
-Production builds retain the historical `Major Tom` Application Support directory and standard
-preferences domain. Development-signed and ad-hoc builds use `Major Tom Development` plus a
-development preferences suite and Keychain namespace. Ubiquitous preferences are also keyed by
-CloudKit environment. Consequently development and production never share local sessions, history,
-bookmarks, trust, certificate metadata or keys, caches, CloudKit engine state, or synced settings.
-
-Cloud data lives only in the `MajorTomUserDataV2` private custom zone. Its
-`MTDataModelManifest` gates readers and writers before model records are applied. On an account's
-first new-v2 launch, Major Tom checks the **server** manifest before considering v1 import.
-A compatible manifest prevents a fresh local database from importing stale v1 or resetting
-the existing zone. Initialization of an absent zone imports v1 with an atomic local body/marker,
-then commits the export snapshots and ready marker together before creating the zone.
-An existing zone with an absent or incompatible manifest fails closed; it is not automatically
-erased. Interrupted first publication can resume from a durable pending manifest. The original
-v1 zone is never written or deleted. Account changes select separate local datasets and outboxes; signing out retains the last
-account's local data and offline edits without exposing them to another account.
-
-Trusted capsule identity records use `trusted_server_identities`, one row per host and port.
-The row retains the local decision source, fingerprint, certificate observation, first/last seen
-times, and sighting count. Server trust is deliberately local-only. Client-certificate CloudKit
-metadata uses one row per descriptor and association, with separate per-identity local Keychain
-synchronization flags. The actual private key and certificate identity remain Keychain items;
-remote metadata deletion never deletes Keychain material. Certificate descriptors that have the
-same certificate SHA-256 fingerprint are one logical identity: every Mac deterministically keeps
-the lexicographically first metadata UUID, merges capsule/path approvals onto it, and synchronizes
-the former UUIDs as non-secret Keychain lookup aliases. This lets a canonical CloudKit record use
-identity material that iCloud Keychain still stores under an older UUID without copying private-key
-bytes or allowing metadata cleanup to delete a credential. Removing an identity from Major Tom
-queues CloudKit deletes for the canonical descriptor, every synchronized alias UUID, and locally
-known approvals, so a stale duplicate on another Mac cannot survive while all Keychain material
-is preserved. Delete Identity Permanently performs the same metadata cleanup only after deleting
-the matching Keychain certificate and private-key aliases on the initiating Mac.
-
-### Data ownership and storage map
-
-| Data | Local authority | Cross-Mac behavior |
-| --- | --- | --- |
-| Bookmarks, folders, order, bookmark favicon snapshot | Account-scoped SQLite bookmark rows | One CloudKit record per item through a transactional outbox |
-| General preference values (homepage, search provider and custom endpoint), all Quality of Life settings | Small coalesced UserDefaults preference snapshot | iCloud Key-Value Store |
-| All Appearance settings (application appearance, content theme and width), all Networking settings, Favorites-bar visibility, default browser registration | Local preferences or macOS registration | Local to one Mac |
-| Client-certificate descriptors and capsule/path associations | SQLite per-record sync metadata | CloudKit records; usable identity material follows only through synchronizable Keychain |
-| Client-certificate private keys and certificate identity | Keychain | iCloud Keychain when the identity is marked synchronizable; never CloudKit |
-| User-approved server trust | SQLite endpoint row | Local only |
-| Open-tab summaries for other Macs | Live window model plus small UserDefaults display cache | One replaceable CloudKit record per device; URL, title, and favicon only |
-| Global browsing history | SQLite URL row | Local only, one-year retention |
-| Window/tab session, Back/Forward entries, response snapshots, cursor, zoom, reading state | Standalone `BFCache.db` rows | Local only |
-| Cancelled Gemini input draft | SQLite prompt-URL row | Local only, fourteen-day expiry |
-| Reusable Gemini image and favicon responses | Standalone `ContentCache.db` rows | Local only; a bookmark carries its last favicon observation separately |
-| Downloads and explicitly saved pages | User-selected filesystem location | Outside app sync |
-
-`UserDefaults` is an on-disk preferences plist owned by macOS, not a network service. Major Tom
-uses it only for compact preference values, migration markers, a stable device ID, and the small
-small local configuration. Remote tabs come from account-scoped CloudKit record metadata,
-not a shared defaults cache. Nothing enters CloudKit merely because it is in
-UserDefaults; the CloudKit adapter explicitly constructs the synchronized projections listed
-above. Large collections, cache bodies, security records, and tombstone sets do not use it.
-
-Deletion of synchronized intent creates a durable delete operation in the same transaction as
-the local row deletion. CloudKit records are physically deleted. Delete wins over a concurrent
-edit, and a stale send completion cannot remove a newer outbox generation. Local
-cache/history/session clearing remains physical local deletion because those data never sync.
-
-Reliability migrations v11–v14 add immutable outbox snapshots, independent generation ledgers,
-account-qualified domain keys (including bookmark parent foreign keys), an incoming batch
-journal, and local confirmed-deletion fences. Raw delivered batches are journaled before engine
-state can advance; domain changes, metadata, acknowledgements, and journal removal share one
-transaction. A failed batch remains replayable after restart. A late in-flight create after a
-confirmed deletion queues a compensating delete. These fences are local SQLite bookkeeping,
-not new CloudKit records or a change to the encrypted schema.
-
-Bookmark mutations read current rows under the writer lock. Certificate mutations apply only
-the user's operation to the latest committed catalogue. Neither model replays a delayed
-cloud publication as a new local replacement. Async transport work is fenced by engine session
-before publication; background work can finish only against its captured account. CKRecord
-construction, received-batch archive/reconciliation, and save-result validation run off the main
-actor. A malformed outgoing item pauses the queue visibly rather than being dropped or spun on.
-Certificate mutations, tab writes, startup exports, and JSON checkpoint encoding also run
-off the main actor. The first-account claim drains initialization and accepted local writes,
-briefly prevents new local edits, then binds the models before releasing the claim barrier.
-Certificate approvals are published only after commit and reloaded before identity resolution;
-queued UI actions capture their account before scheduling. Orderly shutdown drains these
-local writes before closing SQLite, without waiting for network propagation.
-Competing journal workers check batch existence inside the writer transaction, so a worker
-that was overtaken cannot reapply an older, already-consumed batch. A newly observed different
-server version rebases pending save intent to a new generation, fencing a delayed success.
-Fetched equality alone never acknowledges a save: an older different save may still be in
-flight. Only its own exact-generation save or equal-conflict result satisfies pending intent.
-Unknown envelope fields and newer stored schema tags survive retries.
-Favicon observations use the existing SQLite timestamp precision: differences of at most
-one millisecond do not manufacture a newer observation and an echo upload.
-
-Only awaited fetch/send operations establish completion, including a debounced confirmation
-round trip after automatic engine activity. Lifecycle callbacks without a success result do
-not prove Up to Date. Journal, zone, engine-state, outbox, accepted-local-write, and in-flight-attempt checks gate
-completion. See `cloud-sync-adversarial-review.md` for counterexamples, tests, and remaining
-validation limits; `Scripts/cloud-sync-diagnostics.sh` reads aggregate durable state without
-printing payloads or record identifiers.
-
-Explicit Sync Now and activation refreshes use a nonautomatically scheduled CKSyncEngine
-for their requested cycle, then restore automatic scheduling. A signed isolated probe on
-macOS 26.6.2 established that an automatically scheduled engine with a clean checkpoint
-can return successfully without database discovery; the same checkpoint with automatic
-scheduling disabled performs that discovery. Changing fetch scope or network priority did
-not fix the automatic case. The handoff invalidates the retiring session, awaits cancellation,
-and drains all already accepted delegate database work before loading the latest durable
-checkpoint. It neither resets opaque state nor introduces a second receive cursor. Only
-the current engine accepts callbacks. The outbox remains authoritative across the handoff;
-errors, journal work, and accepted local writes are not cleared by switching modes. Explicit
-cycles require fresh-fetch proof and cannot complete using the automatic cached-only path.
-Clicks while a cycle/handoff is running coalesce into one subsequent explicit refresh.
-Shutdown drains inter-engine recovery work too. Apple scheduling/retries remain enabled
-outside requested cycles; automatic delivery is still eventually consistent, not instantaneous.
-Network.framework observes offline-to-online edges while the app is running. One such edge
-requests a fresh, nonautomatic round trip and then restores automatic scheduling; repeated
-available observations do nothing. This recovery path does not clear a paused malformed
-payload or persistence failure, so a network reconnection cannot convert a real sync error
-into a false successful status.
-
-Outgoing result handling is per record. A `partialFailure` is unwrapped only for the
-matching record before its conflict policy runs. In an atomic custom-zone batch, collateral
-`batchRequestFailed` results are never acknowledged or presented as the root failure: their
-durable outbox rows remain pending while the actionable record is reconciled. If CloudKit
-reports only atomic collateral failures and supplies no root item, Major Tom performs a
-bounded automatic confirmation retry, then leaves the work pending for CKSyncEngine's own
-retry policy and reports a safe reconciliation state rather than record identifiers or Up to
-date.
-
-Session restoration and exact Back/Forward snapshots live in the standalone
-`BFCache.db` database. Its normalized `browser_windows`, `browser_tabs`, and
-`browser_tab_history` rows preserve window and tab order, each tab's cursor, and one row per
-visit. A visit carries its URL, one title, favicon, response status and meta, exact source
-bytes, completion state, and versioned JSON presentation state. The presentation state keeps
-scroll position, expanded image-link URLs, and one-based indexes of collapsed preformatted
-sections. The response meta supplies the MIME type; there is no duplicate MIME column.
-New standalone SQLite databases introduced by the browser-cache refactor use the `.db`
-filename extension.
-
-Startup hydrates only the current response in each restored tab. Older entries retain their
-metadata and are loaded lazily from the standalone database on traversal. Repeated visits to
-one URL remain different entries and can therefore preserve different response bytes and
-reading state. Client-certificate-authenticated response bodies are not retained.
-
-Orderly application termination is deferred until pending per-tab Back/Forward writes and the
-final normalized session save complete. The standalone pool then performs a truncating WAL
-checkpoint, closes, and removes the disconnected `-wal` and `-shm` files; crash recovery
-retains SQLite's normal companion-file behavior. After all application-level writers have
-finished, the shared `MajorTom.db` pool receives the same checkpoint-and-close treatment.
-
-Reusable network responses live separately in `ContentCache.db`, keyed only by URL. The
-cache is a passive store: callers ask for a fresh complete response, remove one, or store one
-with a fixed lifetime and a caller-supplied resource type. It never initiates a request and
-never decides cache policy. Each row preserves status, exact meta bytes, reporting MIME type,
-exact body bytes, original receipt time, expiration, and last access. Entries are limited to
-16 MiB, the store is limited to 256 MiB, and least-recently-used responses are evicted when
-necessary.
-
-Gemini cache policy is deliberately small. Completed successful image responses fetched from
-Gemini URLs are reusable for 24 hours. A capsule's completed `/favicon.txt` response is first
-validated by the favicon feature; valid responses and synthetic `51 NOT FOUND` responses for
-all completed unacceptable answers are retained for 30 days. Incomplete or failed favicon
-requests create no entry. Reload skips the content cache for the main response and removes
-any matching stored main response before requesting it again. Inline images always consult the
-cache first, including on Reload; their loader has no cache-bypass option. Missing or expired
-images enter its paced queue. Cache writes are ordered
-off the UI path, then flushed before orderly termination; the database is checkpointed and
-closed like the Back/Forward database.
-
-Browsing-data clearing is coordinated by `BrowsingDataController` on the app actor rather
-than issued independently by Settings. It updates every live tab, drains pre-clear incremental
-writes, saves sanitized session metadata, and removes stored responses. Back/Forward entries
-carry visit and last-access dates independently of response bodies; the standalone v2 migration
-seeds known dates from response receipt times. Missing legacy dates match conservatively.
-Deleting response bodies is independent of deleting navigation entries, so Clear Content Cache keeps
-session layout and reading state. Clear Browsing Data filters noncurrent visits while keeping
-each tab's current entry as an anchor. Current source/rendered data remains display-only and
-is not reconstructed into a retained snapshot on autosave.
-
-The shared content-cache actor advances a write generation on clearing. Fetchers capture it
-before looking up or requesting content; the store rejects results from earlier generations.
-Tab generations also fence lazy Back/Forward reads and favicon probes. Active requests and
-swipe staging are stopped; cleared draft prompts cannot re-save their text on dismissal.
-The operations are local, exclude bookmark/security/sync repositories, and propagate storage
-errors to the confirmation window. Data Management settings owns separate, transient time
-selections for browsing-data and content-cache clearing. `BrowsingDataController.present`
-captures a selected range for confirmation without a second picker; menu commands leave the
-range unspecified so the shared confirmation offers its own picker. Both entry points use the
-same clearing coordinator and safe Cancel default. Manager shortcuts use `openLocation` to
-create a selected tab in the frontmost browser window even while Settings is the key window;
-no clearing or reset behavior lives in the native tab controls.
-
-Stored Gemini responses replay header, body, and completion events through the same consumer
-used by live transport responses. This is a narrow compatibility boundary, not a universal
-protocol-neutral streaming framework. The policy can remain a no-op for future protocols
-until their own reuse rules are justified. Omnibar matching indexes local destination
-metadata rather than cached response bodies. Full-text content indexing and purposeful
-offline browsing remain separate future systems.
-
-`GeminiImageLoader` in Core owns inline image retrieval. One app-owned actor is shared by
-all tabs and returns complete `ContentResponse` bytes to the WebKit resource bridge. It
-reuses the existing transport, trust authorization, 16 MiB response limit, and content cache.
-Each capsule has an ordered queue and one cancelable worker. A monotonic sleep enforces the
-initial delay, request spacing, and exponential `44` backoff. Same-capsule redirect hops
-also pass through pacing. Fresh cache hits bypass the queue, and workers recheck after
-waiting. Successful responses are stored before releasing the next request. Duplicates
-share a worker with independently cancelable callers. Clicks promote waiting work; a
-sleeping worker can be replaced without changing the cooldown, while an active transfer
-finishes first. Worker identities fence results from canceled/replaced workers.
-
-The loader reports idle, pending, and requesting state to each caller. The presentation
-bridge consumes ordered state events to update the original link's static system-clock
-annotation, spinner, tooltip, and accessibility state. Document identities fence late events.
-Navigation/Stop cancels each page's image tasks, while per-capsule cooldown stays in the
-shared actor. Direct document navigation, favicon retrieval, and downloads retain their
-existing retrieval paths.
-
-`InlineImagePresentationScript` in AppKitSupport owns image-link discovery, visibility,
-interaction, annotations, and captions in WebKit's isolated client world. Automatic loading
-uses one `IntersectionObserver` per document, with
-the navigation inset excluded from its root. Hidden documents cannot submit visibility
-loads. The existing mutation observer registers streamed links, and each link is unobserved
-after its first submission. Scrolling does not poll or measure link geometry in Swift.
-Window resizing is handled by WebKit; navigation-inset changes update the observer root.
-Messages include the document URL and line ID and are validated against the tab's link map.
-Automatic loads start only after WebKit has parsed their links, avoiding state updates
-racing initial document creation. Received source bytes remain untouched.
-
-The tab publishes its image-task collection so the existing Reload/Stop control reflects
-image work without changing the main-response `isLoading` state. Stop cancels those tasks,
-clears unfinished expansion/history state, and sends a document-fenced cleanup command to
-the page script. That command removes only unfinished placeholders and annotations and
-disconnects automatic discovery for the visit. Swift also rejects late automatic submissions;
-navigation resets the pause. Canceling a load cancels its state-event consumer so a stale
-idle callback cannot overwrite the state of an immediate manual retry.
-
-## Presentation boundary
-
-WebKit renders Major Tom-controlled HTML derived from semantic document changes. Capsule text is escaped, destinations are validated, and the browser controls the document shell, stylesheet, and interaction bridge. Capsule content does not supply executable HTML or script.
-
-The presentation environment uses a restrictive content-security policy and intercepts Gemini links for normal tab navigation. Browser-owned interactions cross a small typed boundary; native WebKit hooks take precedence over custom script.
-
-The WebKit document remains edge-to-edge beneath Major Tom's navigation and Favorites
-chrome. Because those controls are a SwiftUI overlay rather than an AppKit toolbar or
-titlebar accessory, WebKit cannot infer their geometry. The presentation bridge applies
-the measured chrome height only to `NSScrollView.scrollerInsets`, keeping the scroll thumb
-below the browser chrome without removing the document background from the glass context.
-
-ANSI SGR escapes are parsed in Core, by a line-at-a-time splitter that turns a
-preformatted line into styled runs. It is not a terminal emulator and holds no state
-between lines, so it needs no cursor model and cannot be desynchronized by a streamed
-chunk boundary.
-
-The app resolves the selected CSS in an isolated, nonpersistent WebKit document through
-`ContentThemeResolver` in AppKitSupport. Its specimen is generated by the production renderer. It samples computed body and preformatted
-backgrounds (including transparent ancestor backgrounds) and foreground colors, then passes
-plain RGB values to Core. CSS is the only source of theme palette values; Core never
-parses CSS declarations or imports WebKit. Contrast adaptation remains in Core: the renderer
-is constructed with the palette, so the contrast rule is a pure
-function of author color and theme rather than something the view layer computes. That
-does mean an ANSI color is baked into the document as an inline color at render time,
-so changing content theme re-renders a document carrying escapes rather than only
-swapping the stylesheet.
-
-### Semantic document structure
-
-Each streamed document owns one non-Sendable `HTMLDocumentStreamRenderer` instance in
-Core. A tab installs a fresh renderer in `beginDocument`; history-swipe rendering uses a
-separate renderer so it cannot change the active stream's state. The renderer holds only
-open-list, quotation-paragraph, and preformatted state. It streams `ul`/`li` groups and
-one `blockquote` per consecutive quotation, with empty quoted lines separating paragraphs.
-Ordinary blank lines close groups and emit `br` line breaks, preserving extra blank lines
-without hidden spacer elements. Document completion or interruption
-closes any open structures before a status notice. These rules are invariant to byte/chunk
-boundaries and do not buffer the full response.
-
-Preformatted content is escaped text directly in `pre`; ANSI attributes alone produce
-styled spans. The renderer accounts for HTML's suppression of the first newline after
-`pre`, preserving leading blank lines in both Gemtext art and streamed plain text. Native
-`details`/`summary` disclosures remain; `PreformattedBlockPresentationScript` in AppKitSupport
-counts text lines and observes character-data changes, without per-line wrapper spans.
-Inline formatting uses `strong`, `em`, and `code` directly, retaining literal author markers.
-View Source uses an ordered list of escaped source lines with native marker numbering.
-Message and standalone-image markup share Core helpers between live and cached presentation.
-Document-kind body classes scope their styles; no stylesheet fragments are emitted in the body.
-
-### Content stylesheets
-
-`MajorTomCore` bundles `Base.css`, `Print.css`, and the built-in theme CSS files as SwiftPM
-resources. The app bundle includes that resource bundle. Core owns the small leading-comment
-metadata reader, bounded custom-file discovery, appearance selection, and preference migration.
-Each theme declares `@name` and `@appearance light|dark|both`; the convention borrows UserCSS
-field syntax without implementing UserCSS preprocessors or installation/update behavior.
-Built-in identities are stable resource filenames; custom identities use a separate `custom:`
-namespace plus the filename. Display names never override built-ins.
-
-`ContentThemeStore` in the app owns the catalog, macOS appearance observation, and directory
-and file event sources. Watching both supports in-place edits and atomic editor saves. Changes
-are debounced and WebKit resolution is generation-checked before publishing one coherent
-stylesheet/palette snapshot to all tabs. Initial navigation waits for the first resolution.
-Preference changes and custom files stay local; the existing synced preference projection
-excludes them. Application Support is resolved through Foundation and the production/development
-data scope, so sandbox adoption does not require a hardcoded user-home theme path.
-
-The cascade is base CSS, the app's resolved `color-scheme`, selected theme CSS, then print CSS.
-The app appends explicit reading width, zoom, and rendering-option rules. `<html data-appearance>`
-provides the app's chosen light/dark mode to themes that support both, independently of system
-media queries. Live updates change that attribute and the stylesheet together. ANSI documents
-are rebuilt from received bytes with scroll and preformatted presentation restoration; a theme
-change during streaming schedules that rebuild after the stream ends. Native background colors
-use the same resolved snapshot. The restrictive document CSP also applies to custom CSS: theme
-styling cannot load remote styles, fonts, or images. CSS embedded in the HTML shell is escaped
-against closing the style element. Received capsule bytes, View Source, and saved output remain
-unchanged. The supported variables and selectors are documented in [Content themes](content-themes.md).
-
-This boundary permits another renderer in the future without changing protocol, trust, parsing, or persistence. That is a containment boundary, not a plug-in system.
-
-## Security boundaries
-
-- TLS identity is decided before response content is trusted.
-- Parser output is encoded before presentation.
-- External schemes leave Major Tom only through explicit policy.
-- Automatic resources obey the same trust, redirect, and resource limits as foreground navigation.
-- The renderer cannot initiate arbitrary network activity.
-- User-approved trust replacement is explicit and auditable.
-
-## Verification
-
-Core tests cover URL interpretation, Gemini protocol behavior, streaming boundaries, parsing, trust, history, filenames, and persistence without launching the UI.
-
-UI and integration tests cover controlled resource delivery, navigation interception, theme changes, partial responses, cancellation, selection, native commands, window behavior, and accessibility-sensitive interactions. Performance work measures time to visible content, responsiveness while streaming, memory across multiple tabs, scrolling stability, and energy use.
+| [UI](subsystems/ui.md) | Native windows, tabs, menus, controls, accessibility, and all dialogs. |
+| [Browser](subsystems/browser.md) | User actions, feature workflows, per-tab navigation, and coordination. |
+| [Networking](subsystems/networking.md) | Requests, protocol framing, streaming responses, and resource scheduling. |
+| [Security and Identity](subsystems/security-and-identity.md) | Server trust, client identities, and destination scope. |
+| [Parsing](subsystems/parsing.md) | Response bodies interpreted as structured content. |
+| [Content Presentation](subsystems/content-presentation.md) | Safe WebKit rendering, themes, and document interactions. |
+| [Cache](subsystems/cache.md) | Response reuse, freshness, limits, and invalidation. |
+| [Data Persistence](subsystems/data-persistence.md) | Local storage, repositories, migrations, and remote synchronization. |
+
+These are responsibility boundaries, not a requirement for eight Swift targets.
+Browser contains focused feature components, not one application-wide coordinator.
+Application startup composes live services; testable components accept supplied
+dependencies and clocks rather than obtaining global instances themselves.
+
+## How they connect
+
+UI sends actions to Browser and observes its state. Browser coordinates Networking,
+Security and Identity, Parsing, Content Presentation, Cache, and Data Persistence.
+UI hosts the presentation surface and supplies native geometry and appearance.
+
+Networking consults Security and Identity and optionally Cache. Cache uses Data
+Persistence for storage. Security and Identity uses Data Persistence for trust and
+identity records, including a dedicated Keychain adapter. Parsing has no service
+dependencies. Content Presentation consumes parsed content and settings; it reports
+link activation and resource needs to Browser instead of making requests itself.
+Data Persistence contains its own synchronization adapters, separate from browsing
+Networking, and publishes committed changes through repository observations.
+
+A navigation flows from request metadata and body chunks, through Parsing, to
+incremental presentation. Cached responses enter that same content pipeline.
+Decision requests travel back to UI through Browser; replies resume only the
+workflow that requested them. Notifications and replies do not reverse ownership.
+
+## Boundary rules
+
+- Each kind of state has one authoritative owner. Persistence holds durable copies;
+  UI observes state rather than maintaining competing domain records.
+- Cross-subsystem contracts describe intent and results using plain data. They do
+  not expose SQL, storage paths, CloudKit records, SwiftUI views, or WebKit objects.
+  UI and Content Presentation necessarily use native objects at their hosting seam.
+- Only UI presents dialogs and performs native window or application actions.
+  Services report typed failures and decisions; UI owns localized wording.
+- Preserve received bytes. Parsing and presentation never rewrite source or saved
+  output. Capsule content is untrusted data, never executable app instructions.
+- Streaming distinguishes completion, cancellation, and failure. Request, document,
+  and account identities prevent late work from changing newer state.
+- Storage I/O and expensive work stay off the UI actor. Startup requires local
+  session state, not cloud access or cache maintenance.
+- Depend on narrow interfaces at external and subsystem boundaries. Avoid forwarding
+  layers, universal event buses, and speculative protocol or sync plugin frameworks.
+
+## Verification and code navigation
+
+Use controlled services and clocks for workflow tests, real temporary databases for
+storage tests, and focused WebKit/AppKit tests for native behavior. A small number of
+integration tests connect the boundaries. Each subsystem document names its key
+guarantees and testing approach; [the build guide](how-to-build.md) gives commands.
+
+`Sources/MajorTomCore` contains testable browser rules, protocol/content logic, and
+storage services; it does not import SwiftUI, AppKit, or WebKit.
+`Sources/MajorTomAppKitSupport` contains narrow native bridges.
+`Sources/MajorTom` contains the native application shell and platform integration.
+File and type inventories belong in code, not in this document.
+
+Future work belongs in [TODO](TODOs.txt).

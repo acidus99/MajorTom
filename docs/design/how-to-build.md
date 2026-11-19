@@ -97,7 +97,7 @@ log itself can contain URLs involved in browser activity, so review the archive 
 The live transport test is opt-in:
 
 ```bash
-MAJOR_TOM_LIVE_TEST=1 swift test --filter GeminiTransportIntegrationTests
+MAJOR_TOM_LIVE_TEST=1 swift test --disable-index-store --filter GeminiTransportIntegrationTests
 ```
 
 ## Notarized release
@@ -160,3 +160,34 @@ built-in `Themes/*.css` files. `Scripts/build-app.sh` copies
 `MajorTom_MajorTomCore.bundle` into the app's `Contents/Resources` before signing.
 Keep this bundle with the executable when packaging; built-in themes are never copied
 into the editable Application Support Themes directory.
+
+## Engineering and verification rules
+
+- Use XCTest, not Swift Testing. Match surrounding code; there is no configured
+  linter or formatter.
+- Add tests for changed Core behavior in `Tests/MajorTomCoreTests`. Test observable
+  behavior and invariants: source fidelity, escaping, round-trips, chunk boundaries,
+  limits, cancellation, and readable contrast. A regression test names the bug it
+  prevents in a comment.
+- Never pin generated HTML/CSS to exact literals copied from implementation. Such
+  tests restate constants rather than prove behavior; remove them instead of
+  maintaining change detectors.
+- Run `make test` after code changes. For changes to the app target, bundle resources,
+  signing, or packaging, also run `Scripts/build-app.sh` or `make dev` (tests plus an
+  ad-hoc bundle). Native UI changes need relevant keyboard/accessibility checks and
+  light/dark verification. Documentation-only changes need link and consistency checks.
+- Prefer controlled services and clocks for subsystem tests. Use actual temporary
+  databases for repository/migration tests and focused WebKit/AppKit tests for
+  platform behavior. Avoid live accounts or servers in the ordinary suite.
+- Always pass `--disable-index-store` to direct `swift build` and `swift test`
+  commands so an editor's indexer cannot collide with build records.
+- Before building, run `df -P .`. If the checkout is on a `//server/share` SMB device,
+  pass `--scratch-path "$HOME/Library/Caches/MajorTom/build"` to every direct
+  `swift build`, `swift test`, and `swift run`; never write `.build` to that share.
+  Remove a poisoned network `.build` before rebuilding. `make test` handles this
+  automatically through its runner.
+- `make prod` and `make release` sign/notarize/publish and are human-run only.
+
+The [UI design](subsystems/ui.md) records the native-control constraints that must
+survive changes. The [Data Persistence design](subsystems/data-persistence.md) owns
+storage and synchronization policy; this guide owns setup and operational commands.

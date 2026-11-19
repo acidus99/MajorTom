@@ -4,6 +4,9 @@ Major Tom themes are ordinary UTF-8 CSS files. The app loads its base stylesheet
 then the selected theme, then the print stylesheet. Themes can override variables or use
 normal CSS selectors, including nesting. No Sass compilation is required.
 
+This is the theme-authoring reference. [Content Presentation](subsystems/content-presentation.md)
+owns rendering and theme behavior; [TODO](TODOs.txt) tracks future theme-management UI.
+
 ## Installing and editing
 
 In Settings > Appearance, click **Open Custom Themes in Finder**. Add `.css` files to
@@ -25,8 +28,7 @@ unreadable files are reported in Appearance settings. Files must be no larger th
 subdirectories, hidden files, and symbolic links are not themes.
 
 Built-in themes remain in the app bundle and are replaced by app updates. Custom files
-and all Appearance settings stay local to this Mac. There is currently no import,
-duplicate, or preview interface.
+and all Appearance settings stay local to this Mac.
 
 ## Metadata
 
@@ -51,8 +53,8 @@ The first CSS comment must contain these two fields, each on its own line:
 ```
 
 `@appearance` accepts `light`, `dark`, or `both`. `@name` is the display name, so it may
-contain spaces. Other metadata fields are optional and retained for future use; they
-currently do not add controls to Settings. Duplicate fields are rejected. Field names
+contain spaces. Other metadata fields are optional descriptive metadata rather than
+Settings controls. Duplicate fields are rejected. Field names
 and appearance values are case-sensitive. This is Major Tom's metadata convention,
 inspired by UserCSS, rather than an implementation of the full UserCSS format.
 

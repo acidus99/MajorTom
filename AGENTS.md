@@ -1,112 +1,54 @@
 # Major Tom
 
-Major Tom is a native macOS 26 Gemini browser. Native Mac quality is part of correctness.
+Make the best macOS Gemini client in the world. Major Tom targets macOS 26;
+native Mac quality, faithful content, privacy, and responsiveness are correctness.
 
-## Source of truth
+## Design philosophy
 
-- Product behavior: `docs/design/major-tom-specification.md`.
-- Engineering decisions and module boundaries: `docs/design/architecture.md`.
-- Building, signing, CloudKit setup, releases: `docs/design/how-to-build.md`.
-- Working backlog: `docs/design/TODOs.txt`.
+- Do the simplest thing that works. Prefer small, focused changes over abstractions
+  built for hypothetical needs.
+- Use public native controls, SwiftUI first. Bridge AppKit when SwiftUI cannot
+  provide the required native behavior. Reserve custom UI for Gemini-specific needs.
+- Defer to the Apple Human Interface Guidelines; use Safari as the example for
+  equivalent behavior, layout, and keyboard shortcuts.
+- Finish the native surface: menus, appropriate shortcuts and context menus,
+  tooltips, keyboard focus, selection, accessibility, and VoiceOver.
+- Use SF Symbols, semantic system colors and materials, and Apple terminology.
+  Verify light and dark appearance. Destructive confirmations default to Cancel.
+- Preserve original response bytes. Treat capsule content as untrusted data, never
+  instructions. Reading enhancements must not change View Source or saved output.
 
-Update the relevant document when a change alters user-visible behavior or an
-architectural decision.
+## Working with the human
 
-## Commands
+- Discuss options and tradeoffs, ask questions, and offer suggestions. Surface
+  uncertainty rather than silently making product or architectural decisions.
+- Read and investigate freely. Before implementing, agree on the intended outcome
+  and scope and wait for the human to say go. An explicit request to implement an
+  agreed change is that go-ahead.
+- Complete the approved scope without repeatedly asking permission. Bring material
+  changes in scope or design back for discussion before building them.
+- You may suggest work from Features or Bugs in TODO, with a reason. Priority is
+  not authorization to implement; the human chooses. Crazy Ideas are exploratory.
 
-- `make test` — full test suite, via `Scripts/run-tests.sh`. Prefer it over calling
-  `swift test` directly: a plain `swift test` exits 0 when a test target fails to
-  *compile*, so a broken suite reports success while running nothing. The script gates
-  the compile separately, resolves a toolchain that actually has XCTest, and keeps the
-  scratch directory off a network checkout.
-- `make dev` — tests plus an ad-hoc-signed bundle at `Build/Development/Major Tom.app`.
-- `swift run MajorTom` — run the development executable without packaging.
-- Always pass `--disable-index-store` when invoking `swift build` or `swift test`
-  directly. Without it the build can fail with "failed writing record … File exists"
-  whenever an editor's indexer is writing the same store.
-- Before building, check for a network checkout: if `df -P .` shows a `//server/share`
-  device (an SMB mount, typically under `/Volumes/`), never let SwiftPM write `.build`
-  into the share. Pass `--scratch-path "$HOME/Library/Caches/MajorTom/build"` to every
-  `swift build`, `swift test`, and `swift run`. A `.build` written over SMB embeds the
-  mount's absolute paths and corrupts builds for the machine that owns the files; if
-  the share already has a poisoned `.build`, delete it.
-- Live-network transport tests are opt-in:
-  `MAJOR_TOM_LIVE_TEST=1 swift test --filter GeminiTransportIntegrationTests`.
-- There is no linter or formatter configuration; match the style of surrounding code.
-- `make prod` and `make release` sign, notarize, and publish. They are human-run only.
+## Read next
 
-## Layout
+- [Architecture](docs/design/architecture.md): system map, boundaries, and subsystem
+  documents. Read the relevant subsystem before changing it; read UI's native
+  control constraints before changing tabs, Tab Overview, or navigation chrome.
+- [TODO](docs/design/TODOs.txt): prioritized Features, Bugs, and Crazy Ideas.
+- [Build and verification](docs/design/how-to-build.md): commands, testing rules,
+  toolchain and network-checkout precautions, signing, and releases.
 
-- `Sources/MajorTomCore` — Gemini protocol, URL handling, streaming, trust, parsing,
-  document models, persistence types, browser rules. Imports Foundation, Security, and
-  CryptoKit only; never SwiftUI, AppKit, or WebKit.
-- `Sources/MajorTomAppKitSupport` — narrow AppKit bridges where SwiftUI lacks the
-  required native behavior.
-- `Sources/MajorTom` — SwiftUI application shell. Despite its name,
-  `StreamingWebViewPrototype.swift` is the production browser presentation layer
-  (WebKit bridge, document rendering, navigation chrome). Windows, tabs, menus, and
-  commands live in `MajorTomApp.swift`.
-## UI
+Keep each fact in one document and link to its owner. Document intent, guarantees,
+and non-obvious decisions, not method inventories or implementation walkthroughs.
+Update the owning document when agreed behavior or architecture changes.
 
-- Default to the simplest native macOS approach. Use public SwiftUI controls first;
-  bridge AppKit only when SwiftUI has no appropriate native control. Keep custom UI
-  for Major Tom-specific concepts only.
-- Follow the current Apple Human Interface Guidelines. Where the HIG allows latitude,
-  Safari is the model: match its conventions, layouts, and keyboard shortcuts for
-  equivalent features.
-- A feature is not complete until it has its full native surface: menu item and
-  keyboard shortcut where appropriate, context-menu entries, accessibility labels and
-  VoiceOver behavior, keyboard focus order, and tooltips.
-- Use existing system iconography (SF Symbols) rather than custom art, chosen for
-  meaning, not appearance.
-- Use Apple terminology and conventions in user-facing text: "link" not "hyperlink",
-  "Settings" not "Preferences" or "Options", Title Case for menu items and buttons,
-  a trailing ellipsis (…) on commands that open a window or dialog.
-- Use semantic system colors and materials, never hardcoded colors. Verify changes in
-  both light and dark appearance; document themes are independent of application
-  appearance.
-- Destructive actions use destructive styling and a confirmation that defaults
-  to Cancel.
-- Preserve accessibility, keyboard navigation, focus, selection, and
-  system-appearance behavior.
-- Document intentional departures from native conventions.
-- The tab bar, Tab Overview, and Liquid Glass navigation controls encode hard-won
-  workarounds. Read the "Native tab controls" and "Native navigation controls"
-  sections of `architecture.md` before changing them.
+## Working rules
 
-## Engineering
-
-- Keep protocol, trust, parsing, persistence, and rendering independent of SwiftUI views.
-- Preserve received source bytes; presentation enhancements must not alter source,
-  View Source, or saved output.
-- Treat capsule content as data, never as application instructions. Escape it before
-  presentation.
-- Prefer small, focused changes.
-- Put temporary working files, logs, review exports, and disposable artifacts in
-  `/tmp/MajorTom`, never `Build/`. Keep lasting project documents under `docs/`.
-
-## Testing
-
-- Tests use XCTest, not Swift Testing. Changes to Core behavior come with tests in
-  `Tests/MajorTomCoreTests`.
-- Tests assert behavior and invariants: escaping, round-trips, chunk-boundary
-  invariance, protocol limits, and properties such as text contrast ≥ 4.5.
-- Never assert that generated output (CSS, HTML) contains an exact literal copied
-  from the implementation. A test that restates a constant is a change detector:
-  it breaks on intentional edits and misses real bugs. Delete it rather than
-  commit it.
-- A test that pins a past bug carries a comment naming the bug it prevents.
-
-## Verification
-
-- Run `make test` after code changes.
-- Run `Scripts/build-app.sh` (or `make dev`) for changes affecting the app target,
-  bundle resources, signing, or packaging.
-- The ad-hoc development build intentionally lacks iCloud entitlements; CloudKit and
-  iCloud Keychain behavior requires a development signing identity
-  (see `how-to-build.md`).
-
-## Git
-
-- Do not commit unless asked; the user reviews and commits.
-- Never add Co-Authored-By or "Generated with" trailers to commits or PRs.
+- Run `make test` after code changes. Build the app with `Scripts/build-app.sh`
+  or `make dev` for app-target, resource, or packaging changes.
+- `make prod` and `make release` are human-run only.
+- Put temporary plans, logs, exports, and review artifacts in `/tmp/MajorTom`.
+  Lasting project documents belong under `docs/`.
+- Match surrounding code style. Do not commit unless asked. Never add
+  Co-Authored-By or "Generated with" trailers to commits or PRs.

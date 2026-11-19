@@ -59,3 +59,10 @@ Release available via GitHub [GitHub Releases page](https://github.com/acidus99/
 ## Help Wanted
 
 I would appreciate opening bugs feature requests on Github or reach out to me via `gemini://gemi.dev/contact.gmi`
+
+## Development
+
+Start with [project principles and collaboration](AGENTS.md), the
+[architecture overview](docs/design/architecture.md), and
+[build and test instructions](docs/design/how-to-build.md).
+The [TODO](docs/design/TODOs.txt) separates Features, Bugs, and Crazy Ideas.
