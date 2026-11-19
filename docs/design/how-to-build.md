@@ -94,6 +94,9 @@ summary (database integrity, migration state, outbox and record-type counts). It
 does not copy bookmark data, page bodies, preferences, certificates, or Keychain material. The
 log itself can contain URLs involved in browser activity, so review the archive before sharing.
 
+The ordinary TLS tests use macOS’s Python and OpenSSL to host a localhost server
+with temporary synthetic keys. They do not use user Keychain items or remote capsules.
+
 Performance characterization is separate from the functional suite. Run it explicitly:
 
 ```bash
