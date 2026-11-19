@@ -44,28 +44,6 @@ public enum CloudDataModelCompatibility: Equatable, Sendable {
     case unexpectedOlderFormat
 }
 
-/// Coalesces paged cloud results without assuming that a changing server returns each
-/// identifier only once. Package-visible so the CloudKit adapter and its model tests
-/// share the exact duplicate-resolution rule.
-package func newestValuesByID<Value, ID: Hashable>(
-    _ values: [Value],
-    id: (Value) -> ID,
-    modifiedAt: (Value) -> Date?
-) -> [ID: Value] {
-    var result: [ID: Value] = [:]
-    for candidate in values {
-        let identifier = id(candidate)
-        guard let existing = result[identifier] else {
-            result[identifier] = candidate
-            continue
-        }
-        if (modifiedAt(candidate) ?? .distantPast) >= (modifiedAt(existing) ?? .distantPast) {
-            result[identifier] = candidate
-        }
-    }
-    return result
-}
-
 /// A versioned, conflict-resolvable preferences snapshot for private iCloud sync.
 ///
 /// The timestamp belongs to the payload rather than CloudKit's record metadata so the
@@ -347,87 +325,6 @@ extension SyncedBookmarkFolder: CloudModifiedRecord {
 
 extension SyncedBookmark: CloudModifiedRecord {
     public var cloudModifiedAt: Date { modifiedAt }
-}
-
-// MARK: - Conflict-safe server trust
-
-public struct SyncedServerTrustDecision: Codable, Equatable, Identifiable, Sendable {
-    public var endpoint: CapsuleEndpoint
-    public var publicKeySHA256: String
-    public var firstTrustedAt: Date
-    public var modifiedAt: Date
-    public var deletedAt: Date?
-
-    public var id: String {
-        "\(endpoint.host.lowercased()):\(endpoint.port)|\(publicKeySHA256.lowercased())"
-    }
-
-    public init(
-        endpoint: CapsuleEndpoint,
-        publicKeySHA256: String,
-        firstTrustedAt: Date,
-        modifiedAt: Date,
-        deletedAt: Date? = nil
-    ) {
-        self.endpoint = endpoint
-        self.publicKeySHA256 = publicKeySHA256.lowercased()
-        self.firstTrustedAt = firstTrustedAt
-        self.modifiedAt = modifiedAt
-        self.deletedAt = deletedAt
-    }
-}
-
-public struct SyncedServerTrust: Codable, Equatable, Sendable {
-    public var decisions: [SyncedServerTrustDecision]
-
-    public init(decisions: [SyncedServerTrustDecision] = []) {
-        self.decisions = decisions
-    }
-
-    public func reconciled(with identities: [TrustedServerIdentity], at date: Date) -> Self {
-        let userIdentities = identities.filter { $0.source == .user }
-        let current = userIdentities.map {
-            SyncedServerTrustDecision(
-                endpoint: $0.endpoint,
-                publicKeySHA256: $0.publicKeySHA256,
-                firstTrustedAt: $0.firstTrustedAt,
-                modifiedAt: date
-            )
-        }
-        let currentIDs = Set(current.map(\.id))
-        let oldByID = Dictionary(uniqueKeysWithValues: decisions.map { ($0.id, $0) })
-        var next = current.map { incoming -> SyncedServerTrustDecision in
-            guard let old = oldByID[incoming.id], old.deletedAt == nil else { return incoming }
-            return old
-        }
-        next += decisions.filter { !currentIDs.contains($0.id) }.map { old in
-            guard old.deletedAt == nil else { return old }
-            var tombstone = old
-            tombstone.modifiedAt = date
-            tombstone.deletedAt = date
-            return tombstone
-        }
-        return Self(decisions: next.sorted { $0.id < $1.id })
-    }
-
-    public func merging(_ other: Self) -> Self {
-        var latest: [String: SyncedServerTrustDecision] = [:]
-        for decision in decisions + other.decisions
-        where latest[decision.id]?.modifiedAt ?? .distantPast < decision.modifiedAt {
-            latest[decision.id] = decision
-        }
-        return Self(decisions: latest.values.sorted { $0.id < $1.id })
-    }
-
-    public var activeByEndpoint: [CapsuleEndpoint: [SyncedServerTrustDecision]] {
-        Dictionary(grouping: decisions.filter { $0.deletedAt == nil }, by: \.endpoint)
-    }
-
-    public var conflictingEndpoints: Set<CapsuleEndpoint> {
-        Set(activeByEndpoint.compactMap { endpoint, decisions in
-            Set(decisions.map(\.publicKeySHA256)).count > 1 ? endpoint : nil
-        })
-    }
 }
 
 /// The small, privacy-conscious representation published for Safari-like iCloud Tabs.

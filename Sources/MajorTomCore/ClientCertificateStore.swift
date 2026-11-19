@@ -530,7 +530,6 @@ public final class ClientCertificateStore: ObservableObject {
         }
     }
 
-
     public func reloadCommittedCatalogue() async {
         await reloadLatestCatalogue()
         _ = await repairDuplicateMetadata()

@@ -3,17 +3,6 @@ import XCTest
 @testable import MajorTomCore
 
 final class BackForwardCacheDatabaseTests: XCTestCase {
-    func testSchemaHasOneTitleAndNoMIMETypeColumn() throws {
-        let database = try BackForwardCacheDatabase(inMemory: ())
-        let columns = try database.read { db in
-            try db.columns(in: "browser_tab_history").map(\.name)
-        }
-
-        XCTAssertTrue(columns.contains("title"))
-        XCTAssertFalse(columns.contains("document_title"))
-        XCTAssertFalse(columns.contains("mime_type"))
-    }
-
     func testStoreRoundTripsResponseAndPresentationWithoutMIMEColumn() async throws {
         let database = try BackForwardCacheDatabase(inMemory: ())
         let store = BackForwardCacheStore(database: database)

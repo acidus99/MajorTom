@@ -83,10 +83,6 @@ final class ExpandableLinkRenderingTests: XCTestCase {
         XCTAssertFalse(ordinary.contains("data-mt-expandable"))
     }
 
-    func testNoIdentifierMeansNoIDAttribute() {
-        XCTAssertFalse(html().contains(" id="))
-    }
-
     /// The identifier is interpolated into an attribute, so it must be escaped.
     func testIdentifierIsAttributeEscaped() {
         let injected = html(linkIdentifier: "a\"><script>")

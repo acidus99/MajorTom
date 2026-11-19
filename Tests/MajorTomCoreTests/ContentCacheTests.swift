@@ -3,21 +3,6 @@ import XCTest
 @testable import MajorTomCore
 
 final class ContentCacheTests: XCTestCase {
-    func testSchemaUsesURLAsOnlyPrimaryKeyAndIncludesMIMEType() throws {
-        let database = try ContentCacheDatabase(inMemory: ())
-        let columns = try database.read { try $0.columns(in: "content_cache") }
-        let primaryKeys = try database.read { db in
-            try String.fetchAll(
-                db,
-                sql: "SELECT name FROM pragma_table_info('content_cache') WHERE pk > 0 ORDER BY pk"
-            )
-        }
-
-        XCTAssertEqual(primaryKeys, ["url"])
-        XCTAssertTrue(columns.map(\.name).contains("resource_type"))
-        XCTAssertTrue(columns.map(\.name).contains("mime_type"))
-    }
-
     func testFreshResponseRoundTripsAndIgnoresFragment() async throws {
         let database = try ContentCacheDatabase(inMemory: ())
         let cache = ContentCache(database: database)

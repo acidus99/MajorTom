@@ -35,39 +35,6 @@ final class CloudSyncModelTests: XCTestCase {
 
         XCTAssertEqual(manifest.compatibility(readerMajor: 2, writerMajor: 2), .unexpectedOlderFormat)
     }
-    func testPagedCloudResultsKeepNewestDuplicateWithoutTrapping() {
-        struct Value: Equatable {
-            var id: String
-            var modifiedAt: Date?
-            var payload: String
-        }
-        let older = Value(
-            id: "duplicate",
-            modifiedAt: Date(timeIntervalSince1970: 10),
-            payload: "older"
-        )
-        let unrelated = Value(
-            id: "other",
-            modifiedAt: Date(timeIntervalSince1970: 15),
-            payload: "other"
-        )
-        let newer = Value(
-            id: "duplicate",
-            modifiedAt: Date(timeIntervalSince1970: 20),
-            payload: "newer"
-        )
-
-        let coalesced = newestValuesByID(
-            [older, unrelated, newer],
-            id: \.id,
-            modifiedAt: \.modifiedAt
-        )
-
-        XCTAssertEqual(coalesced.count, 2)
-        XCTAssertEqual(coalesced["duplicate"], newer)
-        XCTAssertEqual(coalesced["other"], unrelated)
-    }
-
     func testNewerPreferencesReplaceOlderPreferences() {
         let old = SyncedBrowserPreferences(
             preferences: BrowserPreferences(homepage: "gemini://old.example/"),
@@ -575,36 +542,4 @@ final class CloudSyncModelTests: XCTestCase {
         XCTAssertEqual(repaired.canonicalizingDuplicateCertificates(at: .distantFuture), repaired)
     }
 
-    func testDifferentActiveTrustKeysBecomeAConflict() {
-        let endpoint = CapsuleEndpoint(host: "example.com", port: 1_965)
-        let first = SyncedServerTrust(decisions: [SyncedServerTrustDecision(
-            endpoint: endpoint,
-            publicKeySHA256: String(repeating: "a", count: 64),
-            firstTrustedAt: Date(timeIntervalSince1970: 10),
-            modifiedAt: Date(timeIntervalSince1970: 10)
-        )])
-        let second = SyncedServerTrust(decisions: [SyncedServerTrustDecision(
-            endpoint: endpoint,
-            publicKeySHA256: String(repeating: "b", count: 64),
-            firstTrustedAt: Date(timeIntervalSince1970: 20),
-            modifiedAt: Date(timeIntervalSince1970: 20)
-        )])
-
-        XCTAssertEqual(first.merging(second).conflictingEndpoints, [endpoint])
-    }
-
-    func testServerTrustMergeIsStableWhenCloudRecordOrderChanges() {
-        let decisions = ["one.example", "two.example"].map { host in
-            SyncedServerTrustDecision(
-                endpoint: CapsuleEndpoint(host: host, port: 1_965),
-                publicKeySHA256: String(repeating: host.first!, count: 64),
-                firstTrustedAt: Date(timeIntervalSince1970: 10),
-                modifiedAt: Date(timeIntervalSince1970: 10)
-            )
-        }
-        let state = SyncedServerTrust(decisions: decisions)
-        let reordered = SyncedServerTrust(decisions: decisions.reversed())
-
-        XCTAssertEqual(state.merging(state), state.merging(reordered))
-    }
 }

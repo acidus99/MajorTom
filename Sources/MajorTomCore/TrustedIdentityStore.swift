@@ -212,37 +212,6 @@ public actor TrustedIdentityStore {
         changeHandler?(sortedIdentities())
     }
 
-    /// Applies unambiguous user trust decisions received from CloudKit. Seed policy and
-    /// locally observed certificate details remain local. Callers must exclude endpoints
-    /// with more than one active fingerprint so a conflict can never become silent trust.
-    public func applySyncedUserTrust(_ decisions: [SyncedServerTrustDecision]) throws {
-        pendingSightingFlush?.cancel()
-        pendingSightingFlush = nil
-        var updated = records.filter { $0.value.source == .seed }
-        for decision in decisions where decision.deletedAt == nil {
-            // A bundled/local seed is machine policy and remains authoritative over a
-            // cloud decision. A mismatch will continue through the normal warning flow.
-            guard updated[decision.endpoint]?.source != .seed else { continue }
-            if let existing = records[decision.endpoint],
-               existing.publicKeySHA256.caseInsensitiveCompare(
-                    decision.publicKeySHA256
-               ) == .orderedSame {
-                updated[decision.endpoint] = existing
-            } else {
-                updated[decision.endpoint] = TrustedServerIdentity(
-                    endpoint: decision.endpoint,
-                    publicKeySHA256: decision.publicKeySHA256,
-                    source: .user,
-                    firstTrustedAt: decision.firstTrustedAt,
-                    lastSeenAt: decision.firstTrustedAt,
-                    timesSeen: 0
-                )
-            }
-        }
-        records = updated
-        try persist()
-    }
-
     private func persist() throws {
         if let repository {
             try repository.save(sortedIdentities())

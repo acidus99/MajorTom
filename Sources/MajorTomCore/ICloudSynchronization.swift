@@ -203,7 +203,7 @@ public final class ICloudSynchronization: NSObject, ObservableObject, @preconcur
     }
 
     public func start() {
-        guard !hasStarted else { return }
+        guard !hasStarted, !isTerminating else { return }
         hasStarted = true
         pathMonitor.start(queue: pathMonitorQueue)
         NSUbiquitousKeyValueStore.default.synchronize()

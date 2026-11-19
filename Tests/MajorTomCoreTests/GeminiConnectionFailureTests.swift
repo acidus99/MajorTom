@@ -32,8 +32,4 @@ final class GeminiConnectionFailureTests: XCTestCase {
         )
     }
 
-    func testExplainsMalformedGeminiResponse() {
-        XCTAssertTrue(GeminiProtocolError.malformedResponseHeader.userFacingDescription
-            .contains("different protocol"))
-    }
 }

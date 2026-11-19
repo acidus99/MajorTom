@@ -122,8 +122,6 @@ public final class BrowserSettingsStore: ObservableObject {
         isApplyingRemotePreferences = false
     }
 
-
-
     /// Restores the browser's configurable preferences without touching capsule trust
     /// decisions or client certificates, which are stored independently.
     public func restoreDefaultSettings() {
