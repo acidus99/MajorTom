@@ -380,7 +380,8 @@ public struct ClientCertificateAssociation: Codable, Equatable, Identifiable, Se
         certificateID: UUID,
         url: URL
     ) -> ClientCertificateAssociation? {
-        guard let endpoint = CapsuleEndpoint(url: url) else { return nil }
+        guard url.scheme?.lowercased() == "gemini",
+              let endpoint = CapsuleEndpoint(url: url) else { return nil }
         return ClientCertificateAssociation(
             certificateID: certificateID,
             endpoint: endpoint,
@@ -390,7 +391,8 @@ public struct ClientCertificateAssociation: Codable, Equatable, Identifiable, Se
     }
 
     public func matches(_ url: URL) -> Bool {
-        guard CapsuleEndpoint(url: url) == endpoint else { return false }
+        guard url.scheme?.lowercased() == "gemini",
+              CapsuleEndpoint(url: url) == endpoint else { return false }
         if scope == .entireCapsule { return true }
         let candidate = Self.requestPath(for: url)
         if pathPrefix == "/" { return true }

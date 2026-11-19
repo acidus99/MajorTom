@@ -12,6 +12,39 @@ final class MainDocumentRetrieverTests: XCTestCase {
     private let url = URL(string: "gemini://example.com/start")!
     private let bytes = fixtureBytes
 
+    func testProxiedHTTPDoesNotDiscloseAGeminiScopedIdentity() async throws {
+        let descriptor = certificate()
+        let scope = ClientCertificateAssociation.entireCapsule(
+            certificateID: descriptor.id, endpoint: CapsuleEndpoint(host: "example.com")
+        )
+        let source = ScriptedDocumentSource { _ in [.responseHeader(try fixtureHeader()), .completed] }
+        let retriever = makeRetriever(source.events, resolve: { destination in
+            // Uses the same actual scope matcher as ClientCertificateStore resolution.
+            guard scope.matches(destination) else { return nil }
+            return MainDocumentIdentity(descriptor: descriptor, credential: "synthetic-secret")
+        })
+        for scheme in ["http", "https"] {
+            let resource = URL(string: "\(scheme)://example.com/private/file")!
+            let proxy = GeminiProxyConfiguration(host: "proxy.example", port: 1965)
+            _ = await collect(retriever.events(for: try GeminiRequestTarget(proxying: resource, through: proxy), proxy: proxy))
+            XCTAssertNil(source.requests.last?.credential, "A Gemini identity must not be offered to the proxy for an HTTP(S) origin")
+        }
+    }
+
+    func testProxyTransportNeverResolvesOrOffersAClientIdentity() async throws {
+        let source = ScriptedDocumentSource { _ in [.responseHeader(try fixtureHeader()), .completed] }
+        let retriever = makeRetriever(source.events, resolve: { _ in
+            XCTFail("Proxy requests must not resolve client credentials")
+            return nil
+        })
+        let proxy = GeminiProxyConfiguration(host: "proxy.example", port: 1965)
+        for scheme in ["http", "https", "gemini"] {
+            let resource = URL(string: "\(scheme)://example.com/private")!
+            _ = await collect(retriever.events(for: try GeminiRequestTarget(proxying: resource, through: proxy), proxy: proxy))
+            XCTAssertNil(source.requests.last?.credential)
+        }
+    }
+
     func testStreamsExactChunksBeforeOneTerminalResult() async throws {
         let source = ControlledDocumentSource()
         let received = expectation(description: "First body delivered before completion")

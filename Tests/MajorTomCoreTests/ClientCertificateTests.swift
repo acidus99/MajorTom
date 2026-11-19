@@ -5,6 +5,18 @@ import XCTest
 final class ClientCertificateTests: XCTestCase {
     private let root = URL(string: "gemini://example.com/")!
 
+    func testGeminiIdentityScopeNeverMatchesOtherSchemes() throws {
+        let association = ClientCertificateAssociation.entireCapsule(
+            certificateID: UUID(), endpoint: CapsuleEndpoint(host: "example.com")
+        )
+        for scheme in ["http", "https", "file"] {
+            let url = URL(string: "\(scheme)://example.com/private")!
+            XCTAssertFalse(association.matches(url))
+            XCTAssertNil(ClientCertificateAssociation.pathAndDescendants(certificateID: UUID(), url: url))
+        }
+        XCTAssertTrue(association.matches(root))
+    }
+
     func testEntireCapsuleIncludesEveryPathButNotAnotherPort() throws {
         let association = ClientCertificateAssociation.entireCapsule(
             certificateID: UUID(),

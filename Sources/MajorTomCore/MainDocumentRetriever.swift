@@ -124,7 +124,9 @@ public struct MainDocumentRetriever<Credential: Sendable>: Sendable {
                 }
                 visited.insert(target.url)
                 let generation = await cache?.writeGeneration
-                let identity = await resolveIdentity(target.url)
+                let isDirectGemini = target.url.scheme?.lowercased() == "gemini"
+                    && CapsuleEndpoint(url: target.url) == target.endpoint
+                let identity = isDirectGemini ? await resolveIdentity(target.url) : nil
                 try Task.checkCancellation()
                 let offered = identity?.credential == nil ? nil : identity?.descriptor
                 let cached: ContentResponse?

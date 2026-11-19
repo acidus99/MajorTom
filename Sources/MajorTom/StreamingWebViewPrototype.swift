@@ -1939,6 +1939,15 @@ final class BrowserModel: ObservableObject {
                     }
 
                     if header.requiresClientCertificate {
+                        guard target.url.scheme?.lowercased() == "gemini",
+                              CapsuleEndpoint(url: target.url) == target.endpoint else {
+                            showGeneratedPage(
+                                title: "Proxy Requires an Identity",
+                                message: "Major Tom does not send client certificates to Gemini proxies.",
+                                details: header.meta, url: target.url, disposition: disposition
+                            )
+                            return
+                        }
                         pendingClientCertificateChallenge = (
                             target: target,
                             disposition: disposition,

@@ -35,7 +35,8 @@ identity export is a separate operation with a UI-chosen destination.
   Decisions for one endpoint are serialized so competing first visits cannot
   silently establish different pins.
 - Client identities are offered only within an explicitly approved destination/path
-  scope. Redirects cannot expand that scope. Separate identity metadata from whether
+  scope on direct Gemini requests. HTTP requests and Gemini proxy connections never
+  receive a client certificate. Redirects cannot expand that scope. Separate identity metadata from whether
   the actual Keychain identity is currently available.
 - Client metadata may arrive before or after iCloud Keychain material. Missing keys
   mean unavailable, not deleted; remote metadata deletion never deletes a private key.
