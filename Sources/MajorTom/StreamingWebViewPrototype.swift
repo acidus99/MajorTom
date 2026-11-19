@@ -78,7 +78,7 @@ private final class LinkHoverScriptHandler: NSObject, WKScriptMessageHandler {
             if payload["shift"] as? Bool == true { modifiers.insert(.shift) }
             if payload["option"] as? Bool == true { modifiers.insert(.option) }
             if payload["control"] as? Bool == true { modifiers.insert(.control) }
-            browser?.updateHoveredLink(payload["href"] as? String, modifiers: modifiers)
+            browser?.session.updateHoveredLink(payload["href"] as? String, modifiers: modifiers)
         }
     }
 }
@@ -101,7 +101,7 @@ private final class ScrollPositionScriptHandler: NSObject, WKScriptMessageHandle
     ) {
         guard browser?.acceptsDocumentMessage(message) == true,
               let offset = message.body as? Double, offset.isFinite else { return }
-        browser?.recordScrollPosition(offset, from: message.frameInfo.request.url)
+        browser?.session.recordScrollPosition(offset, from: message.frameInfo.request.url)
     }
 }
 
@@ -167,7 +167,7 @@ private final class InlineImageScriptHandler: NSObject, WKScriptMessageHandler {
               let documentURL = URL(string: document) else { return }
         Task { @MainActor [weak browser] in
             guard browser?.acceptsDocumentMessage(message) == true else { return }
-            browser?.handleInlineImageMessage(
+            browser?.session.handleInlineImageMessage(
                 lineIdentifier: identifier, url: url, action: action, documentURL: documentURL
             )
         }
@@ -191,7 +191,7 @@ private final class PreformattedBlockStateScriptHandler: NSObject, WKScriptMessa
               let payload = message.body as? [String: Any],
               let index = payload["index"] as? NSNumber,
               let collapsed = payload["collapsed"] as? NSNumber else { return }
-        browser?.recordPreformattedState(
+        browser?.session.recordPreformattedState(
             index: index.intValue,
             collapsed: collapsed.boolValue,
             from: message.frameInfo.request.url
@@ -240,37 +240,21 @@ final class BrowserModel: ObservableObject {
     private let inlineImageScriptHandler: InlineImageScriptHandler
     private let scrollPositionScriptHandler: ScrollPositionScriptHandler
     private let preformattedStateScriptHandler: PreformattedBlockStateScriptHandler
-    var committedURL: URL? { session.committedURL }
-    var isLoading: Bool { session.isLoading }
-    var hoveredLinkURL: String? { session.hoveredLinkURL }
-    var title: String { session.title }
-    var documentTitle: String? { session.documentTitle }
-    var favicon: String? { session.favicon }
-    var internalPage: InternalPage? { session.internalPage }
-    var canSavePage: Bool { session.canSavePage }
-    var canShowSource: Bool { session.canShowSource }
-    var canGoBack: Bool { session.canGoBack }
-    var canGoForward: Bool { session.canGoForward }
-    var serverIdentity: PresentedServerIdentity? { session.serverIdentity }
-    var usedClientCertificate: ClientCertificateDescriptor? { session.usedClientCertificate }
-    var pageZoom: Double { session.pageZoom }
-    var retryNotBefore: Date? { session.retryNotBefore }
-    var hasPresentedInitialDocument: Bool { session.hasPresentedInitialDocument }
-    var isRestoringHistoryScroll: Bool { session.isRestoringHistoryScroll }
-    var canReload: Bool { session.canReload }
-    var canStop: Bool { session.canStop }
-    var backHistoryEntries: [BackForwardEntry] { session.backHistoryEntries }
-    var forwardHistoryEntries: [BackForwardEntry] { session.forwardHistoryEntries }
-    var restorationState: RestoredTabState { session.restorationState }
-    var canCheckArchive: Bool { session.canCheckArchive }
-    var locationText: String { get { session.locationText } set { session.locationText = newValue } }
-    var validationMessage: String? { get { session.validationMessage } set { session.validationMessage = newValue } }
-    var inputPrompt: InputPrompt? { get { session.inputPrompt } set { session.inputPrompt = newValue } }
-    var clientCertificatePrompt: ClientCertificatePrompt? { get { session.clientCertificatePrompt } set { session.clientCertificatePrompt = newValue } }
-    var inputValidationMessage: String? { get { session.inputValidationMessage } set { session.inputValidationMessage = newValue } }
-    var openInNewTab: ((URL, Bool) -> Void)? { get { session.openInNewTab } set { session.openInNewTab = newValue } }
-    var openInNewWindow: ((URL) -> Void)? { get { session.openInNewWindow } set { session.openInNewWindow = newValue } }
-    var statusText: String { get { session.statusText } set { session.reportNativeResult(status: newValue) } }
+    private var committedURL: URL? { session.committedURL }
+    private var title: String { session.title }
+    private var documentTitle: String? { session.documentTitle }
+    private var canSavePage: Bool { session.canSavePage }
+    private var canShowSource: Bool { session.canShowSource }
+    private var canGoBack: Bool { session.canGoBack }
+    private var canGoForward: Bool { session.canGoForward }
+    private var canReload: Bool { session.canReload }
+    private var canStop: Bool { session.canStop }
+    private var canCheckArchive: Bool { session.canCheckArchive }
+    private var validationMessage: String? { get { session.validationMessage } set { session.validationMessage = newValue } }
+    private var clientCertificatePrompt: ClientCertificatePrompt? { get { session.clientCertificatePrompt } set { session.clientCertificatePrompt = newValue } }
+    private var openInNewTab: ((URL, Bool) -> Void)? { get { session.openInNewTab } set { session.openInNewTab = newValue } }
+    private var openInNewWindow: ((URL) -> Void)? { get { session.openInNewWindow } set { session.openInNewWindow = newValue } }
+    private var statusText: String { get { session.statusText } set { session.reportNativeResult(status: newValue) } }
     private var activeWebDocumentURL: URL? { session.activeWebDocumentURL }
 
     init(services: BrowserSessionServices, settings: BrowserSettingsStore, themes: ContentThemeStore,
@@ -342,8 +326,8 @@ final class BrowserModel: ObservableObject {
         let router = presentation.router
         router.openURL = { [weak session] in session?.openLink($0) }
         router.downloadURL = { [weak self] in self?.download($0) }
-        router.openInNewTab = { [weak self] in self?.openInNewTab?($0, $1) }
-        router.openInNewWindow = { [weak self] in self?.openInNewWindow?($0) }
+        router.openInNewTab = { [weak self] in self?.session.openInNewTab?($0, $1) }
+        router.openInNewWindow = { [weak self] in self?.session.openInNewWindow?($0) }
         router.canOpenInApp = { [weak session] in session?.canOpenInApp($0) ?? false }
         session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
         presentation.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
@@ -351,38 +335,9 @@ final class BrowserModel: ObservableObject {
         settings.preferencesDidChange.sink { [weak session] in session?.preferencesChanged(to: $0) }.store(in: &cancellables)
         ModifierFlagsMonitor.shared.flagsDidChange.sink { [weak self] in self?.updateHoveredLinkModifiers($0) }.store(in: &cancellables)
     }
-    func start() { session.start() }
-    func submitLocation() { session.submitLocation() }
-    func reload() { session.reload() }
-    func goBack() { session.goBack() }
-    func goForward() { session.goForward() }
-    func goHome() { session.goHome() }
-    func goToCapsuleRoot() { session.goToCapsuleRoot() }
-    func goUpOneLevel() { session.goUpOneLevel() }
-    func zoomIn() { session.zoomIn() }
-    func zoomOut() { session.zoomOut() }
-    func actualSize() { session.actualSize() }
-    func showPageSource() { session.showPageSource() }
-    func cancelClientCertificatePrompt(id: UUID) { session.cancelClientCertificatePrompt(id: id) }
-    func openArchive() { session.openArchive() }
-    func finishClearing() { session.finishClearing() }
     func stop() { session.stop(); cancelHistorySwipePreparation() }
-    func searchLocation(_ query: String) { session.searchLocation(query) }
-    func openFile(_ url: URL, disposition: HistoryDisposition = .new) { session.openFile(url, disposition: disposition) }
-    func showInternalPage(_ page: InternalPage, disposition: HistoryDisposition = .new) { session.showInternalPage(page, disposition: disposition) }
-    func go(toHistoryEntryWithID id: BackForwardEntry.ID) { session.go(toHistoryEntryWithID: id) }
-    func cancelInput(draft: String = "", for promptID: UUID) { session.cancelInput(draft: draft, for: promptID) }
-    func preserveInputDraft(_ draft: String, for prompt: InputPrompt) { session.preserveInputDraft(draft, for: prompt) }
-    func submitInput(_ value: String, for promptID: UUID) { session.submitInput(value, for: promptID) }
-    func prepareForClearing(_ action: BrowsingDataAction, since cutoff: Date?) { cancelHistorySwipePreparation(); session.prepareForClearing(action, since: cutoff) }
-    func drainWritesForClearing() async { await session.drainWritesForClearing() }
-    func flushBackForwardPersistence() async { await session.flushBackForwardPersistence() }
-    func handleInlineImageMessage(lineIdentifier: String, url: URL, action: String, documentURL: URL) { session.handleInlineImageMessage(lineIdentifier: lineIdentifier, url: url, action: action, documentURL: documentURL) }
-    func toggleInlineImage(lineIdentifier: String, url: URL, documentURL: URL) { session.toggleInlineImage(lineIdentifier: lineIdentifier, url: url, documentURL: documentURL) }
+    func cancelInteractiveHistorySwipe() { cancelHistorySwipePreparation() }
     func updateImageViewportTopInset(_ inset: CGFloat) { session.updateImageViewportTopInset(Double(inset)) }
-    fileprivate func recordScrollPosition(_ offset: Double, from documentURL: URL?) { session.recordScrollPosition(offset, from: documentURL) }
-    fileprivate func recordPreformattedState(index: Int, collapsed: Bool, from documentURL: URL?) { session.recordPreformattedState(index: index, collapsed: collapsed, from: documentURL) }
-    fileprivate func updateHoveredLink(_ href: String?, modifiers: LinkModifierKeys = []) { session.updateHoveredLink(href, modifiers: modifiers) }
     private func canOpenInApp(_ url: URL) -> Bool { session.canOpenInApp(url) }
     private func openLink(_ url: URL) { session.openLink(url) }
     private func retrieveGeminiResource(_ url: URL, proxy: GeminiProxyConfiguration?) async throws -> (data: Data, mimeType: String, finalURL: URL) { try await session.retrieveGeminiResource(url, proxy: proxy) }
@@ -448,6 +403,7 @@ final class BrowserModel: ObservableObject {
     }
 
     func cancelAndDrainNativeRequests() async {
+        cancelHistorySwipePreparation()
         let task = downloadTask
         task?.cancel()
         downloadPanel?.cancel(nil)
@@ -590,15 +546,15 @@ final class BrowserModel: ObservableObject {
         if let documentURL = activeWebDocumentURL, let imageLine,
            let expanded = session.inlineImageIsExpanded(line: imageLine, url: url) {
             addContextMenuItem(expanded ? "Collapse Image" : "Load Image", systemImage: "photo", enabled: true, to: menu) { [weak self] in
-                self?.toggleInlineImage(lineIdentifier: imageLine, url: url, documentURL: documentURL)
+                self?.session.toggleInlineImage(lineIdentifier: imageLine, url: url, documentURL: documentURL)
             }
             menu.addItem(.separator())
         }
         addContextMenuItem("Open Link in New Tab", systemImage: BrowserMenuIcon.newTab, enabled: opensInApp, to: menu) { [weak self] in
-            self?.openInNewTab?(url, true)
+            self?.session.openInNewTab?(url, true)
         }
         addContextMenuItem("Open Link in New Window", systemImage: BrowserMenuIcon.newWindow, enabled: opensInApp, to: menu) { [weak self] in
-            self?.openInNewWindow?(url)
+            self?.session.openInNewWindow?(url)
         }
         menu.addItem(.separator())
         addContextMenuItem("Download Linked File As…", systemImage: BrowserMenuIcon.download, enabled: !url.isFileURL, to: menu) { [weak self] in self?.download(url) }
@@ -629,17 +585,17 @@ final class BrowserModel: ObservableObject {
         // available on a fresh tab and did nothing when clicked (spec 18.3).
         menu.autoenablesItems = false
         contextMenuTargets.removeAll()
-        addContextMenuItem("Back", systemImage: BrowserMenuIcon.back, enabled: canGoBack, to: menu) { [weak self] in self?.goBack() }
-        addContextMenuItem("Forward", systemImage: BrowserMenuIcon.forward, enabled: canGoForward, to: menu) { [weak self] in self?.goForward() }
+        addContextMenuItem("Back", systemImage: BrowserMenuIcon.back, enabled: canGoBack, to: menu) { [weak self] in self?.session.goBack() }
+        addContextMenuItem("Forward", systemImage: BrowserMenuIcon.forward, enabled: canGoForward, to: menu) { [weak self] in self?.session.goForward() }
         menu.addItem(.separator())
         if canStop {
             addContextMenuItem("Stop Loading", systemImage: "xmark", enabled: true, to: menu) { [weak self] in self?.stop() }
         } else {
-            addContextMenuItem("Reload Page", systemImage: BrowserMenuIcon.reload, enabled: canReload, to: menu) { [weak self] in self?.reload() }
+            addContextMenuItem("Reload Page", systemImage: BrowserMenuIcon.reload, enabled: canReload, to: menu) { [weak self] in self?.session.reload() }
         }
         menu.addItem(.separator())
-        addContextMenuItem("Show Page Source", systemImage: BrowserMenuIcon.showSource, enabled: canShowSource, to: menu) { [weak self] in self?.showPageSource() }
-        addContextMenuItem("Check for Previous Versions", systemImage: BrowserMenuIcon.archive, enabled: canCheckArchive, to: menu) { [weak self] in self?.openArchive() }
+        addContextMenuItem("Show Page Source", systemImage: BrowserMenuIcon.showSource, enabled: canShowSource, to: menu) { [weak self] in self?.session.showPageSource() }
+        addContextMenuItem("Check for Previous Versions", systemImage: BrowserMenuIcon.archive, enabled: canCheckArchive, to: menu) { [weak self] in self?.session.openArchive() }
         addContextMenuItem("Save Page As…", systemImage: BrowserMenuIcon.save, enabled: canSavePage, to: menu) { [weak self] in Task { await self?.savePage() } }
         addContextMenuItem("Print Page…", systemImage: BrowserMenuIcon.print, enabled: true, to: menu) { [weak self] in self?.printPage() }
         menu.popUp(positioning: nil, at: location, in: view)
@@ -678,7 +634,7 @@ final class BrowserModel: ObservableObject {
             guard let self, clientCertificates.accountToken == account,
                   await clientCertificates.stopUsing(for: prompt.target.url),
                   clientCertificates.accountToken == account else { return }
-            cancelClientCertificatePrompt(id: id)
+            session.cancelClientCertificatePrompt(id: id)
         }
     }
 
@@ -755,7 +711,7 @@ final class BrowserModel: ObservableObject {
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .milliseconds(230))
             if !cancelled {
-                for _ in 0..<20 where self?.isRestoringHistoryScroll == true {
+                for _ in 0..<20 where self?.session.isRestoringHistoryScroll == true {
                     try? await Task.sleep(for: .milliseconds(25))
                 }
             }
@@ -953,8 +909,8 @@ private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
                abs(horizontalDelta) > abs(verticalDelta) * 1.5 {
                 let direction: BrowserHistorySwipeDirection = horizontalDelta > 0 ? .back : .forward
                 let canNavigate = direction == .back
-                    ? browser?.canGoBack == true
-                    : browser?.canGoForward == true
+                    ? browser?.session.canGoBack == true
+                    : browser?.session.canGoForward == true
                 if canNavigate {
                     beginSwipe(direction: direction, in: webView)
                 }
@@ -1041,7 +997,7 @@ private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
             let requestID = UUID()
             preparationRequestID = requestID
             browserNavigationLogger.notice(
-                "trackpad swipe recognized direction=\(direction == .back ? "back" : "forward", privacy: .public) deltaX=\(self.horizontalDelta) canBack=\(self.browser?.canGoBack ?? false) canForward=\(self.browser?.canGoForward ?? false)"
+                "trackpad swipe recognized direction=\(direction == .back ? "back" : "forward", privacy: .public) deltaX=\(self.horizontalDelta) canBack=\(self.browser?.session.canGoBack ?? false) canForward=\(self.browser?.session.canGoForward ?? false)"
             )
             Task { @MainActor [weak self, weak webView] in
                 guard let self, let webView, let browser = self.browser else { return }

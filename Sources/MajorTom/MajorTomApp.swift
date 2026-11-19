@@ -964,7 +964,7 @@ final class NativeTabCoordinator {
 
             let states: [(window: NSWindow, state: RestoredTabState)] = tabWindows.compactMap { window in
                 guard let browser = registeredTabs[ObjectIdentifier(window)]?.browser else { return nil }
-                return (window, browser.restorationState)
+                return (window, browser.session.restorationState)
             }
             guard !states.isEmpty else { continue }
             let selectedWindow = candidate.tabGroup?.selectedWindow ?? candidate
@@ -1308,8 +1308,8 @@ final class NativeTabCoordinator {
 
     var omnibarTabs: [OmnibarTab] {
         registeredTabs.values.compactMap { registration in
-            guard registration.window != nil, let url = registration.browser.committedURL else { return nil }
-            return OmnibarTab(id: registration.cloudID, url: url, title: registration.browser.title)
+            guard registration.window != nil, let url = registration.browser.session.committedURL else { return nil }
+            return OmnibarTab(id: registration.cloudID, url: url, title: registration.browser.session.title)
         }
     }
 
@@ -1330,13 +1330,13 @@ final class NativeTabCoordinator {
     private func publishCloudTabs() {
         let tabs = registeredTabs.values.compactMap { registration -> CloudTabSnapshot? in
             let browser = registration.browser
-            guard let committedURL = browser.committedURL,
+            guard let committedURL = browser.session.committedURL,
                   let url = CloudTabURL.normalized(committedURL)
             else { return nil }
             return CloudTabSnapshot(
-                title: browser.title,
+                title: browser.session.title,
                 url: url,
-                favicon: browser.favicon
+                favicon: browser.session.favicon
             )
         }
         ApplicationServices.cloud.updateTabs(tabs)
@@ -1729,17 +1729,17 @@ private struct BrowserWindowView: View {
             hostWindow: hostWindow,
             focusesLocationOnPresentation: focusesLocationOnPresentation
         )
-        .navigationTitle(browser.title)
+        .navigationTitle(browser.session.title)
         .background(WindowAccessor(window: $hostWindow))
         .onAppear {
             if let hostWindow {
                 NativeTabCoordinator.shared.register(window: hostWindow, browser: browser)
             }
             configureNativeTab()
-            browser.openInNewTab = { url, background in
+            browser.session.openInNewTab = { url, background in
                 openNativeTab(url: url, inBackground: background)
             }
-            browser.openInNewWindow = { url in
+            browser.session.openInNewWindow = { url in
                 NativeTabCoordinator.shared.openWindow(url: url, from: hostWindow)
             }
         }
@@ -1769,9 +1769,9 @@ private struct BrowserWindowView: View {
             // what Safari does.
             closeHostWindow()
         }
-        .onChange(of: browser.title) { _, _ in configureNativeTab() }
-        .onChange(of: browser.favicon) { _, _ in configureNativeTab() }
-        .onChange(of: browser.committedURL) { _, _ in configureNativeTab() }
+        .onChange(of: browser.session.title) { _, _ in configureNativeTab() }
+        .onChange(of: browser.session.favicon) { _, _ in configureNativeTab() }
+        .onChange(of: browser.session.committedURL) { _, _ in configureNativeTab() }
         .onChange(of: hostWindow) { _, window in
             guard let window else { return }
             NativeTabCoordinator.shared.register(window: window, browser: browser)
@@ -1799,17 +1799,17 @@ private struct BrowserWindowView: View {
     private func configureNativeTab() {
         guard let hostWindow else { return }
         NativeTabCoordinator.shared.configure(window: hostWindow)
-        hostWindow.title = browser.title
+        hostWindow.title = browser.session.title
         // Favicons are Unicode glyphs, not bitmap assets. Keeping the favicon and page
         // title in one native string gives both the same font metrics and baseline.
         // NSTextAttachment uses image-cell metrics and pushed the page title visibly
         // below titles on tabs without a favicon.
         hostWindow.tab.attributedTitle = nil
         hostWindow.tab.title = BrowserPageTitle.labelled(
-            browser.title,
-            favicon: browser.favicon
+            browser.session.title,
+            favicon: browser.session.favicon
         )
-        hostWindow.tab.toolTip = browser.committedURL?.absoluteString ?? browser.title
+        hostWindow.tab.toolTip = browser.session.committedURL?.absoluteString ?? browser.session.title
         NativeTabCoordinator.shared.publishCloudTabsIfNeeded()
     }
 
@@ -2112,6 +2112,7 @@ private struct SafariToolbarSegmentButtonStyle: ButtonStyle {
 private struct BrowserTabView: View {
     @ObservedObject private var trust = ApplicationServices.trustPresentation
     @ObservedObject var browser: BrowserModel
+    @ObservedObject private var session: BrowserSession
     let chromeTopInset: CGFloat
     let hostWindow: NSWindow?
     let focusesLocationOnPresentation: Bool
@@ -2149,9 +2150,17 @@ private struct BrowserTabView: View {
         )
     }
 
+    init(browser: BrowserModel, chromeTopInset: CGFloat, hostWindow: NSWindow?, focusesLocationOnPresentation: Bool) {
+        self.browser = browser
+        _session = ObservedObject(wrappedValue: browser.session)
+        self.chromeTopInset = chromeTopInset
+        self.hostWindow = hostWindow
+        self.focusesLocationOnPresentation = focusesLocationOnPresentation
+    }
+
     var body: some View {
         ZStack(alignment: .top) {
-            if let internalPage = browser.internalPage {
+            if let internalPage = browser.session.internalPage {
                 // One of Major Tom's own pages: a native view stands in for the web view,
                 // inset to clear the floating chrome since it does not scroll under it.
                 switch internalPage {
@@ -2162,15 +2171,15 @@ private struct BrowserTabView: View {
                     .padding(.top, chromeHeight)
                 case .clientCertificates:
                     ClientCertificatesManagerView(store: clientCertificates) { url in
-                        browser.openInNewTab?(url, false)
+                        browser.session.openInNewTab?(url, false)
                     }
                         .padding(.top, chromeHeight)
                 case .history:
                     HistoryManagerView(
                         searchFocusRequest: historySearchFocusRequest,
                         open: openHistoryEntry,
-                        openInNewTab: { browser.openInNewTab?($0, true) },
-                        openInNewWindow: { browser.openInNewWindow?($0) }
+                        openInNewTab: { browser.session.openInNewTab?($0, true) },
+                        openInNewWindow: { browser.session.openInNewWindow?($0) }
                     )
                     .padding(.top, chromeHeight)
                 }
@@ -2185,8 +2194,8 @@ private struct BrowserTabView: View {
                         scrollerTopInset: chromeHeight
                     )
                         .opacity(
-                            browser.hasPresentedInitialDocument
-                                && (!browser.isRestoringHistoryScroll
+                            browser.session.hasPresentedInitialDocument
+                                && (!browser.session.isRestoringHistoryScroll
                                     || browser.isPresentingHistorySwipe) ? 1 : 0
                         )
                         // Keep document content edge-to-edge beneath the floating chrome,
@@ -2200,12 +2209,12 @@ private struct BrowserTabView: View {
                     // gemini address is navigated to, which is what dragging a link
                     // anywhere else on the Mac does.
                     if let file = urls.first(where: \.isFileURL) {
-                        browser.openFile(file)
+                        browser.session.openFile(file)
                         return true
                     }
                     if let capsule = urls.first(where: { $0.scheme?.lowercased() == "gemini" }) {
-                        browser.locationText = capsule.absoluteString
-                        browser.submitLocation()
+                        browser.session.locationText = capsule.absoluteString
+                        browser.session.submitLocation()
                         return true
                     }
                     return false
@@ -2213,7 +2222,7 @@ private struct BrowserTabView: View {
                 // Safari puts the hovered link's destination bottom-left and leaves the
                 // right for page status (spec 18.4, 21).
                 .overlay(alignment: .bottomLeading) {
-                    if let hovered = browser.hoveredLinkURL {
+                    if let hovered = browser.session.hoveredLinkURL {
                         Text(hovered)
                             .lineLimit(1)
                             .truncationMode(.middle)
@@ -2230,11 +2239,11 @@ private struct BrowserTabView: View {
                 }
                 .overlay(alignment: .bottomTrailing) {
                     HStack(spacing: 7) {
-                        if browser.isLoading {
+                        if browser.session.isLoading {
                             ProgressView()
                                 .controlSize(.small)
                         }
-                        Text(browser.statusText)
+                        Text(browser.session.statusText)
                             .lineLimit(1)
                     }
                     .font(.caption)
@@ -2255,9 +2264,9 @@ private struct BrowserTabView: View {
                         BrowserHistoryToolbarSegmentButton(
                             title: "Back",
                             systemImage: "chevron.left",
-                            entries: browser.backHistoryEntries,
-                            action: browser.goBack,
-                            selectEntry: browser.go(toHistoryEntryWithID:)
+                            entries: browser.session.backHistoryEntries,
+                            action: browser.session.goBack,
+                            selectEntry: browser.session.go(toHistoryEntryWithID:)
                         )
                         .overlay(alignment: .trailing) {
                             Divider()
@@ -2267,9 +2276,9 @@ private struct BrowserTabView: View {
                         BrowserHistoryToolbarSegmentButton(
                             title: "Forward",
                             systemImage: "chevron.right",
-                            entries: browser.forwardHistoryEntries,
-                            action: browser.goForward,
-                            selectEntry: browser.go(toHistoryEntryWithID:)
+                            entries: browser.session.forwardHistoryEntries,
+                            action: browser.session.goForward,
+                            selectEntry: browser.session.go(toHistoryEntryWithID:)
                         )
                 }
                 .padding(.horizontal, 3)
@@ -2284,13 +2293,13 @@ private struct BrowserTabView: View {
                         BrowserToolbarSegmentButton(
                             title: "Home",
                             systemImage: "house",
-                            action: browser.goHome
+                            action: browser.session.goHome
                         )
                         BrowserToolbarSegmentButton(
                             title: "Page Information",
                             systemImage: "info.circle",
-                            favicon: browser.favicon,
-                            isEnabled: browser.committedURL != nil,
+                            favicon: browser.session.favicon,
+                            isEnabled: browser.session.committedURL != nil,
                             action: browser.showPageInformation
                         )
                 }
@@ -2300,22 +2309,22 @@ private struct BrowserTabView: View {
                 .fixedSize()
 
                 OmnibarAddressField(
-                    text: $browser.locationText,
+                    text: $session.locationText,
                     focusRequest: locationFocusRequest,
                     searchProvider: settings.preferences.searchProvider,
                     customSearchEndpoint: settings.preferences.customSearchEndpoint,
-                    submit: { browser.submitLocation() },
-                    search: { browser.searchLocation($0) },
+                    submit: { browser.session.submitLocation() },
+                    search: { browser.session.searchLocation($0) },
                     cancel: {
-                        browser.locationText = browser.committedURL?.absoluteString ?? browser.locationText
-                        browser.validationMessage = nil
+                        browser.session.locationText = browser.session.committedURL?.absoluteString ?? browser.session.locationText
+                        browser.session.validationMessage = nil
                     },
-                    openInNewTab: { browser.openInNewTab?($0, true) },
-                    openInNewWindow: { browser.openInNewWindow?($0) }
+                    openInNewTab: { browser.session.openInNewTab?($0, true) },
+                    openInNewWindow: { browser.session.openInNewWindow?($0) }
                 )
                 .frame(height: 24)
 
-                if browser.canStop {
+                if browser.session.canStop {
                     BrowserToolbarButton(
                         title: "Stop Loading",
                         systemImage: "xmark",
@@ -2325,8 +2334,8 @@ private struct BrowserTabView: View {
                     BrowserToolbarButton(
                         title: "Reload Page",
                         systemImage: "arrow.clockwise",
-                        isEnabled: browser.canReload,
-                        action: browser.reload
+                        isEnabled: browser.session.canReload,
+                        action: browser.session.reload
                     )
                 }
                 BrowserToolbarButton(
@@ -2339,7 +2348,7 @@ private struct BrowserTabView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-                if let validationMessage = browser.validationMessage {
+                if let validationMessage = browser.session.validationMessage {
                     HStack {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(.orange)
@@ -2357,7 +2366,7 @@ private struct BrowserTabView: View {
                     FavoritesBar(bookmarks: bookmarks) { url, inNewTab in
                         openBookmark(url, inNewTab: inNewTab)
                     } openInNewWindow: { url in
-                        browser.openInNewWindow?(url)
+                        browser.session.openInNewWindow?(url)
                     }
                     .frame(height: 28)
                 }
@@ -2377,7 +2386,7 @@ private struct BrowserTabView: View {
                 chromeHeight = height
             }
         }
-        .task { browser.start() }
+        .task { browser.session.start() }
         .task { await browser.releaseWebViewDragTypes() }
         .onAppear { installContextMenuMonitor() }
         .onDisappear { removeContextMenuMonitor() }
@@ -2388,17 +2397,17 @@ private struct BrowserTabView: View {
             guard focusesLocationOnPresentation, window?.isKeyWindow == true else { return }
             focusLocationAndSelectAll()
         }
-        .onCommand(.majorTomReload, when: { isCommandTarget }) { browser.reload() }
+        .onCommand(.majorTomReload, when: { isCommandTarget }) { browser.session.reload() }
         .onCommand(.majorTomStop, when: { isCommandTarget }) { browser.stop() }
-        .onCommand(.majorTomShowSource, when: { isCommandTarget }) { browser.showPageSource() }
-        .onCommand(.majorTomArchive, when: { isCommandTarget }) { browser.openArchive() }
+        .onCommand(.majorTomShowSource, when: { isCommandTarget }) { browser.session.showPageSource() }
+        .onCommand(.majorTomArchive, when: { isCommandTarget }) { browser.session.openArchive() }
         .onCommand(.majorTomAddBookmark, when: { isCommandTarget }) { requestAddBookmark() }
-        .onCommand(.majorTomShowBookmarks, when: { isCommandTarget }) { browser.showInternalPage(.bookmarks) }
+        .onCommand(.majorTomShowBookmarks, when: { isCommandTarget }) { browser.session.showInternalPage(.bookmarks) }
         .onCommand(.majorTomShowClientCertificates, when: { isCommandTarget }) {
-            browser.showInternalPage(.clientCertificates)
+            browser.session.showInternalPage(.clientCertificates)
         }
         .onCommand(.majorTomShowHistory, when: { isCommandTarget }) {
-            browser.openInNewTab?(InternalPage.history.url, false)
+            browser.session.openInNewTab?(InternalPage.history.url, false)
         }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomOpenBookmark)) { notification in
             guard isCommandTarget, let url = notification.object as? URL else { return }
@@ -2407,20 +2416,20 @@ private struct BrowserTabView: View {
         .onCommand(.majorTomSavePage, when: { isCommandTarget }) { Task { await browser.savePage() } }
         .onCommand(.majorTomPrint, when: { isCommandTarget }) { browser.printPage() }
         .onCommand(.majorTomFind, when: { isCommandTarget }) {
-            if browser.internalPage == .history {
+            if browser.session.internalPage == .history {
                 historySearchFocusRequest += 1
             } else {
                 showsFind = true
             }
         }
-        .onCommand(.majorTomZoomIn, when: { isCommandTarget }) { browser.zoomIn() }
-        .onCommand(.majorTomZoomOut, when: { isCommandTarget }) { browser.zoomOut() }
-        .onCommand(.majorTomActualSize, when: { isCommandTarget }) { browser.actualSize() }
-        .onCommand(.majorTomBack, when: { isCommandTarget }) { browser.goBack() }
-        .onCommand(.majorTomForward, when: { isCommandTarget }) { browser.goForward() }
-        .onCommand(.majorTomHome, when: { isCommandTarget }) { browser.goHome() }
-        .onCommand(.majorTomUp, when: { isCommandTarget }) { browser.goUpOneLevel() }
-        .onCommand(.majorTomRoot, when: { isCommandTarget }) { browser.goToCapsuleRoot() }
+        .onCommand(.majorTomZoomIn, when: { isCommandTarget }) { browser.session.zoomIn() }
+        .onCommand(.majorTomZoomOut, when: { isCommandTarget }) { browser.session.zoomOut() }
+        .onCommand(.majorTomActualSize, when: { isCommandTarget }) { browser.session.actualSize() }
+        .onCommand(.majorTomBack, when: { isCommandTarget }) { browser.session.goBack() }
+        .onCommand(.majorTomForward, when: { isCommandTarget }) { browser.session.goForward() }
+        .onCommand(.majorTomHome, when: { isCommandTarget }) { browser.session.goHome() }
+        .onCommand(.majorTomUp, when: { isCommandTarget }) { browser.session.goUpOneLevel() }
+        .onCommand(.majorTomRoot, when: { isCommandTarget }) { browser.session.goToCapsuleRoot() }
         .onReceive(NotificationCenter.default.publisher(for: .majorTomDismissFind)) { _ in
             guard isCommandTarget else { return }
             showsFind = false
@@ -2443,7 +2452,7 @@ private struct BrowserTabView: View {
                     guard let certificate = information.clientCertificate else { return }
                     clientCertificates.requestManagerSelection(certificate.id)
                     browser.pageInformation = nil
-                    browser.openInNewTab?(InternalPage.clientCertificates.url, false)
+                    browser.session.openInNewTab?(InternalPage.clientCertificates.url, false)
                 }
             )
         }
@@ -2463,25 +2472,25 @@ private struct BrowserTabView: View {
         } message: {
             Text(trust.failure ?? "")
         }
-        .sheet(item: $browser.inputPrompt) { prompt in
-            CapsuleInputView(prompt: prompt, validationMessage: browser.inputValidationMessage) { outcome in
+        .sheet(item: $session.inputPrompt) { prompt in
+            CapsuleInputView(prompt: prompt, validationMessage: browser.session.inputValidationMessage) { outcome in
                 switch outcome {
                 case .submit(let value):
-                    browser.submitInput(value, for: prompt.id)
+                    browser.session.submitInput(value, for: prompt.id)
                 case .cancel(let draft):
-                    browser.cancelInput(draft: draft, for: prompt.id)
+                    browser.session.cancelInput(draft: draft, for: prompt.id)
                 case .dismissed(let draft):
-                    browser.preserveInputDraft(draft, for: prompt)
+                    browser.session.preserveInputDraft(draft, for: prompt)
                 }
             }
         }
-        .sheet(item: $browser.clientCertificatePrompt) { prompt in
+        .sheet(item: $session.clientCertificatePrompt) { prompt in
             ClientCertificatePromptView(
                 prompt: prompt,
                 store: clientCertificates,
                 use: { browser.useClientCertificate($0, scope: $1, for: prompt.id) },
                 stopUsing: { browser.stopUsingClientCertificateForPendingChallenge(id: prompt.id) },
-                cancel: { browser.cancelClientCertificatePrompt(id: prompt.id) }
+                cancel: { browser.session.cancelClientCertificatePrompt(id: prompt.id) }
             )
         }
     }
@@ -2491,22 +2500,22 @@ private struct BrowserTabView: View {
     /// Major Tom's own pages are excluded: `about:bookmarks` is reachable from the menu,
     /// and a bookmark to the bookmark manager is noise.
     private func requestAddBookmark() {
-        guard let url = browser.committedURL, InternalPage.page(for: url) == nil else { return }
-        addBookmarkTarget = AddBookmarkTarget(url: url, title: browser.title)
+        guard let url = browser.session.committedURL, InternalPage.page(for: url) == nil else { return }
+        addBookmarkTarget = AddBookmarkTarget(url: url, title: browser.session.title)
     }
 
     private func openBookmark(_ url: URL, inNewTab: Bool) {
         if inNewTab {
-            browser.openInNewTab?(url, true)
+            browser.session.openInNewTab?(url, true)
             return
         }
-        browser.locationText = url.absoluteString
-        browser.submitLocation()
+        browser.session.locationText = url.absoluteString
+        browser.session.submitLocation()
     }
 
     private func openHistoryEntry(_ url: URL) {
-        browser.locationText = url.absoluteString
-        browser.submitLocation()
+        browser.session.locationText = url.absoluteString
+        browser.session.submitLocation()
     }
 
     /// The bridge focuses and selects synchronously when it receives this request,

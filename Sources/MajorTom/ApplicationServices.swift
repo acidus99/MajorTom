@@ -91,6 +91,7 @@ enum ApplicationServices {
     private static func makeBrowsingDataWorkflow() -> BrowsingDataWorkflow {
         BrowsingDataWorkflow(services: BrowsingDataServices(
             clearReusableResponses: { cutoff in
+                for browser in NativeTabCoordinator.shared.browsingDataModels { browser.cancelInteractiveHistorySwipe() }
                 guard let cache = contentCache else { throw BrowsingDataWorkflowError.storageUnavailable }
                 try await cache.removeResponses(since: cutoff)
             },
