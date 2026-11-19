@@ -1,16 +1,14 @@
 import Combine
 import Foundation
-import MajorTomCore
-import SwiftUI
 
 @MainActor
-final class BrowserSettingsStore: ObservableObject {
+public final class BrowserSettingsStore: ObservableObject {
     /// `@Published` emits from `willSet`, while browser models need to read the fully
     /// updated store when re-rendering. This post-update stream keeps every tab in sync
     /// without making the selected tab a special case.
-    let preferencesDidChange = PassthroughSubject<BrowserPreferences, Never>()
+    public let preferencesDidChange = PassthroughSubject<BrowserPreferences, Never>()
 
-    @Published var preferences: BrowserPreferences {
+    @Published public var preferences: BrowserPreferences {
         didSet {
             let changeCameFromICloud = isApplyingRemotePreferences
             let synchronizedValuesChanged = SyncedBrowserPreferenceValues(preferences: oldValue)
@@ -35,11 +33,11 @@ final class BrowserSettingsStore: ObservableObject {
     private var modifiedAt: Date
     private var isApplyingRemotePreferences = false
     private let publishPreferences: (SyncedBrowserPreferences) -> Void
-    let initialSyncedSnapshot: SyncedBrowserPreferences?
+    public let initialSyncedSnapshot: SyncedBrowserPreferences?
     private var uploadTask: Task<Void, Never>?
     private var persistTask: Task<Void, Never>?
 
-    init(defaults: UserDefaults, publishPreferences: @escaping (SyncedBrowserPreferences) -> Void) {
+    public init(defaults: UserDefaults, publishPreferences: @escaping (SyncedBrowserPreferences) -> Void) {
         self.defaults = defaults
         self.publishPreferences = publishPreferences
         let storedData = defaults.data(forKey: key)
@@ -97,7 +95,7 @@ final class BrowserSettingsStore: ObservableObject {
 
     /// Writes any coalesced change immediately. Call before quitting, so a preference
     /// changed a moment earlier is not lost.
-    func flushPendingWrites() {
+    public func flushPendingWrites() {
         guard persistTask != nil else { return }
         persist()
     }
@@ -112,7 +110,7 @@ final class BrowserSettingsStore: ObservableObject {
         }
     }
 
-    func apply(_ snapshot: SyncedBrowserPreferences, force: Bool = false) {
+    public func apply(_ snapshot: SyncedBrowserPreferences, force: Bool = false) {
         let local = SyncedBrowserPreferences(preferences: preferences, modifiedAt: modifiedAt)
         guard force || snapshot.shouldReplace(local) else { return }
         uploadTask?.cancel()
@@ -124,20 +122,11 @@ final class BrowserSettingsStore: ObservableObject {
         isApplyingRemotePreferences = false
     }
 
-    func binding<Value>(_ keyPath: WritableKeyPath<BrowserPreferences, Value>) -> Binding<Value> {
-        Binding(
-            get: { self.preferences[keyPath: keyPath] },
-            set: { value in
-                var updated = self.preferences
-                updated[keyPath: keyPath] = value
-                self.preferences = updated
-            }
-        )
-    }
+
 
     /// Restores the browser's configurable preferences without touching capsule trust
     /// decisions or client certificates, which are stored independently.
-    func restoreDefaultSettings() {
+    public func restoreDefaultSettings() {
         preferences = BrowserPreferences()
     }
 }

@@ -1,6 +1,5 @@
 import Combine
 import Foundation
-import MajorTomCore
 import OSLog
 
 private let clientCertificateLogger = Logger(
@@ -8,10 +7,10 @@ private let clientCertificateLogger = Logger(
     category: "ClientCertificateSync"
 )
 
-struct ResolvedClientCertificate {
-    var descriptor: ClientCertificateDescriptor
-    var association: ClientCertificateAssociation
-    var tlsIdentity: ClientTLSIdentity?
+public struct ResolvedClientCertificate: Sendable {
+    public var descriptor: ClientCertificateDescriptor
+    public var association: ClientCertificateAssociation
+    public var tlsIdentity: ClientTLSIdentity?
 }
 
 /// The application-wide client identity catalogue and activation policy.
@@ -20,14 +19,14 @@ struct ResolvedClientCertificate {
 /// remains exclusively in synchronizable Keychain items and is looked up only when a TLS
 /// connection is about to be made.
 @MainActor
-final class ClientCertificateStore: ObservableObject {
-    @Published private(set) var certificates: [ClientCertificateDescriptor] = []
-    @Published private(set) var associations: [ClientCertificateAssociation] = []
-    @Published private(set) var availability: [UUID: Bool] = [:]
-    @Published var lastError: String?
+public final class ClientCertificateStore: ObservableObject {
+    @Published public private(set) var certificates: [ClientCertificateDescriptor] = []
+    @Published public private(set) var associations: [ClientCertificateAssociation] = []
+    @Published public private(set) var availability: [UUID: Bool] = [:]
+    @Published public var lastError: String?
 
     private let defaults: UserDefaults
-    private let keychain: ClientCertificateKeychain
+    private let keychain: any ClientIdentityMaterialStore
     private var repository: ClientCertificateSyncRepository?
     private let activity: LocalPersistenceActivity
     private let storageKey = "client-certificates-v1"
@@ -44,7 +43,6 @@ final class ClientCertificateStore: ObservableObject {
     private struct PersistedCatalogue: Sendable {
         var state: ClientCertificateSyncState
         var flags: [UUID: Bool]
-        var fallbackData: Data?
     }
     private var persistenceTask: Task<PersistedCatalogue, Error>?
     private var persistenceRevision = 0
@@ -75,10 +73,10 @@ final class ClientCertificateStore: ObservableObject {
         }
     }
 
-    var accountToken: UInt64 { accountRevision }
+    public var accountToken: UInt64 { accountRevision }
 
     /// Capture UI intent before scheduling, not when its asynchronous body starts.
-    func performAccountAction(_ action: @escaping @MainActor () async -> Void) {
+    public func performAccountAction(_ action: @escaping @MainActor () async -> Void) {
         let token = accountRevision
         Task {
             guard token == accountRevision else { return }
@@ -86,9 +84,9 @@ final class ClientCertificateStore: ObservableObject {
         }
     }
 
-    init(
-        defaults: UserDefaults = .standard,
-        keychain: ClientCertificateKeychain = ClientCertificateKeychain(),
+    public init(
+        defaults: UserDefaults,
+        keychain: any ClientIdentityMaterialStore,
         repository: ClientCertificateSyncRepository?,
         activity: LocalPersistenceActivity
     ) {
@@ -156,7 +154,7 @@ final class ClientCertificateStore: ObservableObject {
         refreshAvailability()
     }
 
-    func replaceRepository(_ next: ClientCertificateSyncRepository?) {
+    public func replaceRepository(_ next: ClientCertificateSyncRepository?) {
         accountRevision += 1
         catalogueRevision += 1
         identityCache = [:]
@@ -188,28 +186,28 @@ final class ClientCertificateStore: ObservableObject {
         refreshAvailability()
     }
 
-    var validCertificates: [ClientCertificateDescriptor] {
+    public var validCertificates: [ClientCertificateDescriptor] {
         certificates.filter { $0.isValid() }.sorted {
             $0.commonName.localizedStandardCompare($1.commonName) == .orderedAscending
         }
     }
 
-    func descriptor(id: UUID) -> ClientCertificateDescriptor? {
+    public func descriptor(id: UUID) -> ClientCertificateDescriptor? {
         certificates.first { $0.id == id }
     }
 
-    func requestManagerSelection(_ certificateID: UUID) {
+    public func requestManagerSelection(_ certificateID: UUID) {
         managerSelectionRequest = certificateID
     }
 
-    func consumeManagerSelectionRequest() -> UUID? {
+    public func consumeManagerSelectionRequest() -> UUID? {
         defer { managerSelectionRequest = nil }
         guard let managerSelectionRequest,
               certificates.contains(where: { $0.id == managerSelectionRequest }) else { return nil }
         return managerSelectionRequest
     }
 
-    func create(_ request: ClientCertificateCreationRequest) async throws -> ClientCertificateDescriptor {
+    public func create(_ request: ClientCertificateCreationRequest) async throws -> ClientCertificateDescriptor {
         try beginMaterialOperation()
         defer { endMaterialOperation() }
         let revision = accountRevision
@@ -218,7 +216,7 @@ final class ClientCertificateStore: ObservableObject {
         var materialWasCommitted = false
         do {
             let descriptor = try await Task.detached(priority: .userInitiated) {
-                try keychain.create(request, id: id)
+                try keychain.create(request, id: id, now: Date())
             }.value
             guard revision == accountRevision else { throw CancellationError() }
             guard await commitMutation({ certificates, _, flags in
@@ -238,7 +236,7 @@ final class ClientCertificateStore: ObservableObject {
         }
     }
 
-    func importIdentity(_ imported: ClientCertificateImport) async throws -> ClientCertificateDescriptor {
+    public func importIdentity(_ imported: ClientCertificateImport) async throws -> ClientCertificateDescriptor {
         try beginMaterialOperation()
         defer { endMaterialOperation() }
         let revision = accountRevision
@@ -293,12 +291,12 @@ final class ClientCertificateStore: ObservableObject {
         }
     }
 
-    func removeFromMajorTom(_ descriptor: ClientCertificateDescriptor) async {
+    public func removeFromMajorTom(_ descriptor: ClientCertificateDescriptor) async {
         guard !isDeletingUserData else { return }
         await removeMetadata(for: descriptor)
     }
 
-    func deleteIdentity(_ descriptor: ClientCertificateDescriptor) async throws {
+    public func deleteIdentity(_ descriptor: ClientCertificateDescriptor) async throws {
         try beginMaterialOperation()
         defer { endMaterialOperation() }
         let revision = accountRevision
@@ -326,7 +324,7 @@ final class ClientCertificateStore: ObservableObject {
     /// Deletes every client identity and its approval rules. The Keychain work runs off
     /// the main actor, then metadata is changed once so iCloud receives one coherent set
     /// of deletion tombstones.
-    func deleteAll() async throws {
+    public func deleteAll() async throws {
         guard !isDeletingUserData else { throw CancellationError() }
         isDeletingUserData = true
         defer { isDeletingUserData = false }
@@ -355,7 +353,7 @@ final class ClientCertificateStore: ObservableObject {
     }
 
     @discardableResult
-    func associate(
+    public func associate(
         certificateID: UUID,
         with url: URL,
         scope: ClientCertificateScopeChoice
@@ -388,7 +386,7 @@ final class ClientCertificateStore: ObservableObject {
     }
 
     @discardableResult
-    func stopUsing(for url: URL) async -> Bool {
+    public func stopUsing(for url: URL) async -> Bool {
         guard !isDeletingUserData else { return false }
         guard ClientCertificateAssociation.mostSpecific(
             matching: url,
@@ -405,12 +403,12 @@ final class ClientCertificateStore: ObservableObject {
         }
     }
 
-    func removeAssociation(id: UUID) async {
+    public func removeAssociation(id: UUID) async {
         guard !isDeletingUserData else { return }
         _ = await commitMutation { _, associations, _ in associations.removeAll { $0.id == id } }
     }
 
-    func changeAssociationScope(id: UUID, to scope: ClientCertificateScopeChoice) async {
+    public func changeAssociationScope(id: UUID, to scope: ClientCertificateScopeChoice) async {
         guard !isDeletingUserData else { return }
         _ = await commitMutation { _, associations, _ in
         guard var association = associations.first(where: { $0.id == id }),
@@ -434,7 +432,7 @@ final class ClientCertificateStore: ObservableObject {
     /// main actor from every navigation. create, importIdentity, delete and
     /// exportIdentityPEM have always detached the same keychain; the read path used to
     /// run it inline and block the main actor while a page was being opened.
-    func resolvedCertificate(for url: URL) async -> ResolvedClientCertificate? {
+    public func resolvedCertificate(for url: URL) async -> ResolvedClientCertificate? {
         guard !isDeletingUserData, url.scheme?.lowercased() == "gemini" else { return nil }
         let revision = accountRevision
         await flushPendingWrites()
@@ -480,23 +478,23 @@ final class ClientCertificateStore: ObservableObject {
         )
     }
 
-    func certificatePEM(for descriptor: ClientCertificateDescriptor) -> String? {
+    public func certificatePEM(for descriptor: ClientCertificateDescriptor) -> String? {
         guard let der = try? keychain.certificateDER(for: descriptor) else { return nil }
         return CertificateDetails.pem(certificateDER: der)
     }
 
-    func exportIdentityPEM(for descriptor: ClientCertificateDescriptor) async throws -> String {
+    public func exportIdentityPEM(for descriptor: ClientCertificateDescriptor) async throws -> String {
         let keychain = self.keychain
         return try await Task.detached(priority: .userInitiated) {
             try keychain.exportIdentityPEM(for: descriptor)
         }.value
     }
 
-    func certificateDER(for descriptor: ClientCertificateDescriptor) -> Data? {
+    public func certificateDER(for descriptor: ClientCertificateDescriptor) -> Data? {
         try? keychain.certificateDER(for: descriptor)
     }
 
-    func associations(for descriptor: ClientCertificateDescriptor) -> [ClientCertificateAssociation] {
+    public func associations(for descriptor: ClientCertificateDescriptor) -> [ClientCertificateAssociation] {
         associations.filter { $0.certificateID == descriptor.id }.sorted {
             if $0.endpoint.host != $1.endpoint.host { return $0.endpoint.host < $1.endpoint.host }
             if $0.endpoint.port != $1.endpoint.port { return $0.endpoint.port < $1.endpoint.port }
@@ -508,7 +506,7 @@ final class ClientCertificateStore: ObservableObject {
     ///
     /// One Keychain query per stored certificate. Called from `init`, so doing it inline
     /// blocked the main actor for the whole catalogue while the first tab was created.
-    func refreshAvailability() {
+    public func refreshAvailability() {
         let revision = accountRevision
         let descriptors = certificates
         guard !descriptors.isEmpty else { return }
@@ -533,7 +531,7 @@ final class ClientCertificateStore: ObservableObject {
     }
 
 
-    func reloadCommittedCatalogue() async {
+    public func reloadCommittedCatalogue() async {
         await reloadLatestCatalogue()
         _ = await repairDuplicateMetadata()
         refreshAvailability()
@@ -589,7 +587,7 @@ final class ClientCertificateStore: ObservableObject {
             lastError = "Local data is being prepared for iCloud. Try again in a moment."
             return false
         }
-        guard persistenceReady else {
+        guard persistenceReady, let repository else {
             activity.report(CocoaError(.fileReadCorruptFile))
             return false
         }
@@ -600,22 +598,10 @@ final class ClientCertificateStore: ObservableObject {
         let revision = persistenceRevision
         let publication = catalogueRevision
         let previous = persistenceTask
-        let repository = self.repository
-        let base = syncState
-        let baseFlags = localSynchronizationFlags
         let task = Task.detached(priority: .userInitiated) {
-            let previousValue = try? await previous?.value // ordering; the originating edit reports its own failure
-            if let repository {
-                let result = try repository.update(operation)
-                return PersistedCatalogue(state: result.state, flags: result.localFlags)
-            }
-            let base = previousValue?.state ?? base
-            var certificates = base.activeCertificates(preservingLocalStorageFrom: [])
-            var associations = base.activeAssociations
-            var flags = previousValue?.flags ?? baseFlags
-            operation(&certificates, &associations, &flags)
-            let state = base.reconciled(certificates: certificates, associations: associations, at: Date())
-            return PersistedCatalogue(state: state, flags: flags, fallbackData: try JSONEncoder().encode(state))
+            _ = try? await previous?.value // ordering; the originating edit reports its own failure
+            let result = try repository.update(operation)
+            return PersistedCatalogue(state: result.state, flags: result.localFlags)
         }
         persistenceTask = task
         do {
@@ -628,7 +614,7 @@ final class ClientCertificateStore: ObservableObject {
             if revision == persistenceRevision {
                 persistenceTask = nil
                 if publication == catalogueRevision { publishCommitted(committed) }
-                else if repository != nil { await reloadLatestCatalogue() }
+                else { await reloadLatestCatalogue() }
             }
             guard account == accountRevision else { return false }
             return true
@@ -648,34 +634,30 @@ final class ClientCertificateStore: ObservableObject {
 
     private func publishCommitted(_ committed: PersistedCatalogue) {
         catalogueRevision += 1
-        if let data = committed.fallbackData {
-            defaults.set(data, forKey: syncStorageKey)
-            defaults.set(Dictionary(uniqueKeysWithValues: committed.flags.map { ($0.key.uuidString, $0.value) }), forKey: localStorageFlagsKey)
-        }
         syncState = committed.state
         durableLocalFlags = committed.flags
         localSynchronizationFlags = committed.flags
         certificates = committed.state.activeCertificates(preservingLocalStorageFrom: certificates)
         associations = committed.state.activeAssociations
         applyLocalStorageFlags()
+        availability = availability.filter { id, _ in certificates.contains { $0.id == id } }
         identityCache = identityCache.filter { id, _ in certificates.contains { $0.id == id } }
         signingValidated = signingValidated.filter { id in certificates.contains { $0.id == id } }
     }
 
-    func flushPendingWrites() async {
+    public func flushPendingWrites() async {
         await drainMaterialOperations()
         await initializationTask?.value
         while let task = persistenceTask {
             let account = accountRevision
             let revision = persistenceRevision
             do {
-                let committed = try await task.value
+                _ = try await task.value
                 guard revision == persistenceRevision else { continue }
                 persistenceRevision += 1 // supersede the pending completion's publication
                 persistenceTask = nil
                 guard account == accountRevision else { continue }
-                if repository != nil { await reloadLatestCatalogue() }
-                else { publishCommitted(committed) }
+                await reloadLatestCatalogue()
             } catch {
                 if revision == persistenceRevision { persistenceTask = nil }
                 if account == accountRevision { activity.report(error) }
@@ -683,7 +665,7 @@ final class ClientCertificateStore: ObservableObject {
         }
     }
 
-    func prepareForFirstAccountClaim() async throws {
+    public func prepareForFirstAccountClaim() async throws {
         await flushPendingWrites()
         guard persistenceReady else { throw CocoaError(.fileReadCorruptFile) }
     }

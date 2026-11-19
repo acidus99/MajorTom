@@ -14,7 +14,7 @@ enum ApplicationServices {
 
     static let lifetime = AcceptedLocalWork()
     static let persistenceActivity = LocalPersistenceActivity()
-    static let cloud = ICloudSyncStore(defaults: MajorTomDataScope.defaults,
+    static let cloud = ICloudSynchronization(defaults: MajorTomDataScope.defaults,
         database: storage.durable, activity: persistenceActivity)
     static let settings = BrowserSettingsStore(defaults: MajorTomDataScope.defaults,
         publishPreferences: { cloud.updatePreferences($0) })

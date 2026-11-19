@@ -1,6 +1,5 @@
 import Combine
 import Foundation
-import MajorTomCore
 import OSLog
 
 private let bookmarkSyncLogger = Logger(
@@ -14,10 +13,10 @@ private let bookmarkSyncLogger = Logger(
 /// this type mirrors the result so views can observe it. One shared instance, because
 /// every window and the manager must see the same list.
 @MainActor
-final class BookmarksModel: ObservableObject {
-    @Published private(set) var collection = BookmarkCollection()
+public final class BookmarksModel: ObservableObject {
+    @Published public private(set) var collection = BookmarkCollection()
     /// Favicons already in the cache, for decorating bookmark lists.
-    @Published private(set) var favicons: [CapsuleEndpoint: String] = [:]
+    @Published public private(set) var favicons: [CapsuleEndpoint: String] = [:]
 
     private var store: BookmarkStore?
     private let activity: LocalPersistenceActivity
@@ -32,14 +31,14 @@ final class BookmarksModel: ObservableObject {
     private var initializationTask: Task<Void, Never>?
     private var didLoadDurableCollection = false
 
-    init(store: BookmarkStore?, cache: ContentCache?, activity: LocalPersistenceActivity) {
+    public init(store: BookmarkStore?, cache: ContentCache?, activity: LocalPersistenceActivity) {
         self.store = store
         self.cache = cache
         self.activity = activity
         initializationTask = Task { [weak self] in await self?.reload() }
     }
 
-    func replaceStore(_ store: BookmarkStore?) {
+    public func replaceStore(_ store: BookmarkStore?) {
         publicationRevision += 1
         self.store = store
         collection = BookmarkCollection()
@@ -49,21 +48,21 @@ final class BookmarksModel: ObservableObject {
 
     // MARK: - Reading
 
-    func isBookmarked(_ url: URL) -> Bool { collection.contains(url: url) }
+    public func isBookmarked(_ url: URL) -> Bool { collection.contains(url: url) }
 
     /// A bookmark's favicon, **only** if one is already cached.
     ///
     /// The favicon RFC forbids requesting a favicon before the reader has visited that
     /// server, so a bookmark list may decorate what is already known but must never fetch:
     /// a list of fifty bookmarks would otherwise touch fifty capsules on open.
-    func favicon(for url: URL) -> String? {
+    public func favicon(for url: URL) -> String? {
         if let snapshot = collection.allBookmarks.first(where: { $0.url == url })?.favicon {
             return snapshot.emoji
         }
         return CapsuleEndpoint(url: url).flatMap { favicons[$0] }
     }
 
-    func refreshFavicons() {
+    public func refreshFavicons() {
         guard faviconRefreshTask == nil else { return }
         faviconRefreshTask = Task { [weak self, cache] in
             defer { self?.faviconRefreshTask = nil }
@@ -89,8 +88,11 @@ final class BookmarksModel: ObservableObject {
 
     // MARK: - Writing
 
-    func add(title: String, url: URL, toFolderWith folderID: UUID? = nil) {
-        let destination = store
+    public func add(title: String, url: URL, toFolderWith folderID: UUID? = nil) {
+        guard !activity.isPreparingAccount, let destination = store else {
+            activity.report(CocoaError(.fileLocking))
+            return
+        }
         let operation = UUID()
         let activity = activity
         activity.begin()
@@ -109,20 +111,21 @@ final class BookmarksModel: ObservableObject {
                 snapshot = nil
             }
             guard let self, self.store === destination else { return }
-            self.mutate {
-                $0.add(
-                    title: title,
-                    url: url,
-                    toFolderWith: folderID,
-                    favicon: snapshot
-                )
-            }
+            self.publicationRevision += 1
+            let revision = self.publicationRevision
+            do {
+                let committed = try await destination.update {
+                    $0.add(title: title, url: url, toFolderWith: folderID, favicon: snapshot)
+                }
+                guard self.store === destination, self.publicationRevision == revision else { return }
+                self.collection = committed
+            } catch { activity.report(error) }
         }
     }
 
     /// Attaches a changed favicon observation to every bookmark on this capsule. A
     /// confirmed absence is as meaningful as an emoji and synchronizes the same way.
-    func updateFavicon(
+    public func updateFavicon(
         _ emoji: String?,
         for endpoint: CapsuleEndpoint,
         fetchedAt: Date
@@ -138,53 +141,53 @@ final class BookmarksModel: ObservableObject {
         mutate { $0.updateFavicon(for: endpoint, to: snapshot) }
     }
 
-    func remove(bookmarkWith id: UUID) {
+    public func remove(bookmarkWith id: UUID) {
         mutate { $0.remove(bookmarkWith: id) }
     }
 
-    func removeBookmarks(for url: URL) {
+    public func removeBookmarks(for url: URL) {
         mutate { $0.remove(urlsMatching: url) }
     }
 
-    func rename(bookmarkWith id: UUID, to title: String) {
+    public func rename(bookmarkWith id: UUID, to title: String) {
         mutate { $0.rename(bookmarkWith: id, to: title) }
     }
 
-    func updateAddress(bookmarkWith id: UUID, to url: URL) {
+    public func updateAddress(bookmarkWith id: UUID, to url: URL) {
         mutate { $0.updateAddress(bookmarkWith: id, to: url) }
     }
 
-    func move(bookmarkWith id: UUID, toFolderWith folderID: UUID) {
+    public func move(bookmarkWith id: UUID, toFolderWith folderID: UUID) {
         mutate { $0.move(bookmarkWith: id, toFolderWith: folderID) }
     }
 
-    func reorder(folderWith id: UUID, to orderedIDs: [UUID]) {
+    public func reorder(folderWith id: UUID, to orderedIDs: [UUID]) {
         mutate { $0.reorder(folderWith: id, to: orderedIDs) }
     }
 
-    func addFolder(named name: String) {
+    public func addFolder(named name: String) {
         mutate { $0.addFolder(named: name) }
     }
 
-    func removeFolder(with id: UUID) {
+    public func removeFolder(with id: UUID) {
         mutate { $0.removeFolder(with: id) }
     }
 
-    func renameFolder(with id: UUID, to name: String) {
+    public func renameFolder(with id: UUID, to name: String) {
         mutate { $0.renameFolder(with: id, to: name) }
     }
 
     /// Imports a browser's bookmarks as one durable update, avoiding a race between
     /// individual asynchronous bookmark writes. Existing URLs retain their normal
     /// de-duplication behavior.
-    func importLagrangeBookmarks(_ bookmarks: [LagrangeUserDataExport.Bookmark]) async throws -> Int {
+    public func importLagrangeBookmarks(_ bookmarks: [LagrangeUserDataExport.Bookmark]) async throws -> Int {
         try await importBookmarks(
             bookmarks.map { (title: $0.title, url: $0.url) },
             intoFolderNamed: "Lagrange"
         )
     }
 
-    func importAlhenaBookmarks(_ bookmarks: [AlhenaUserDataExport.Bookmark]) async throws -> Int {
+    public func importAlhenaBookmarks(_ bookmarks: [AlhenaUserDataExport.Bookmark]) async throws -> Int {
         try await importBookmarks(
             bookmarks.map { (title: $0.title, url: $0.url) },
             intoFolderNamed: "Alhena"
@@ -213,11 +216,11 @@ final class BookmarksModel: ObservableObject {
 
     /// Deletes every bookmark and custom folder, retaining only the required empty
     /// Favourites folder. The corresponding cloud snapshot carries deletion tombstones.
-    func deleteAll() async throws {
+    public func deleteAll() async throws {
         try await mutateAndWait { $0 = BookmarkCollection() }
     }
 
-    func reload() async {
+    public func reload() async {
         guard let store else { return }
         publicationRevision += 1
         let revision = publicationRevision
@@ -256,7 +259,6 @@ final class BookmarksModel: ObservableObject {
             catch { activity.report(error); return }
             guard let self, self.store === store, self.publicationRevision == revision else { return }
             self.collection = updated
-
         }
     }
 
@@ -283,10 +285,9 @@ final class BookmarksModel: ObservableObject {
         let updated = try await store.update(change)
         guard revision == publicationRevision, self.store === store else { return }
         collection = updated
-
     }
 
-    func flushPendingWrites() async {
+    public func flushPendingWrites() async {
         await faviconRefreshTask?.value
         await initializationTask?.value
         while let task = mutationTasks.values.first { await task.value }
@@ -295,7 +296,7 @@ final class BookmarksModel: ObservableObject {
         }
     }
 
-    func prepareForFirstAccountClaim() async throws {
+    public func prepareForFirstAccountClaim() async throws {
         await flushPendingWrites()
         guard didLoadDurableCollection else { throw CocoaError(.fileReadCorruptFile) }
     }

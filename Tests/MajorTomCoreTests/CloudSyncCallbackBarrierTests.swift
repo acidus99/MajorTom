@@ -10,14 +10,15 @@ final class CloudSyncCallbackBarrierTests: XCTestCase {
         barrier.enter()
         barrier.enter()
         var replacementStarted = false
+        let entered = expectation(description: "Replacement waiting")
         let replacement = Task { @MainActor in
+            entered.fulfill()
             await barrier.waitUntilIdle()
             replacementStarted = true
         }
-        await Task.yield()
+        _ = await XCTWaiter.fulfillment(of: [entered], timeout: 2)
         XCTAssertFalse(replacementStarted)
         barrier.leave()
-        await Task.yield()
         XCTAssertFalse(replacementStarted)
         XCTAssertEqual(barrier.count, 1)
         barrier.leave()
@@ -32,9 +33,11 @@ final class CloudSyncCallbackBarrierTests: XCTestCase {
         await barrier.waitUntilIdle()
         for _ in 0..<3 {
             barrier.enter()
-            let first = Task { @MainActor in await barrier.waitUntilIdle() }
-            let second = Task { @MainActor in await barrier.waitUntilIdle() }
-            await Task.yield()
+            let entered = expectation(description: "Both transitions waiting")
+            entered.expectedFulfillmentCount = 2
+            let first = Task { @MainActor in entered.fulfill(); await barrier.waitUntilIdle() }
+            let second = Task { @MainActor in entered.fulfill(); await barrier.waitUntilIdle() }
+            _ = await XCTWaiter.fulfillment(of: [entered], timeout: 2)
             barrier.leave()
             await first.value
             await second.value

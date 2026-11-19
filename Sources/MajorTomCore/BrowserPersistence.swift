@@ -1,51 +1,52 @@
 import Combine
 import Foundation
-import MajorTomCore
-
-// PageCompletionState, CachedPage and RestoredTabState now live in MajorTomCore beside
-// NavigationState, which owns the rules that operate on them. They are durable domain
-// records, which the architecture document places in Core rather than in the app shell.
 
 /// The single-window session format written by releases before native window tabs.
 ///
 /// Nothing writes this any more. It is retained so `loadApplication()` can migrate a
 /// session saved by an older build instead of discarding its tab caches.
-struct RestoredWindowState: Codable {
-    var tabs: [RestoredTabState]
-    var selectedIndex: Int
+private struct RestoredWindowState: Codable {
+    public var tabs: [RestoredTabState]
+    public var selectedIndex: Int
 }
 
-struct RestoredBrowserWindowState: Codable {
-    var frame: CGRect?
-    var tabs: [RestoredTabState]
-    var selectedIndex: Int
+public struct RestoredBrowserWindowState: Codable {
+    public init(frame: CGRect?, tabs: [RestoredTabState], selectedIndex: Int) {
+        self.frame = frame; self.tabs = tabs; self.selectedIndex = selectedIndex
+    }
+    public var frame: CGRect?
+    public var tabs: [RestoredTabState]
+    public var selectedIndex: Int
 }
 
-struct RestoredApplicationState: Codable {
-    var windows: [RestoredBrowserWindowState]
-    var keyWindowIndex: Int
+public struct RestoredApplicationState: Codable {
+    public init(windows: [RestoredBrowserWindowState], keyWindowIndex: Int) {
+        self.windows = windows; self.keyWindowIndex = keyWindowIndex
+    }
+    public var windows: [RestoredBrowserWindowState]
+    public var keyWindowIndex: Int
 }
 
 @MainActor
-final class SessionRestorationStore {
+public final class SessionRestorationStore {
     private let defaults: UserDefaults
     private let key = "last-window-session-v1"
     private let applicationKey = "last-application-session-v2"
     private let sessionRepository: SessionRepository?
 
-    init(defaults: UserDefaults, repository: SessionRepository?) {
+    public init(defaults: UserDefaults, repository: SessionRepository?) {
         self.defaults = defaults
         sessionRepository = repository
     }
 
     /// Migration only: reads a session written by a release that predates native
     /// window tabs. `saveApplication(_:)` is the only writer of session state now.
-    func load() -> RestoredWindowState? {
+    private func load() -> RestoredWindowState? {
         guard let data = defaults.data(forKey: key) else { return nil }
         return try? JSONDecoder().decode(RestoredWindowState.self, from: data)
     }
 
-    func loadApplication() -> RestoredApplicationState? {
+    public func loadApplication() -> RestoredApplicationState? {
         if let repository = sessionRepository,
            let persisted = try? repository.load() {
             return Self.applicationState(persisted)
@@ -69,7 +70,7 @@ final class SessionRestorationStore {
         return state
     }
 
-    func saveApplication(_ state: RestoredApplicationState) {
+    public func saveApplication(_ state: RestoredApplicationState) {
         if let sessionRepository {
             do {
                 try sessionRepository.save(Self.persistedSession(state))
@@ -87,7 +88,7 @@ final class SessionRestorationStore {
         defaults.set(data, forKey: applicationKey)
     }
 
-    func clearBrowsingData(_ action: BrowsingDataAction, since cutoff: Date?) throws {
+    public func clearBrowsingData(_ action: BrowsingDataAction, since cutoff: Date?) throws {
         if let sessionRepository {
             try sessionRepository.clearBrowsingData(action, since: cutoff)
             defaults.removeObject(forKey: key)
@@ -110,7 +111,7 @@ final class SessionRestorationStore {
         }
     }
 
-    func saveApplicationAfterClearing(_ state: RestoredApplicationState) throws {
+    public func saveApplicationAfterClearing(_ state: RestoredApplicationState) throws {
         if let sessionRepository {
             try sessionRepository.save(Self.persistedSession(state))
             defaults.removeObject(forKey: key)
@@ -121,7 +122,7 @@ final class SessionRestorationStore {
         }
     }
 
-    func clear() {
+    public func clear() {
         try? sessionRepository?.clear()
         defaults.removeObject(forKey: key)
         defaults.removeObject(forKey: applicationKey)
@@ -175,14 +176,14 @@ private struct LegacyBrowsingHistoryRecord: Codable {
 }
 
 @MainActor
-final class BrowsingHistoryStore: ObservableObject {
-    @Published private(set) var records: [BrowsingHistoryEntry] = []
+public final class BrowsingHistoryStore: ObservableObject {
+    @Published public private(set) var records: [BrowsingHistoryEntry] = []
 
     private let defaults: UserDefaults
     private let key = "browsing-history-v1"
     private let repository: BrowsingHistoryRepository?
 
-    init(defaults: UserDefaults, repository: BrowsingHistoryRepository?) {
+    public init(defaults: UserDefaults, repository: BrowsingHistoryRepository?) {
         self.defaults = defaults
         self.repository = repository
 
@@ -208,7 +209,7 @@ final class BrowsingHistoryStore: ObservableObject {
         }
     }
 
-    func record(_ url: URL, title: String? = nil) {
+    public func record(_ url: URL, title: String? = nil) {
         let now = Date()
         if let repository {
             guard (try? repository.record(url, title: title, at: now)) != nil else { return }
@@ -243,7 +244,7 @@ final class BrowsingHistoryStore: ObservableObject {
         persistLegacyFallback()
     }
 
-    func remove(_ urls: Set<URL>) {
+    public func remove(_ urls: Set<URL>) {
         guard !urls.isEmpty else { return }
         if let repository {
             do {
@@ -256,7 +257,7 @@ final class BrowsingHistoryStore: ObservableObject {
         if repository == nil { persistLegacyFallback() }
     }
 
-    func clear(since cutoff: Date? = nil) throws {
+    public func clear(since cutoff: Date? = nil) throws {
         if let repository {
             try repository.clear(since: cutoff)
             records = try repository.entries()
@@ -282,20 +283,20 @@ final class BrowsingHistoryStore: ObservableObject {
 }
 
 @MainActor
-final class GeminiInputDraftStore {
+public final class GeminiInputDraftStore {
 
     private let repository: GeminiInputDraftRepository?
-    init(repository: GeminiInputDraftRepository?) { self.repository = repository }
+    public init(repository: GeminiInputDraftRepository?) { self.repository = repository }
     private var memoryFallback: [URL: (text: String, updatedAt: Date)] = [:]
 
-    func text(for promptURL: URL) -> String {
+    public func text(for promptURL: URL) -> String {
         if let repository {
             return (try? repository.draft(for: promptURL)?.text) ?? ""
         }
         return memoryFallback[promptURL]?.text ?? ""
     }
 
-    func save(_ text: String, for promptURL: URL) {
+    public func save(_ text: String, for promptURL: URL) {
         if let repository {
             try? repository.save(text, for: promptURL)
         } else if text.isEmpty {
@@ -305,12 +306,12 @@ final class GeminiInputDraftStore {
         }
     }
 
-    func clear(since cutoff: Date?) throws {
+    public func clear(since cutoff: Date?) throws {
         try repository?.removeAll(since: cutoff)
         memoryFallback = memoryFallback.filter { !BrowsingDataSelection.includes($0.value.updatedAt, since: cutoff) }
     }
 
-    func remove(for promptURL: URL) {
+    public func remove(for promptURL: URL) {
         try? repository?.remove(for: promptURL)
         memoryFallback.removeValue(forKey: promptURL)
     }
