@@ -1435,6 +1435,12 @@ final class BrowserModel: ObservableObject {
         guard canShowSource,
               let resourceURL = committedURL,
               !ViewSourceURL.isViewSource(resourceURL) else { return }
+        // A navigation that has not committed yet is abandoned in favour of the source
+        // view. Cancel it here: `presentSource` clears `navigationTask` without
+        // cancelling it, which used to leave that request running with Stop unavailable
+        // until its response arrived and replaced the source view.
+        navigationTask?.cancel()
+        navigationTask = nil
         presentSource(
             currentSourceBytes,
             of: resourceURL,
