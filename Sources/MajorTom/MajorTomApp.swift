@@ -2449,9 +2449,9 @@ private struct BrowserTabView: View {
             CapsuleInputView(prompt: prompt, validationMessage: browser.inputValidationMessage) { outcome in
                 switch outcome {
                 case .submit(let value):
-                    browser.submitInput(value)
+                    browser.submitInput(value, for: prompt.id)
                 case .cancel(let draft):
-                    browser.cancelInput(draft: draft)
+                    browser.cancelInput(draft: draft, for: prompt.id)
                 case .dismissed(let draft):
                     browser.preserveInputDraft(draft, for: prompt)
                 }
@@ -2461,9 +2461,9 @@ private struct BrowserTabView: View {
             ClientCertificatePromptView(
                 prompt: prompt,
                 store: clientCertificates,
-                use: browser.useClientCertificate,
-                stopUsing: browser.stopUsingClientCertificateForPendingChallenge,
-                cancel: browser.cancelClientCertificatePrompt
+                use: { browser.useClientCertificate($0, scope: $1, for: prompt.id) },
+                stopUsing: { browser.stopUsingClientCertificateForPendingChallenge(id: prompt.id) },
+                cancel: { browser.cancelClientCertificatePrompt(id: prompt.id) }
             )
         }
     }

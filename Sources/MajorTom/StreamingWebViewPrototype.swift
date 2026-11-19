@@ -202,218 +202,81 @@ private final class PreformattedBlockStateScriptHandler: NSObject, WKScriptMessa
 @available(macOS 26.0, *)
 @MainActor
 final class BrowserModel: ObservableObject {
+    typealias InputPrompt = BrowserSession.InputPrompt
+    typealias ClientCertificatePrompt = BrowserSession.ClientCertificatePrompt
+    typealias HistoryDisposition = BrowserSession.HistoryDisposition
     fileprivate struct HistorySwipePresentation {
         let direction: BrowserHistorySwipeDirection
         let viewportWidth: CGFloat
         var offset: CGFloat
         var isReady: Bool
     }
-
-    private struct PendingHistorySwipe {
-        let sourceEntryID: BackForwardEntry.ID
-        let targetEntryID: BackForwardEntry.ID
-        let direction: BrowserHistorySwipeDirection
-    }
-
-    enum HistoryDisposition: Equatable {
-        case new, reload, traversal
-    }
-
-    private struct LoadedInlineImage {
-        let mimeType: String
-        let byteCount: Int
-    }
-
-    private struct DecodedDataImage {
-        let data: Data
-        let mimeType: String
-    }
-
-    struct InputPrompt: Identifiable {
-        let id = UUID()
-        let target: GeminiRequestTarget
-        let message: String
-        let isSensitive: Bool
-        /// Text kept from an earlier, cancelled attempt at this same prompt.
-        var initialText: String = ""
-    }
-
-    struct ClientCertificatePrompt: Identifiable {
-        let id = UUID()
-        let target: GeminiRequestTarget
-        let status: Int
-        let message: String
-        let attemptedCertificate: ClientCertificateDescriptor?
-        let matchingCertificateIsUnavailable: Bool
-        let matchingCertificateIsInvalid: Bool
-    }
-
-    @Published var locationText = "gemini://gemi.dev/"
-    @Published private(set) var committedURL: URL?
-    @Published private(set) var isLoading = false {
-        didSet {
-            if oldValue, !isLoading, themeNeedsANSIRefresh {
-                themeNeedsANSIRefresh = false
-                Task { @MainActor [weak self] in self?.contentThemeChanged() }
-            }
-        }
-    }
-    private var themeNeedsANSIRefresh = false
-    @Published private(set) var statusText = "Ready"
-    /// Destination of the link under the pointer, or focused by keyboard (spec 18.4).
-    @Published private(set) var hoveredLinkURL: String?
-    /// The unformatted destination retained so native modifier changes can refresh the
-    /// hover message without requiring another mouse-move event from WebKit.
-    private var hoveredLinkDestination: String?
-    @Published private(set) var title = "New Tab"
-    @Published private(set) var documentTitle: String?
-    /// The current capsule's favicon emoji, when it offers one.
-    @Published private(set) var favicon: String?
-    /// Set when the tab is showing one of Major Tom's own pages instead of a document.
-    @Published private(set) var internalPage: InternalPage?
-    @Published private(set) var canSavePage = false
-    @Published private(set) var canShowSource = false
-    @Published private(set) var canGoBack = false
-    @Published private(set) var canGoForward = false
-    @Published var validationMessage: String?
-    @Published var inputPrompt: InputPrompt?
-    @Published var clientCertificatePrompt: ClientCertificatePrompt?
-    /// Set to present the Page Info panel; cleared when it is dismissed.
+    private struct PendingHistorySwipe { let id: UUID }
+    let session: BrowserSession
+    private let presentation: BrowserWebPresentation
+    var page: WebPage { presentation.page }
+    var historySwipePage: WebPage { presentation.historySwipePage }
     @Published var pageInformation: PageInformation?
-    /// The identity presented by the capsule serving the current page, kept for Page Info.
-    @Published private(set) var serverIdentity: PresentedServerIdentity?
-    /// The client identity actually offered for the request that produced this page.
-    @Published private(set) var usedClientCertificate: ClientCertificateDescriptor?
-    private var responseStatus: Int?
-    private var responseMeta = ""
-    private var responseWasCached: Bool?
-    private var responseReceivedAt: Date?
-    @Published var inputValidationMessage: String?
-    @Published private(set) var pageZoom = 1.0
-    @Published private(set) var retryNotBefore: Date?
-    /// False until WebKit has completely presented this tab's first document. The view
-    /// keeps WebKit transparent over a content-theme placeholder until then, preventing
-    /// its default white/black backing from flashing during creation or restoration.
-    @Published private(set) var hasPresentedInitialDocument = false
-    /// Keeps a history entry that needs a nonzero offset behind the same placeholder
-    /// until WebKit has laid it out and the offset has been applied.
-    @Published private(set) var isRestoringHistoryScroll = false
     @Published fileprivate var historySwipePresentation: HistorySwipePresentation?
     var isPresentingHistorySwipe: Bool { historySwipePresentation != nil }
-
-    /// Snapshots used to build the native click-and-hold history menus. The navigation
-    /// state remains the source of truth; these are deliberately ordered nearest first.
-    var backHistoryEntries: [BackForwardEntry] { navigation.backHistoryEntries }
-    var forwardHistoryEntries: [BackForwardEntry] { navigation.forwardHistoryEntries }
-
-    let page: WebPage
-    @Published private(set) var historySwipePage: WebPage
-    private let webPageConfiguration: WebPage.Configuration
-
-    /// Set by the owning window session. A tab cannot create tabs or windows itself.
-    var openInNewTab: ((URL, _ inBackground: Bool) -> Void)?
-    var openInNewWindow: ((URL) -> Void)?
-
-    private let documentStore: BrowserDocumentStore
-    private let resourceStore: BrowserResourceStore
-    private let router: BrowserNavigationRouter
-    private let transport = GeminiTransport()
+    private var pendingHistorySwipe: PendingHistorySwipe?
+    private var historySwipeGeneration = 0
     private let settings = BrowserSettingsStore.shared
     private let themes = ContentThemeStore.shared
     private let clientCertificates = ClientCertificateStore.shared
-    private let trustStore: TrustedIdentityStore?
-    private let contentCache = SharedContentCache.shared
-    private lazy var resourceRetriever = GeminiResourceRetriever<ClientTLSIdentity>(
-        transportEvents: { [transport] target, identity, configuration, authorize in
-            transport.events(for: target, clientIdentity: identity, configuration: configuration, authorizeTrust: authorize)
-        },
-        cache: contentCache,
-        resolveIdentity: { [clientCertificates] url in
-            guard let resolved = await clientCertificates.resolvedCertificate(for: url) else { return nil }
-            return GeminiRetrievalIdentity(descriptor: resolved.descriptor, credential: resolved.tlsIdentity)
-        },
-        authorizeTrust: { identity, _ in
-            await ServerTrustPresentation.shared.authorize(identity)
-        }
-    )
-    private lazy var faviconLoader = GeminiFaviconLoader(cache: contentCache) { [resourceRetriever] target in
-        try await resourceRetriever.response(for: target, purpose: .favicon)
-    }
-    /// One stateful renderer per active document; beginDocument installs its palette.
-    private var renderer = HTMLDocumentStreamRenderer()
+    private let trustStore = SharedTrustedIdentityStore.shared
     private var cancellables = Set<AnyCancellable>()
-
-    private var navigationTask: Task<Void, Never>?
-    private var documentContinuation: AsyncThrowingStream<Data, any Error>.Continuation?
-    /// Rendered HTML waiting to be handed to WebKit. See `yieldToDocument`.
-    private var documentBuffer = Data()
-    /// This tab's position in its own history, the pages it has kept, and the reading
-    /// position in each of them. Owned by Core so those rules can be tested without
-    /// WebKit; see `NavigationState`.
-    private var navigation = NavigationState()
-    private let backForwardCache = SharedBackForwardCacheStore.shared
-    private var backForwardDebounceTask: Task<Void, Never>?
-    private var backForwardWriteTask: Task<Void, Never>?
-    private var browsingDataGeneration: UInt64 = 0
-    private var isClearingBrowsingData = false
-    private var currentResponseCanBeCached = true
-    private var discardedDraftPrompts = Set<UUID>()
-    /// While a traversal's replacement document is loading, its initial scroll events
-    /// must not overwrite the offset we are about to restore.
-    private var pendingScrollRestoration: (historyIndex: Int, offset: Double)?
-    /// Restored inline images load through WebKit after their document finishes. Keep
-    /// track of their final layout so their added height can be corrected after the
-    /// normal initial restoration has revealed the document.
-    private var pendingRestoredInlineImageCount = 0
-    private var pendingInlineImageScrollCorrection: (historyIndex: Int, offset: Double)?
-    /// The opaque URL of the document currently hosted by WebKit. Script messages from
-    /// a page being replaced can arrive just after the next entry commits; checking this
-    /// identity prevents that late message from being filed under the new history entry.
-    private var activeWebDocumentURL: URL?
-    private var pendingHistorySwipe: PendingHistorySwipe?
-    private var historySwipeGeneration = 0
-    private var pendingClientCertificateChallenge: (
-        target: GeminiRequestTarget,
-        disposition: HistoryDisposition,
-        renderAsSource: Bool
-    )?
-    private var hasStarted = false
-    private var currentSourceBytes = Data()
-    private var currentMIMEType = ""
-    /// Tracks what has named the current document while the opening Gemtext lines stream
-    /// in. A heading can replace an earlier preformatted caption; discovery is limited to
-    /// the first fifteen Gemtext lines.
-    private var titleClaim = GemtextTitleClaim()
-    @Published private var imageTasks: [String: Task<Void, Never>] = [:]
-    private var automaticImagesPaused = false
-    private var inlineImageURLs: [String: URL] = [:]
-    private var imageViewportTopInset: CGFloat = 0
-    private let imageLoader = SharedGeminiImageLoader.shared
-    private var imagePageStartedAt = ContinuousClock.now
-    private var slowDownTask: Task<Void, Never>?
     private var downloadTask: Task<Void, Never>?
     private var contextMenuTargets: [ContextMenuTarget] = []
     private weak var pendingContextMenuView: NSView?
     private var pendingContextMenuLocation: NSPoint?
+    private var contextSharingPicker: NSSharingServicePicker?
     private let contextMenuScriptHandler: ContextMenuScriptHandler
     private let linkHoverScriptHandler: LinkHoverScriptHandler
     private let linkActivationScriptHandler: LinkActivationScriptHandler
     private let inlineImageScriptHandler: InlineImageScriptHandler
     private let scrollPositionScriptHandler: ScrollPositionScriptHandler
     private let preformattedStateScriptHandler: PreformattedBlockStateScriptHandler
-    /// Numbers link lines within the current document so an expanded image can be
-    /// attached to the exact line that was clicked.
-    private var linkSequence = 0
-    /// Line identifiers whose image is currently expanded, for toggling back off.
-    private var expandedInlineImages: Set<String> = []
-    private var expandableImageLines: [URL: String] = [:]
-    private var contextSharingPicker: NSSharingServicePicker?
-    private var lastPreferences: BrowserPreferences
+    var committedURL: URL? { session.committedURL }
+    var isLoading: Bool { session.isLoading }
+    var hoveredLinkURL: String? { session.hoveredLinkURL }
+    var title: String { session.title }
+    var documentTitle: String? { session.documentTitle }
+    var favicon: String? { session.favicon }
+    var internalPage: InternalPage? { session.internalPage }
+    var canSavePage: Bool { session.canSavePage }
+    var canShowSource: Bool { session.canShowSource }
+    var canGoBack: Bool { session.canGoBack }
+    var canGoForward: Bool { session.canGoForward }
+    var serverIdentity: PresentedServerIdentity? { session.serverIdentity }
+    var usedClientCertificate: ClientCertificateDescriptor? { session.usedClientCertificate }
+    var pageZoom: Double { session.pageZoom }
+    var retryNotBefore: Date? { session.retryNotBefore }
+    var hasPresentedInitialDocument: Bool { session.hasPresentedInitialDocument }
+    var isRestoringHistoryScroll: Bool { session.isRestoringHistoryScroll }
+    var canReload: Bool { session.canReload }
+    var canStop: Bool { session.canStop }
+    var backHistoryEntries: [BackForwardEntry] { session.backHistoryEntries }
+    var forwardHistoryEntries: [BackForwardEntry] { session.forwardHistoryEntries }
+    var restorationState: RestoredTabState { session.restorationState }
+    var canCheckArchive: Bool { session.canCheckArchive }
+    var locationText: String { get { session.locationText } set { session.locationText = newValue } }
+    var validationMessage: String? { get { session.validationMessage } set { session.validationMessage = newValue } }
+    var inputPrompt: InputPrompt? { get { session.inputPrompt } set { session.inputPrompt = newValue } }
+    var clientCertificatePrompt: ClientCertificatePrompt? { get { session.clientCertificatePrompt } set { session.clientCertificatePrompt = newValue } }
+    var inputValidationMessage: String? { get { session.inputValidationMessage } set { session.inputValidationMessage = newValue } }
+    var openInNewTab: ((URL, Bool) -> Void)? { get { session.openInNewTab } set { session.openInNewTab = newValue } }
+    var openInNewWindow: ((URL) -> Void)? { get { session.openInNewWindow } set { session.openInNewWindow = newValue } }
+    var statusText: String { get { session.statusText } set { session.reportNativeResult(status: newValue) } }
+    private var currentSourceBytes: Data { session.sourceBytes }
+    private var currentMIMEType: String { session.mimeType }
+    private var responseStatus: Int? { session.currentResponseStatus }
+    private var responseMeta: String { session.currentResponseMeta }
+    private var responseWasCached: Bool? { session.currentResponseWasCached }
+    private var responseReceivedAt: Date? { session.currentResponseReceivedAt }
+    private var activeWebDocumentURL: URL? { session.activeWebDocumentURL }
 
     init(restoredState: RestoredTabState? = nil, initialURL: URL? = nil) {
-        let documentStore = BrowserDocumentStore()
-        let resourceStore = BrowserResourceStore()
-        let router = BrowserNavigationRouter()
         let contextMenuScriptHandler = ContextMenuScriptHandler()
         let linkHoverScriptHandler = LinkHoverScriptHandler()
         let linkActivationScriptHandler = LinkActivationScriptHandler()
@@ -458,676 +321,211 @@ final class BrowserModel: ObservableObject {
             contentWorld: .defaultClient,
             name: ScrollPositionScriptHandler.name
         )
-        var configuration = WebPage.Configuration()
-        configuration.websiteDataStore = .nonPersistent()
-        configuration.userContentController = userContentController
-        configuration.suppressesIncrementalRendering = false
-        configuration.loadsSubresources = true
-        configuration.defaultNavigationPreferences.allowsContentJavaScript = false
-        configuration.urlSchemeHandlers = [
-            URLScheme(BrowserDocumentSchemeHandler.scheme)!:
-                BrowserDocumentSchemeHandler(store: documentStore),
-            URLScheme(BrowserResourceSchemeHandler.scheme)!:
-                BrowserResourceSchemeHandler(store: resourceStore)
-        ]
-
-        self.webPageConfiguration = configuration
-        self.documentStore = documentStore
-        self.resourceStore = resourceStore
-        self.router = router
+        let presentation = BrowserWebPresentation(userContentController: userContentController)
+        self.presentation = presentation
+        let transport = GeminiTransport()
+        let settings = BrowserSettingsStore.shared
+        let themes = ContentThemeStore.shared
+        let certificates = ClientCertificateStore.shared
+        let cache = SharedContentCache.shared
+        let retriever = GeminiResourceRetriever<ClientTLSIdentity>(
+            transportEvents: { target, identity, configuration, authorize in
+                transport.events(for: target, clientIdentity: identity, configuration: configuration, authorizeTrust: authorize)
+            }, cache: cache, resolveIdentity: { url in
+                guard let resolved = await certificates.resolvedCertificate(for: url) else { return nil }
+                return GeminiRetrievalIdentity(descriptor: resolved.descriptor, credential: resolved.tlsIdentity)
+            }, authorizeTrust: { identity, _ in await ServerTrustPresentation.shared.authorize(identity) }
+        )
+        var services = BrowserSessionServices(preferences: { settings.preferences }, retriever: retriever)
+        services.preparePresentation = { await themes.waitUntilReady() }
+        services.contentStyle = { zoom, hides, inset in
+            Self.contentStyle(themes: themes, preferences: settings.preferences, zoom: zoom, hides: hides, inset: inset)
+        }
+        services.faviconLoader = GeminiFaviconLoader(cache: cache) { target in try await retriever.response(for: target, purpose: .favicon) }
+        services.imageLoader = SharedGeminiImageLoader.shared
+        services.authorizeTrust = { identity, _ in await ServerTrustPresentation.shared.authorize(identity) }
+        services.backForwardCache = SharedBackForwardCacheStore.shared
+        services.recordVisit = { BrowsingHistoryStore.shared.record($0, title: $1) }
+        services.updateBookmarkFavicon = { BookmarksModel.shared.updateFavicon($0, for: $1, fetchedAt: $2) }
+        services.certificateDescriptor = { certificates.descriptor(id: $0) }
+        services.inputDraft = { GeminiInputDraftStore.shared.text(for: $0) }
+        services.saveInputDraft = { GeminiInputDraftStore.shared.save($0, for: $1) }
+        services.removeInputDraft = { GeminiInputDraftStore.shared.remove(for: $0) }
+        services.openExternalURL = { NSWorkspace.shared.open($0) }
+        self.session = BrowserSession(services: services, presentation: presentation, restoredState: restoredState, initialURL: initialURL)
         self.contextMenuScriptHandler = contextMenuScriptHandler
         self.linkHoverScriptHandler = linkHoverScriptHandler
         self.linkActivationScriptHandler = linkActivationScriptHandler
         self.inlineImageScriptHandler = inlineImageScriptHandler
         self.scrollPositionScriptHandler = scrollPositionScriptHandler
         self.preformattedStateScriptHandler = preformattedStateScriptHandler
-        self.page = WebPage(
-            configuration: configuration,
-            navigationDecider: BrowserNavigationDecider(router: router)
-        )
-        self.historySwipePage = WebPage(
-            configuration: configuration,
-            navigationDecider: BrowserNavigationDecider(router: router)
-        )
-        self.trustStore = SharedTrustedIdentityStore.shared
-        self.lastPreferences = settings.preferences
-        if let restoredState {
-            // NavigationState clamps the index at both ends. A negative or out-of-range
-            // value from an older or corrupted blob previously left committedURL nil,
-            // silently discarding the whole restored history.
-            self.navigation = NavigationState(restoring: restoredState)
-            self.pageZoom = restoredState.zoom
-            self.committedURL = self.navigation.committedURL
-            let currentCachedPage = self.committedURL.flatMap { self.navigation.cachedPage(for: $0) }
-            self.locationText = self.committedURL?.absoluteString ?? settings.preferences.homepage
-            self.title = restoredState.title
-                ?? currentCachedPage?.title
-                ?? self.committedURL.map(displayTitle)
-                ?? "New Tab"
-            self.documentTitle = restoredState.documentTitle
-                ?? currentCachedPage?.documentTitle
-            self.favicon = self.navigation.currentEntry?.favicon
-        } else {
-            self.locationText = initialURL?.absoluteString ?? settings.preferences.homepage
-        }
         contextMenuScriptHandler.browser = self
         linkHoverScriptHandler.browser = self
         linkActivationScriptHandler.browser = self
         inlineImageScriptHandler.browser = self
         scrollPositionScriptHandler.browser = self
         preformattedStateScriptHandler.browser = self
-
-        router.openURL = { [weak self] url in
-            self?.openLink(url)
-        }
-        router.downloadURL = { [weak self] url in
-            self?.download(url)
-        }
-        router.openInNewTab = { [weak self] url, background in
-            self?.openInNewTab?(url, background)
-        }
-        router.openInNewWindow = { [weak self] url in
-            self?.openInNewWindow?(url)
-        }
-        router.canOpenInApp = { [weak self] url in
-            self?.canOpenInApp(url) ?? false
-        }
-        themes.themeDidChange
-            .sink { [weak self] in self?.contentThemeChanged() }
-            .store(in: &cancellables)
-        settings.preferencesDidChange
-            .sink { [weak self] preferences in self?.preferencesChanged(to: preferences) }
-            .store(in: &cancellables)
-        ModifierFlagsMonitor.shared.flagsDidChange
-            .sink { [weak self] flags in self?.updateHoveredLinkModifiers(flags) }
-            .store(in: &cancellables)
-        updateNavigationAvailability()
+        let router = presentation.router
+        router.openURL = { [weak session] in session?.openLink($0) }
+        router.downloadURL = { [weak self] in self?.download($0) }
+        router.openInNewTab = { [weak self] in self?.openInNewTab?($0, $1) }
+        router.openInNewWindow = { [weak self] in self?.openInNewWindow?($0) }
+        router.canOpenInApp = { [weak session] in session?.canOpenInApp($0) ?? false }
+        session.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+        presentation.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &cancellables)
+        themes.themeDidChange.sink { [weak session] in session?.contentThemeChanged() }.store(in: &cancellables)
+        settings.preferencesDidChange.sink { [weak session] in session?.preferencesChanged(to: $0) }.store(in: &cancellables)
+        ModifierFlagsMonitor.shared.flagsDidChange.sink { [weak self] in self?.updateHoveredLinkModifiers($0) }.store(in: &cancellables)
     }
+    func start() { session.start() }
+    func submitLocation() { session.submitLocation() }
+    func reload() { session.reload() }
+    func goBack() { session.goBack() }
+    func goForward() { session.goForward() }
+    func goHome() { session.goHome() }
+    func goToCapsuleRoot() { session.goToCapsuleRoot() }
+    func goUpOneLevel() { session.goUpOneLevel() }
+    func zoomIn() { session.zoomIn() }
+    func zoomOut() { session.zoomOut() }
+    func actualSize() { session.actualSize() }
+    func showPageSource() { session.showPageSource() }
+    func cancelClientCertificatePrompt(id: UUID) { session.cancelClientCertificatePrompt(id: id) }
+    func openArchive() { session.openArchive() }
+    func finishClearing() { session.finishClearing() }
+    func stop() { session.stop(); cancelHistorySwipePreparation() }
+    func searchLocation(_ query: String) { session.searchLocation(query) }
+    func openFile(_ url: URL, disposition: HistoryDisposition = .new) { session.openFile(url, disposition: disposition) }
+    func showInternalPage(_ page: InternalPage, disposition: HistoryDisposition = .new) { session.showInternalPage(page, disposition: disposition) }
+    func go(toHistoryEntryWithID id: BackForwardEntry.ID) { session.go(toHistoryEntryWithID: id) }
+    func cancelInput(draft: String = "", for promptID: UUID) { session.cancelInput(draft: draft, for: promptID) }
+    func preserveInputDraft(_ draft: String, for prompt: InputPrompt) { session.preserveInputDraft(draft, for: prompt) }
+    func submitInput(_ value: String, for promptID: UUID) { session.submitInput(value, for: promptID) }
+    func prepareForClearing(_ action: BrowsingDataAction, since cutoff: Date?) { cancelHistorySwipePreparation(); session.prepareForClearing(action, since: cutoff) }
+    func drainWritesForClearing() async { await session.drainWritesForClearing() }
+    func flushBackForwardPersistence() async { await session.flushBackForwardPersistence() }
+    func flushContentCacheWrites() async {}
+    func handleInlineImageMessage(lineIdentifier: String, url: URL, action: String, documentURL: URL) { session.handleInlineImageMessage(lineIdentifier: lineIdentifier, url: url, action: action, documentURL: documentURL) }
+    func toggleInlineImage(lineIdentifier: String, url: URL) { session.toggleInlineImage(lineIdentifier: lineIdentifier, url: url) }
+    func updateImageViewportTopInset(_ inset: CGFloat) { session.updateImageViewportTopInset(Double(inset)) }
+    fileprivate func recordScrollPosition(_ offset: Double, from documentURL: URL?) { session.recordScrollPosition(offset, from: documentURL) }
+    fileprivate func recordPreformattedState(index: Int, collapsed: Bool, from documentURL: URL?) { session.recordPreformattedState(index: index, collapsed: collapsed, from: documentURL) }
+    fileprivate func updateHoveredLink(_ href: String?, modifiers: LinkModifierKeys = []) { session.updateHoveredLink(href, modifiers: modifiers) }
+    private func canOpenInApp(_ url: URL) -> Bool { session.canOpenInApp(url) }
+    private func openLink(_ url: URL) { session.openLink(url) }
+    private func retrieveGeminiResource(_ url: URL) async throws -> (data: Data, mimeType: String, finalURL: URL) { try await session.retrieveGeminiResource(url) }
+    private func friendly(_ error: any Error) -> String { session.friendly(error) }
 
     fileprivate func acceptsDocumentMessage(_ message: WKScriptMessage) -> Bool {
         DocumentMessageFence.accepts(message, currentDocumentURL: activeWebDocumentURL)
     }
 
-    var canReload: Bool {
-        !isLoading && committedURL != nil && (retryNotBefore.map { Date() >= $0 } ?? true)
-    }
-
-    var canStop: Bool { isLoading || !imageTasks.isEmpty }
-
-    func start() {
-        guard !hasStarted else { return }
-        hasStarted = true
-
-        Task { @MainActor [weak self] in
-            await self?.themes.waitUntilReady()
-            // A location submitted while the first theme was resolving supersedes
-            // launch restoration. Never replace that newer navigation with the homepage.
-            guard let self, navigationTask == nil, activeWebDocumentURL == nil else { return }
-            startInitialNavigation()
-        }
-    }
-
-    private func startInitialNavigation() {
-        if let committedURL, let cached = cachedPage(for: committedURL) {
-            displayCachedPage(cached)
-            return
-        }
-
-        // Restoring a tab is NOT a new navigation. Falling through to submitLocation()
-        // committed with .new, and commit(.new) truncates the forward branch — so a
-        // session saved mid-history lost every entry ahead of the cursor before the
-        // user touched anything. Re-fetch as a traversal, which leaves history alone.
-        if let committedURL, !navigation.isEmpty {
-            if let page = InternalPage.page(for: committedURL) {
-                showInternalPage(page, disposition: .traversal)
-            } else if committedURL.isFileURL {
-                openFile(committedURL, disposition: .traversal)
-            } else if let target = makeTarget(for: committedURL) {
-                navigate(to: target, disposition: .traversal)
+    fileprivate func activateLink(_ url: URL, activation: LinkActivation) {
+        switch activation {
+        case .newBackgroundTab:
+            if canOpenInApp(url) {
+                openInNewTab?(url, true)
             } else {
-                submitLocation()
-            }
-            return
-        }
-
-        submitLocation()
-    }
-
-    var restorationState: RestoredTabState {
-        navigation.updateCurrentMetadata(title: documentTitle ?? title, favicon: favicon)
-        return navigation.restorationState(
-            zoom: pageZoom,
-            title: title,
-            documentTitle: documentTitle
-        )
-    }
-
-    func submitLocation() {
-        validationMessage = nil
-        do {
-            let preferences = settings.preferences
-            let interpreter = AddressInputInterpreter(searchEndpoint:
-                preferences.searchProvider.endpoint(customEndpoint: preferences.customSearchEndpoint)
-            )
-            switch try interpreter.interpret(locationText) {
-            case .gemini(let target):
-                navigate(to: target, disposition: .new)
-            case .viewSource(let target):
-                navigate(to: target, disposition: .new, renderAsSource: true)
-            case .internalPage(let page):
-                showInternalPage(page)
-            case .external(let url):
                 openLink(url)
             }
-        } catch AddressInputError.empty {
-            validationMessage = "Enter a capsule address or search query."
-        } catch AddressInputError.invalidGeminiURL {
-            validationMessage = "That is not a valid Gemini address."
-        } catch {
-            validationMessage = "That address could not be opened."
-        }
-    }
-
-    /// An explicit search action must bypass hostname interpretation and completion.
-    func searchLocation(_ query: String) {
-        let preferences = settings.preferences
-        let endpoint = preferences.searchProvider.endpoint(customEndpoint: preferences.customSearchEndpoint)
-        guard let url = GeminiQueryEncoding.url(base: endpoint, query: query),
-              let target = try? GeminiRequestTarget(url.absoluteString) else {
-            validationMessage = "The search endpoint is not a valid Gemini address."
-            return
-        }
-        validationMessage = nil
-        navigate(to: target, disposition: .new)
-    }
-
-    func reload() {
-        if let internalPage {
-            showInternalPage(internalPage, disposition: .reload)
-            return
-        }
-        if let committedURL, ViewSourceURL.isViewSource(committedURL) {
-            if let cached = cachedPage(for: committedURL) {
-                displayCachedPage(cached)
-                recordSuccessfulVisit(
-                    committedURL,
-                    title: cached.title ?? cached.documentTitle,
-                    disposition: .reload
-                )
-                return
+        case .newForegroundTab:
+            if canOpenInApp(url) {
+                openInNewTab?(url, false)
+            } else {
+                openLink(url)
             }
-            // No cached bytes, e.g. a session restored after the cache was cleared:
-            // fetch the resource again and re-present it as source.
-            if let resource = ViewSourceURL.unwrap(committedURL),
-               let target = try? GeminiRequestTarget(resource.absoluteString) {
-                navigate(to: target, disposition: .reload, renderAsSource: true)
+        case .newWindow:
+            if canOpenInApp(url) {
+                openInNewWindow?(url)
+            } else {
+                openLink(url)
             }
-            return
+        case .download:
+            download(url)
+        case .currentTab, .contextMenu:
+            openLink(url)
         }
-        if let committedURL, committedURL.isFileURL {
-            openFile(committedURL, disposition: .reload)
-            return
-        }
-        if let committedURL, decodedDataImage(committedURL.absoluteString) != nil {
-            openDataImage(committedURL, disposition: .reload)
-            return
-        }
-        guard let committedURL, let target = makeTarget(for: committedURL) else { return }
-        navigate(to: target, disposition: .reload)
     }
 
-    /// Tears down everything belonging to the page being replaced.
-    ///
-    /// Every entry point into a new page needs this: a capsule navigation, a local file,
-    /// a `data:` image, and one of Major Tom's own pages. All four used to do it by hand
-    /// and had drifted apart. Only `showInternalPage` finished the abandoned document
-    /// stream and cleared the favicon, the hovered link and `activeWebDocumentURL`, so
-    /// dropping a local file onto a tab left the previous capsule's glyph in the toolbar
-    /// and on the native tab title, and left a stale continuation that made `stop()`
-    /// believe the *previous* page had been interrupted partway.
-    ///
-    /// - Parameter keepsFavicon: true while moving between pages of one capsule, so the
-    ///   glyph does not flicker on every navigation within a site.
-    private func beginNavigation(
-        disposition: HistoryDisposition,
-        keepsFavicon: Bool = false
+    private func addContextMenuItem(
+        _ title: String,
+        systemImage: String,
+        enabled: Bool,
+        to menu: NSMenu,
+        action: @escaping () -> Void
     ) {
-        if case .traversal = disposition {
-            // The caller moved the cursor only after persisting the page being left.
-        } else {
-            backForwardDebounceTask?.cancel()
-            navigation.updateCurrentMetadata(title: documentTitle ?? title, favicon: favicon)
-            persistCurrentBackForwardEntry()
-        }
-        abandonScrollRestoration(for: disposition)
-        currentResponseCanBeCached = true
-
-        navigationTask?.cancel()
-        navigationTask = nil
-        imageTasks.values.forEach { $0.cancel() }
-        imageTasks.removeAll()
-        automaticImagesPaused = false
-        imagePageStartedAt = .now
-        slowDownTask?.cancel()
-        slowDownTask = nil
-        documentContinuation?.finish()
-        documentContinuation = nil
-        documentBuffer.removeAll(keepingCapacity: false)
-        activeWebDocumentURL = nil
-
-        inputPrompt = nil
-        inputValidationMessage = nil
-        clientCertificatePrompt = nil
-        pendingClientCertificateChallenge = nil
-
-        retryNotBefore = nil
-        validationMessage = nil
-        internalPage = nil
-        // Belongs to the page being replaced. A stale identity in Page Info would
-        // describe a different capsule's certificate.
-        serverIdentity = nil
-        usedClientCertificate = nil
-        responseStatus = nil
-        responseMeta = ""
-        responseWasCached = nil
-        responseReceivedAt = nil
-        // The document is going away, so its hover state is stale.
-        hoveredLinkURL = nil
-        if !keepsFavicon { favicon = nil }
-        isLoading = false
+        let target = ContextMenuTarget(action)
+        contextMenuTargets.append(target)
+        let item = NSMenuItem(title: title, action: #selector(ContextMenuTarget.performAction), keyEquivalent: "")
+        item.target = target
+        item.isEnabled = enabled
+        item.image = NSImage(systemSymbolName: systemImage, accessibilityDescription: title)
+        menu.addItem(item)
     }
 
-    /// Opens a local file, e.g. a `.gmi` dragged onto the window or opened from Finder.
-    ///
-    /// Local files go through the same document pipeline, cache and history as capsule
-    /// responses, so View Source, Save Page As, Back/Forward and the content theme all
-    /// behave identically. Nothing is fetched over the network.
-    func openFile(_ url: URL, disposition: HistoryDisposition = .new) {
-        guard url.isFileURL else { return }
-        beginNavigation(disposition: disposition)
-
-        let mimeType = Self.mimeType(forPathExtension: url.pathExtension)
-
-        let data: Data
-        do {
-            data = try Data(contentsOf: url)
-        } catch {
-            showGeneratedPage(
-                title: "Could Not Open File",
-                message: "Major Tom could not read this file: \(error.localizedDescription)",
-                details: url.path,
-                url: url,
-                disposition: disposition
-            )
-            return
-        }
-
-        guard mimeType.hasPrefix("text/") || mimeType.hasPrefix("image/") else {
-            showGeneratedPage(
-                title: "Unsupported File",
-                message: "Major Tom cannot display this file type. No file was written.",
-                details: "\(url.lastPathComponent)\n\(data.count) bytes",
-                url: url,
-                disposition: disposition
-            )
-            return
-        }
-
-        currentSourceBytes = data
-        currentMIMEType = mimeType
-        canSavePage = !data.isEmpty
-        canShowSource = mimeType.hasPrefix("text/")
-
-        // commit() first: it sets committedURL, which renderCurrentContent() reads, and
-        // resets the title so an opening heading or preformatted caption can claim it.
-        commit(url, disposition: disposition)
-        renderCurrentContent()
-
-        cache(CachedPage(
-            url: url,
-            mimeType: mimeType,
-            body: data,
-            completion: .complete,
-            receivedAt: Date(),
-            title: title,
-            documentTitle: documentTitle
-        ))
-        recordSuccessfulVisit(url, title: documentTitle ?? title, disposition: disposition)
-        statusText = "Local file • \(data.count) bytes"
-    }
-
-    private static func mimeType(forPathExtension pathExtension: String) -> String {
-        switch pathExtension.lowercased() {
-        case "gmi", "gemini": return "text/gemini"
-        case "txt", "text", "md", "markdown", "log": return "text/plain"
-        case "png": return "image/png"
-        case "jpg", "jpeg": return "image/jpeg"
-        case "gif": return "image/gif"
-        case "webp": return "image/webp"
-        case "heic": return "image/heic"
-        default: return "application/octet-stream"
-        }
-    }
-
-    func stop() {
-        let wasLoading = isLoading
-        let stoppedImages = Array(imageTasks.keys)
-        let documentURL = activeWebDocumentURL
-        automaticImagesPaused = true
-        // A document continuation only exists while a response is actively streaming
-        // into the view, which is what distinguishes "stopped partway" from "stopped
-        // before anything committed".
-        let wasStreamingIntoDocument = documentContinuation != nil
-
-        // Cancellation is unconditional: stop() is also how closing a tab releases its
-        // work, and spec 9.2 requires that to cancel the network work it owns.
-        navigationTask?.cancel()
-        navigationTask = nil
-        imageTasks.values.forEach { $0.cancel() }
-        imageTasks.removeAll()
-        expandedInlineImages.subtract(stoppedImages)
-        for identifier in stoppedImages {
-            if let url = inlineImageURLs[identifier] { navigation.setImage(url, expanded: false) }
-        }
-        pendingRestoredInlineImageCount = 0
-        pendingInlineImageScrollCorrection = nil
-        if !stoppedImages.isEmpty { scheduleBackForwardPersistence() }
-        if let documentURL {
-            Task {
-                guard activeWebDocumentURL == documentURL else { return }
-                _ = try? await page.callJavaScript(
-                    InlineImagePresentationScript.stopScript(identifiers: stoppedImages, documentURL: documentURL),
-                    contentWorld: .defaultClient
-                )
-            }
-        }
-        slowDownTask?.cancel()
-        slowDownTask = nil
-        clientCertificatePrompt = nil
-        pendingClientCertificateChallenge = nil
-
-        // Stopping an idle page must not touch it. This previously rewrote the cache
-        // entry of a fully loaded page as .stopped and dropped its title.
-        guard wasLoading else { return }
-
-        finishCurrentDocument(message: "Loading was stopped.")
-        if wasStreamingIntoDocument, let committedURL, !currentSourceBytes.isEmpty {
-            cache(CachedPage(
-                url: committedURL,
-                mimeType: currentMIMEType,
-                body: currentSourceBytes,
-                completion: .stopped,
-                receivedAt: Date(),
-                title: title,
-                documentTitle: documentTitle,
-                responseStatus: responseStatus,
-                responseMeta: responseMeta,
-                clientCertificateID: usedClientCertificate?.id
-            ))
-        }
-        isLoading = false
-        statusText = "Stopped"
-        if let committedURL { locationText = committedURL.absoluteString }
-    }
-
-    func goBack() {
-        browserNavigationLogger.notice(
-            "goBack requested modelIndex=\(self.navigation.historyIndex) canBack=\(self.navigation.canGoBack) current=\(self.committedURL?.absoluteString ?? "nil", privacy: .public)"
-        )
-        guard let entry = navigation.backHistoryEntries.first else { return }
-        go(toHistoryEntryWithID: entry.id)
-    }
-
-    func goForward() {
-        browserNavigationLogger.notice(
-            "goForward requested modelIndex=\(self.navigation.historyIndex) canForward=\(self.navigation.canGoForward) current=\(self.committedURL?.absoluteString ?? "nil", privacy: .public)"
-        )
-        guard let entry = navigation.forwardHistoryEntries.first else { return }
-        go(toHistoryEntryWithID: entry.id)
-    }
-
-    func go(toHistoryEntryWithID id: BackForwardEntry.ID) {
-        browserNavigationLogger.notice(
-            "model traversal begin targetID=\(id.uuidString, privacy: .public) fromIndex=\(self.navigation.historyIndex)"
-        )
-        backForwardDebounceTask?.cancel()
-        persistCurrentBackForwardEntry()
-        guard let url = navigation.go(toHistoryEntryWithID: id) else {
-            browserNavigationLogger.error("model traversal rejected targetID=\(id.uuidString, privacy: .public)")
-            return
-        }
-        browserNavigationLogger.notice(
-            "model cursor moved index=\(self.navigation.historyIndex) url=\(url.absoluteString, privacy: .public)"
-        )
-        // A navigation still waiting for its response is abandoned by this traversal.
-        // Cancel it now rather than when the destination is displayed: reading the
-        // destination from the durable store takes a moment, and a response arriving in
-        // that gap used to commit as a new page from the destination entry, discarding
-        // the history ahead of it.
-        navigationTask?.cancel()
-        navigationTask = nil
-        prepareScrollRestoration(for: navigation.historyIndex)
-        updateNavigationAvailability()
-        navigateHistory(to: url)
-    }
-
-    fileprivate func prepareHistorySwipe(
-        direction: BrowserHistorySwipeDirection,
-        viewportWidth: CGFloat,
-        offset: CGFloat
-    ) async -> Bool {
-        guard let sourceEntryID = navigation.currentEntryID,
-              let destination = direction == .back
-                ? navigation.backHistoryEntries.first
-                : navigation.forwardHistoryEntries.first else { return false }
-
-        historySwipeGeneration += 1
-        let generation = historySwipeGeneration
-        pendingHistorySwipe = PendingHistorySwipe(
-            sourceEntryID: sourceEntryID,
-            targetEntryID: destination.id,
-            direction: direction
-        )
-        historySwipePresentation = HistorySwipePresentation(
-            direction: direction,
-            viewportWidth: viewportWidth,
-            offset: 0,
-            isReady: false
-        )
-
-        var cached = destination.page
-        if cached == nil, let backForwardCache {
-            cached = try? await backForwardCache.entry(id: destination.id)?.page
-        }
-        guard generation == historySwipeGeneration,
-              navigation.currentEntryID == sourceEntryID,
-              pendingHistorySwipe?.targetEntryID == destination.id else { return false }
-
-        if let cached {
-            navigation.cache(cached, for: destination.id)
-        }
-        do {
-            try await renderHistorySwipeDestination(cached, entry: destination)
-        } catch {
-            browserNavigationLogger.error(
-                "history swipe staging failed targetID=\(destination.id.uuidString, privacy: .public) error=\(String(describing: error), privacy: .public)"
-            )
-            pendingHistorySwipe = nil
-            historySwipePresentation = nil
-            return false
-        }
-        guard generation == historySwipeGeneration,
-              navigation.currentEntryID == sourceEntryID,
-              var presentation = historySwipePresentation else { return false }
-        presentation.isReady = true
-        presentation.offset = direction.sign * min(abs(offset), viewportWidth)
-        historySwipePresentation = presentation
-        browserNavigationLogger.notice(
-            "history swipe staging ready targetID=\(destination.id.uuidString, privacy: .public) cached=\(cached != nil)"
-        )
-        return true
-    }
-
-    fileprivate func updateHistorySwipe(offset: CGFloat) {
-        guard var presentation = historySwipePresentation, presentation.isReady else { return }
-        presentation.offset = presentation.direction.sign
-            * min(max(0, presentation.direction.sign * offset), presentation.viewportWidth)
-        historySwipePresentation = presentation
-    }
-
-    fileprivate func finishHistorySwipe(cancelled: Bool) {
-        guard let pendingHistorySwipe, var presentation = historySwipePresentation else { return }
-        let generation = historySwipeGeneration
-        if !cancelled {
-            go(toHistoryEntryWithID: pendingHistorySwipe.targetEntryID)
-        }
-        presentation.offset = cancelled ? 0 : presentation.direction.sign * presentation.viewportWidth
-        withAnimation(.easeOut(duration: 0.22)) {
-            historySwipePresentation = presentation
-        }
-        Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(230))
-            if !cancelled {
-                for _ in 0..<20 where self?.isRestoringHistoryScroll == true {
-                    try? await Task.sleep(for: .milliseconds(25))
+    func download(_ url: URL) {
+        statusText = "Downloading \(url.lastPathComponent)…"
+        downloadTask?.cancel()
+        downloadTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let fetched: (data: Data, mimeType: String, finalURL: URL)
+                switch url.scheme?.lowercased() {
+                case "gemini":
+                    fetched = try await retrieveGeminiResource(url)
+                case "http", "https":
+                    if settings.preferences.proxy != nil {
+                        fetched = try await retrieveGeminiResource(url)
+                    } else {
+                        let (data, response) = try await URLSession.shared.data(from: url)
+                        fetched = (data, (response.mimeType ?? "application/octet-stream").lowercased(), response.url ?? url)
+                    }
+                case "file":
+                    fetched = (
+                        try Data(contentsOf: url),
+                        BrowserSession.mimeType(forPathExtension: url.pathExtension),
+                        url
+                    )
+                default:
+                    throw URLError(.unsupportedURL)
                 }
+                try Task.checkCancellation()
+
+                let panel = NSSavePanel()
+                // Name from the FINAL url, so a redirected download is not named after
+                // the URL that redirected.
+                panel.nameFieldStringValue = BrowserFilenameSuggestion.make(
+                    for: fetched.finalURL,
+                    mimeType: fetched.mimeType
+                )
+                panel.canCreateDirectories = true
+                guard await panel.begin() == .OK, let destination = panel.url else {
+                    statusText = "Download cancelled"
+                    return
+                }
+                try fetched.data.write(to: destination, options: .atomic)
+                statusText = "Downloaded \(destination.lastPathComponent)"
+            } catch is CancellationError {
+                statusText = "Download cancelled"
+            } catch {
+                validationMessage = "Download failed: \(friendly(error))"
+                statusText = "Download failed"
             }
-            guard self?.historySwipeGeneration == generation else { return }
-            self?.historySwipePresentation = nil
-            self?.pendingHistorySwipe = nil
         }
     }
 
-    fileprivate func cancelHistorySwipePreparation() {
-        historySwipeGeneration += 1
-        pendingHistorySwipe = nil
-        historySwipePresentation = nil
-    }
-
-    fileprivate func recordScrollPosition(_ offset: Double, from documentURL: URL?) {
-        guard documentURL == activeWebDocumentURL,
-              pendingScrollRestoration?.historyIndex != navigation.historyIndex else { return }
-        navigation.recordScrollOffset(offset)
-        scheduleBackForwardPersistence()
-    }
-
-    fileprivate func recordPreformattedState(index: Int, collapsed: Bool, from documentURL: URL?) {
-        guard documentURL == activeWebDocumentURL else { return }
-        navigation.setPreformattedSection(index, collapsed: collapsed)
-        scheduleBackForwardPersistence()
-    }
-
-    /// Flushes this tab's coalesced presentation state before the shared database closes.
-    func flushBackForwardPersistence() async {
-        backForwardDebounceTask?.cancel()
-        backForwardDebounceTask = nil
-        persistCurrentBackForwardEntry()
-        await backForwardWriteTask?.value
-    }
-
-    func prepareForClearing(_ action: BrowsingDataAction, since cutoff: Date?) {
-        browsingDataGeneration &+= 1
-        if action == .clearBrowsingData, let prompt = inputPrompt {
-            discardedDraftPrompts.insert(prompt.id)
-            inputPrompt = nil
-            inputValidationMessage = nil
+    private static func findWebView(in view: NSView) -> WKWebView? {
+        if let webView = view as? WKWebView { return webView }
+        for subview in view.subviews {
+            if let webView = findWebView(in: subview) { return webView }
         }
-        // Stop pre-clear network work without replacing the document being read.
-        stop()
-        cancelHistorySwipePreparation()
-        // Release the hidden preview, including its rendered source, without loading
-        // another document or disturbing the page currently being read.
-        historySwipePage = WebPage(
-            configuration: webPageConfiguration,
-            navigationDecider: BrowserNavigationDecider(router: router)
-        )
-        backForwardDebounceTask?.cancel()
-        backForwardDebounceTask = nil
-        isClearingBrowsingData = true
-        currentResponseCanBeCached = false
-        navigation.recordCurrentAccess()
-        navigation.clearBrowsingData(action, since: cutoff)
-        favicon = navigation.currentEntry?.favicon
-        pendingScrollRestoration = nil
-        pendingInlineImageScrollCorrection = nil
-        pendingRestoredInlineImageCount = 0
-        isRestoringHistoryScroll = false
-        updateNavigationAvailability()
+        return nil
     }
 
-    func drainWritesForClearing() async {
-        await backForwardWriteTask?.value
+    func prepareContextMenu(at location: NSPoint, in view: NSView) {
+        pendingContextMenuLocation = location
+        pendingContextMenuView = view
     }
 
-    func finishClearing() {
-        isClearingBrowsingData = false
-    }
-
-    func flushContentCacheWrites() async {
-    }
-
-    private func prepareScrollRestoration(for index: Int) {
-        let offset = navigation.scrollOffset(forHistoryIndex: index)
-        pendingScrollRestoration = (
-            historyIndex: index,
-            offset: offset
-        )
-        isRestoringHistoryScroll = navigation.presentationState(forHistoryIndex: index)
-            .map(Self.needsPresentationRestoration) ?? false
-        pendingRestoredInlineImageCount = 0
-        pendingInlineImageScrollCorrection = nil
-    }
-
-    func goHome() {
-        locationText = settings.preferences.homepage
-        submitLocation()
-    }
-
-    func goToCapsuleRoot() {
-        guard let committedURL,
-              var components = URLComponents(url: committedURL, resolvingAgainstBaseURL: false) else { return }
-        components.path = "/"
-        components.query = nil
-        components.fragment = nil
-        guard let url = components.url,
-              let target = try? GeminiRequestTarget(url.absoluteString) else { return }
-        navigate(to: target, disposition: .new)
-    }
-
-    func goUpOneLevel() {
-        guard let committedURL,
-              var components = URLComponents(url: committedURL, resolvingAgainstBaseURL: false) else { return }
-        var parts = components.path.split(separator: "/")
-        if !parts.isEmpty { parts.removeLast() }
-        components.path = "/" + parts.joined(separator: "/") + (parts.isEmpty ? "" : "/")
-        components.query = nil
-        components.fragment = nil
-        guard let url = components.url,
-              let target = try? GeminiRequestTarget(url.absoluteString) else { return }
-        navigate(to: target, disposition: .new)
-    }
-
-    func zoomIn() {
-        pageZoom = min(3, pageZoom + 0.1)
-        applyZoom()
-    }
-
-    func zoomOut() {
-        pageZoom = max(0.5, pageZoom - 0.1)
-        applyZoom()
-    }
-
-    func actualSize() {
-        pageZoom = 1
-        applyZoom()
-    }
-
-    /// Prints the current document.
-    ///
-    /// `WebPage.exported(as: .pdf())` captures the entire scrollable document as one
-    /// PDF page. Printing that PDF then shrinks a long article to a single sheet. The
-    /// hosted `WKWebView` has a public macOS print operation that performs real page
-    /// layout and applies `@media print`, so use it directly.
     func printPage() {
         guard committedURL != nil,
               let window = NSApplication.shared.keyWindow,
@@ -1146,16 +544,6 @@ final class BrowserModel: ObservableObject {
         operation.runModal(for: window, delegate: nil, didRun: nil, contextInfo: nil)
     }
 
-    /// Stops the hosted `WKWebView` from claiming dragged files.
-    ///
-    /// WKWebView registers for dragged types itself and consumes a drop before it can
-    /// reach SwiftUI's drop destination, so dropping a `.gmi` or an image on a tab appeared
-    /// to do nothing at all. Unregistering lets the drag fall through to the handler that
-    /// opens the file. Nothing is lost by it: the document is not editable, so there was no
-    /// legitimate drop for the web view to handle.
-    ///
-    /// The view does not exist until after the first layout pass, hence the bounded wait
-    /// rather than a single attempt.
     func releaseWebViewDragTypes() async {
         for _ in 0..<20 {
             if let window = NSApplication.shared.keyWindow ?? NSApplication.shared.windows.first,
@@ -1168,53 +556,26 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    private static func findWebView(in view: NSView) -> WKWebView? {
-        if let webView = view as? WKWebView { return webView }
-        for subview in view.subviews {
-            if let webView = findWebView(in: subview) { return webView }
-        }
-        return nil
-    }
-
-    func showPageContextMenu(at location: NSPoint, in view: NSView?) {
-        let menu = NSMenu()
-        // NSMenu.autoenablesItems defaults to true, under which NSMenuItem.isEnabled is
-        // ignored and AppKit asks the target's validateMenuItem: instead. Because
-        // ContextMenuTarget responds to the action selector but implements no
-        // validation, every item validated as enabled: Back and Forward appeared
-        // available on a fresh tab and did nothing when clicked (spec 18.3).
-        menu.autoenablesItems = false
-        contextMenuTargets.removeAll()
-        addContextMenuItem("Back", systemImage: BrowserMenuIcon.back, enabled: canGoBack, to: menu) { [weak self] in self?.goBack() }
-        addContextMenuItem("Forward", systemImage: BrowserMenuIcon.forward, enabled: canGoForward, to: menu) { [weak self] in self?.goForward() }
-        menu.addItem(.separator())
-        if canStop {
-            addContextMenuItem("Stop Loading", systemImage: "xmark", enabled: true, to: menu) { [weak self] in self?.stop() }
-        } else {
-            addContextMenuItem("Reload Page", systemImage: BrowserMenuIcon.reload, enabled: canReload, to: menu) { [weak self] in self?.reload() }
-        }
-        menu.addItem(.separator())
-        addContextMenuItem("Show Page Source", systemImage: BrowserMenuIcon.showSource, enabled: canShowSource, to: menu) { [weak self] in self?.showPageSource() }
-        addContextMenuItem("Check for Previous Versions", systemImage: BrowserMenuIcon.archive, enabled: canCheckArchive, to: menu) { [weak self] in self?.openArchive() }
-        addContextMenuItem("Save Page As…", systemImage: BrowserMenuIcon.save, enabled: canSavePage, to: menu) { [weak self] in Task { await self?.savePage() } }
-        addContextMenuItem("Print Page…", systemImage: BrowserMenuIcon.print, enabled: true, to: menu) { [weak self] in self?.printPage() }
-        menu.popUp(positioning: nil, at: location, in: view)
-    }
-
-    func prepareContextMenu(at location: NSPoint, in view: NSView) {
-        pendingContextMenuLocation = location
-        pendingContextMenuView = view
-    }
-
-    fileprivate func showPendingContextMenu(link: URL?, imageLine: String?) {
-        guard let location = pendingContextMenuLocation,
-              let view = pendingContextMenuView else { return }
-        pendingContextMenuLocation = nil
-        pendingContextMenuView = nil
-        if let link {
-            showLinkContextMenu(for: link, imageLine: imageLine, at: location, in: view)
-        } else {
-            showPageContextMenu(at: location, in: view)
+    func savePage() async {
+        guard canSavePage, let committedURL else { return }
+        // NSSavePanel.begin is modeless, so the user can keep browsing the window
+        // behind it. Capture the bytes for the page that was on screen when Save was
+        // invoked; re-reading the property after the await wrote the *new* page's
+        // bytes into a file named after the old one.
+        let bytes = currentSourceBytes
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = BrowserFilenameSuggestion.make(
+            for: committedURL,
+            mimeType: currentMIMEType,
+            documentTitle: documentTitle
+        )
+        panel.canCreateDirectories = true
+        guard await panel.begin() == .OK, let destination = panel.url else { return }
+        do {
+            try bytes.write(to: destination, options: .atomic)
+            statusText = "Saved \(destination.lastPathComponent)"
+        } catch {
+            validationMessage = "The page could not be saved: \(error.localizedDescription)"
         }
     }
 
@@ -1223,8 +584,7 @@ final class BrowserModel: ObservableObject {
         menu.autoenablesItems = false
         contextMenuTargets.removeAll()
         let opensInApp = canOpenInApp(url)
-        if let imageLine, inlineImageURLs[imageLine] == url {
-            let expanded = expandedInlineImages.contains(imageLine) && imageTasks[imageLine] == nil
+        if let imageLine, let expanded = session.inlineImageIsExpanded(line: imageLine, url: url) {
             addContextMenuItem(expanded ? "Collapse Image" : "Load Image", systemImage: "photo", enabled: true, to: menu) { [weak self] in
                 self?.toggleInlineImage(lineIdentifier: imageLine, url: url)
             }
@@ -1256,315 +616,41 @@ final class BrowserModel: ObservableObject {
         menu.popUp(positioning: nil, at: location, in: view)
     }
 
-    private func addContextMenuItem(
-        _ title: String,
-        systemImage: String,
-        enabled: Bool,
-        to menu: NSMenu,
-        action: @escaping () -> Void
-    ) {
-        let target = ContextMenuTarget(action)
-        contextMenuTargets.append(target)
-        let item = NSMenuItem(title: title, action: #selector(ContextMenuTarget.performAction), keyEquivalent: "")
-        item.target = target
-        item.isEnabled = enabled
-        item.image = NSImage(systemSymbolName: systemImage, accessibilityDescription: title)
-        menu.addItem(item)
-    }
-
-    func showPageSource() {
-        guard canShowSource,
-              let resourceURL = committedURL,
-              !ViewSourceURL.isViewSource(resourceURL) else { return }
-        // A navigation that has not committed yet is abandoned in favour of the source
-        // view. Cancel it here: `presentSource` clears `navigationTask` without
-        // cancelling it, which used to leave that request running with Stop unavailable
-        // until its response arrived and replaced the source view.
-        navigationTask?.cancel()
-        navigationTask = nil
-        presentSource(
-            currentSourceBytes,
-            of: resourceURL,
-            mimeType: currentMIMEType,
-            disposition: .new,
-            receivedAt: responseReceivedAt ?? Date()
-        )
-    }
-
-    /// Presents `bytes` as the source of `resourceURL`, committed at its `view-source:`
-    /// URL so it has its own history entry and can be revisited.
-    ///
-    /// Shared by Show Page Source, which already holds the bytes, and by a
-    /// `view-source:` address typed into the location field, which has just fetched
-    /// them. The cache entry records the *resource's* MIME type rather than text/plain,
-    /// so Save Page As suggests .gmi for Gemtext source whether the page is fresh or
-    /// restored from cache — the source of a .gmi document is that .gmi document.
-    private func presentSource(
-        _ bytes: Data,
-        of resourceURL: URL,
-        mimeType: String,
-        disposition: HistoryDisposition,
-        receivedAt: Date = Date()
-    ) {
-        guard let sourceURL = ViewSourceURL.wrap(resourceURL) else { return }
-        abandonScrollRestoration(for: disposition)
-        renderSourceDocument(bytes, at: sourceURL)
-        let heading = "Source: \(displayTitle(for: resourceURL))"
-        // commit() resets the title, so the heading is applied after it.
-        commit(sourceURL, disposition: disposition)
-        cache(CachedPage(
-            url: sourceURL,
-            mimeType: mimeType,
-            body: bytes,
-            completion: .complete,
-            receivedAt: receivedAt,
-            title: heading,
-            responseStatus: responseStatus,
-            responseMeta: responseMeta,
-            clientCertificateID: usedClientCertificate?.id
-        ))
-        currentSourceBytes = bytes
-        currentMIMEType = mimeType
-        canSavePage = !bytes.isEmpty
-        canShowSource = false
-        title = heading
-        recordSuccessfulVisit(sourceURL, title: heading, disposition: disposition)
-        statusText = "Page source"
-        isLoading = false
-        navigationTask = nil
-    }
-
-    private func renderSourceDocument(_ bytes: Data, at sourceURL: URL) {
-        let source = String(decoding: bytes, as: UTF8.self)
-        let continuation = beginDocument(at: sourceURL)
-        continuation.yield(renderer.documentStart(themeCSS: themeCSS, kind: .source, appearance: themeAppearance))
-        continuation.yield(Data(HTMLDocumentStreamRenderer.sourceStart.utf8))
-
-        // Batch lines so a large source is a few dozen scheme-handler writes rather
-        // than one per line, while still streaming.
-        var batch = ""
-        for line in SourceLineSplitter.lines(of: source) {
-            batch += HTMLDocumentStreamRenderer.sourceLine(line)
-            if batch.utf8.count >= 32 * 1_024 {
-                continuation.yield(Data(batch.utf8))
-                batch = ""
-            }
+    func showPageContextMenu(at location: NSPoint, in view: NSView?) {
+        let menu = NSMenu()
+        // NSMenu.autoenablesItems defaults to true, under which NSMenuItem.isEnabled is
+        // ignored and AppKit asks the target's validateMenuItem: instead. Because
+        // ContextMenuTarget responds to the action selector but implements no
+        // validation, every item validated as enabled: Back and Forward appeared
+        // available on a fresh tab and did nothing when clicked (spec 18.3).
+        menu.autoenablesItems = false
+        contextMenuTargets.removeAll()
+        addContextMenuItem("Back", systemImage: BrowserMenuIcon.back, enabled: canGoBack, to: menu) { [weak self] in self?.goBack() }
+        addContextMenuItem("Forward", systemImage: BrowserMenuIcon.forward, enabled: canGoForward, to: menu) { [weak self] in self?.goForward() }
+        menu.addItem(.separator())
+        if canStop {
+            addContextMenuItem("Stop Loading", systemImage: "xmark", enabled: true, to: menu) { [weak self] in self?.stop() }
+        } else {
+            addContextMenuItem("Reload Page", systemImage: BrowserMenuIcon.reload, enabled: canReload, to: menu) { [weak self] in self?.reload() }
         }
-        if !batch.isEmpty { continuation.yield(Data(batch.utf8)) }
-
-        continuation.yield(Data(HTMLDocumentStreamRenderer.sourceEnd.utf8))
-        continuation.yield(renderer.documentEnd())
-        continuation.finish()
+        menu.addItem(.separator())
+        addContextMenuItem("Show Page Source", systemImage: BrowserMenuIcon.showSource, enabled: canShowSource, to: menu) { [weak self] in self?.showPageSource() }
+        addContextMenuItem("Check for Previous Versions", systemImage: BrowserMenuIcon.archive, enabled: canCheckArchive, to: menu) { [weak self] in self?.openArchive() }
+        addContextMenuItem("Save Page As…", systemImage: BrowserMenuIcon.save, enabled: canSavePage, to: menu) { [weak self] in Task { await self?.savePage() } }
+        addContextMenuItem("Print Page…", systemImage: BrowserMenuIcon.print, enabled: true, to: menu) { [weak self] in self?.printPage() }
+        menu.popUp(positioning: nil, at: location, in: view)
     }
 
-    func savePage() async {
-        guard canSavePage, let committedURL else { return }
-        // NSSavePanel.begin is modeless, so the user can keep browsing the window
-        // behind it. Capture the bytes for the page that was on screen when Save was
-        // invoked; re-reading the property after the await wrote the *new* page's
-        // bytes into a file named after the old one.
-        let bytes = currentSourceBytes
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = BrowserFilenameSuggestion.make(
-            for: committedURL,
-            mimeType: currentMIMEType,
-            documentTitle: documentTitle
-        )
-        panel.canCreateDirectories = true
-        guard await panel.begin() == .OK, let destination = panel.url else { return }
-        do {
-            try bytes.write(to: destination, options: .atomic)
-            statusText = "Saved \(destination.lastPathComponent)"
-        } catch {
-            validationMessage = "The page could not be saved: \(error.localizedDescription)"
+    fileprivate func showPendingContextMenu(link: URL?, imageLine: String?) {
+        guard let location = pendingContextMenuLocation,
+              let view = pendingContextMenuView else { return }
+        pendingContextMenuLocation = nil
+        pendingContextMenuView = nil
+        if let link {
+            showLinkContextMenu(for: link, imageLine: imageLine, at: location, in: view)
+        } else {
+            showPageContextMenu(at: location, in: view)
         }
-    }
-
-    func download(_ url: URL) {
-        statusText = "Downloading \(url.lastPathComponent)…"
-        downloadTask?.cancel()
-        downloadTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                let fetched: (data: Data, mimeType: String, finalURL: URL)
-                switch url.scheme?.lowercased() {
-                case "gemini":
-                    fetched = try await retrieveGeminiResource(url)
-                case "http", "https":
-                    if settings.preferences.proxy != nil {
-                        fetched = try await retrieveGeminiResource(url)
-                    } else {
-                        let (data, response) = try await URLSession.shared.data(from: url)
-                        fetched = (data, (response.mimeType ?? "application/octet-stream").lowercased(), response.url ?? url)
-                    }
-                case "file":
-                    fetched = (
-                        try Data(contentsOf: url),
-                        Self.mimeType(forPathExtension: url.pathExtension),
-                        url
-                    )
-                default:
-                    throw URLError(.unsupportedURL)
-                }
-                try Task.checkCancellation()
-
-                let panel = NSSavePanel()
-                // Name from the FINAL url, so a redirected download is not named after
-                // the URL that redirected.
-                panel.nameFieldStringValue = BrowserFilenameSuggestion.make(
-                    for: fetched.finalURL,
-                    mimeType: fetched.mimeType
-                )
-                panel.canCreateDirectories = true
-                guard await panel.begin() == .OK, let destination = panel.url else {
-                    statusText = "Download cancelled"
-                    return
-                }
-                try fetched.data.write(to: destination, options: .atomic)
-                statusText = "Downloaded \(destination.lastPathComponent)"
-            } catch is CancellationError {
-                statusText = "Download cancelled"
-            } catch {
-                validationMessage = "Download failed: \(friendly(error))"
-                statusText = "Download failed"
-            }
-        }
-    }
-
-    fileprivate func updateHoveredLink(_ href: String?, modifiers: LinkModifierKeys = []) {
-        guard let href, !href.isEmpty else {
-            hoveredLinkDestination = nil
-            hoveredLinkURL = nil
-            return
-        }
-        hoveredLinkDestination = href
-        hoveredLinkURL = LinkHoverText.text(for: href, modifiers: modifiers)
-    }
-
-    private func updateHoveredLinkModifiers(_ flags: NSEvent.ModifierFlags) {
-        guard let href = hoveredLinkDestination else { return }
-        var modifiers: LinkModifierKeys = []
-        if flags.contains(.command) { modifiers.insert(.command) }
-        if flags.contains(.shift) { modifiers.insert(.shift) }
-        if flags.contains(.option) { modifiers.insert(.option) }
-        if flags.contains(.control) { modifiers.insert(.control) }
-        hoveredLinkURL = LinkHoverText.text(for: href, modifiers: modifiers)
-    }
-
-    fileprivate func activateLink(_ url: URL, activation: LinkActivation) {
-        switch activation {
-        case .newBackgroundTab:
-            if canOpenInApp(url) {
-                openInNewTab?(url, true)
-            } else {
-                openLink(url)
-            }
-        case .newForegroundTab:
-            if canOpenInApp(url) {
-                openInNewTab?(url, false)
-            } else {
-                openLink(url)
-            }
-        case .newWindow:
-            if canOpenInApp(url) {
-                openInNewWindow?(url)
-            } else {
-                openLink(url)
-            }
-        case .download:
-            download(url)
-        case .currentTab, .contextMenu:
-            openLink(url)
-        }
-    }
-
-    /// Shows one of Major Tom's own pages, such as the bookmark manager.
-    ///
-    /// Committed like any other address so it takes part in history, Back and Forward. The
-    /// tab replaces the web view with a native view while one of these is showing, because
-    /// the document pipeline forbids script and could not host an interactive manager.
-    func showInternalPage(_ page: InternalPage, disposition: HistoryDisposition = .new) {
-        beginNavigation(disposition: disposition)
-
-        currentSourceBytes = Data()
-        currentMIMEType = ""
-        canSavePage = false
-        canShowSource = false
-        internalPage = page
-
-        // Internal pages use native SwiftUI views, not the WebKit document whose scroll
-        // reporter drives this state. A traversal to one therefore has nothing to
-        // restore, which `beginNavigation` cannot assume for the other entry points.
-        pendingScrollRestoration = nil
-        isRestoringHistoryScroll = false
-
-        commit(page.url, disposition: disposition)
-        title = page.title
-        statusText = page.title
-    }
-
-    /// Gathers what is known about the current page and presents the Page Info panel.
-    ///
-    /// The trusted record is read from the store rather than remembered, so the panel
-    /// reports the pinned key and sighting count even for a page served from cache, where
-    /// no live certificate was seen.
-    func showPageInformation() {
-        guard let committedURL else { return }
-        Task {
-            var trusted: TrustedServerIdentity?
-            if let endpoint = CapsuleEndpoint(url: committedURL) {
-                trusted = await trustStore?.identity(for: endpoint)
-            }
-            pageInformation = PageInformation(
-                url: committedURL,
-                status: responseStatus,
-                meta: responseMeta,
-                byteCount: currentSourceBytes.count,
-                mimeType: currentMIMEType,
-                responseWasCached: responseWasCached,
-                responseReceivedAt: responseReceivedAt,
-                identity: serverIdentity,
-                trusted: trusted,
-                clientCertificate: usedClientCertificate,
-                clientCertificateAssociation: usedClientCertificate.flatMap { certificate in
-                    ClientCertificateAssociation.mostSpecific(
-                        matching: committedURL,
-                        in: clientCertificates.associations.filter {
-                            $0.certificateID == certificate.id
-                        }
-                    )
-                }
-            )
-        }
-    }
-
-    func useClientCertificate(_ certificateID: UUID, scope: ClientCertificateScopeChoice) {
-        guard let pending = pendingClientCertificateChallenge else { return }
-        let account = clientCertificates.accountToken
-        Task { @MainActor [weak self] in
-        guard let self, clientCertificates.accountToken == account else { return }
-        guard await clientCertificates.associate(
-            certificateID: certificateID,
-            with: pending.target.url,
-            scope: scope
-        ), clientCertificates.accountToken == account,
-           pendingClientCertificateChallenge?.target.url == pending.target.url else { return }
-        clientCertificatePrompt = nil
-        pendingClientCertificateChallenge = nil
-        navigate(
-            to: pending.target,
-            disposition: pending.disposition,
-            renderAsSource: pending.renderAsSource
-        )
-        }
-    }
-
-    func cancelClientCertificatePrompt() {
-        clientCertificatePrompt = nil
-        pendingClientCertificateChallenge = nil
-        isLoading = false
-        statusText = "Client identity not selected"
-        if let committedURL { locationText = committedURL.absoluteString }
     }
 
     func stopUsingClientCertificateForCurrentPage() {
@@ -1581,1013 +667,112 @@ final class BrowserModel: ObservableObject {
         }
     }
 
-    func stopUsingClientCertificateForPendingChallenge() {
-        guard let prompt = clientCertificatePrompt else { return }
+    func stopUsingClientCertificateForPendingChallenge(id: UUID) {
+        guard let prompt = clientCertificatePrompt, prompt.id == id else { return }
         let account = clientCertificates.accountToken
         Task { @MainActor [weak self] in
             guard let self, clientCertificates.accountToken == account,
                   await clientCertificates.stopUsing(for: prompt.target.url),
                   clientCertificates.accountToken == account else { return }
-            if clientCertificatePrompt?.target.url == prompt.target.url { cancelClientCertificatePrompt() }
+            cancelClientCertificatePrompt(id: id)
         }
     }
 
-    /// - Parameter draft: whatever had been typed, kept so returning to the same prompt
-    ///   offers it again. A sensitive prompt's text is discarded rather than stored.
-    func cancelInput(draft: String = "") {
-        if let prompt = inputPrompt, !prompt.isSensitive {
-            GeminiInputDraftStore.shared.save(draft, for: prompt.target.url)
-        }
-        inputPrompt = nil
-        inputValidationMessage = nil
-        isLoading = false
-        statusText = "Input cancelled"
-        if let committedURL { locationText = committedURL.absoluteString }
+    private func updateHoveredLinkModifiers(_ flags: NSEvent.ModifierFlags) {
+        guard let href = session.hoveredDestination else { return }
+        var modifiers: LinkModifierKeys = []
+        if flags.contains(.command) { modifiers.insert(.command) }
+        if flags.contains(.shift) { modifiers.insert(.shift) }
+        if flags.contains(.option) { modifiers.insert(.option) }
+        if flags.contains(.control) { modifiers.insert(.control) }
+        session.updateHoveredLink(href, modifiers: modifiers)
     }
 
-    /// Keeps an unanswered prompt's text so returning to the same address offers it back.
-    ///
-    /// Separate from `cancelInput` because the prompt may be going away for a reason that
-    /// has nothing to do with the reader answering it — navigating elsewhere, or closing
-    /// the window. In that case the status area, the loading state and the address field
-    /// belong to whatever replaced the prompt, and `cancelInput` would overwrite all
-    /// three. It also cannot read `inputPrompt`, which the navigation has already
-    /// cleared, so the target is passed in.
-    ///
-    /// A sensitive prompt's text never reaches here; the sheet does not report one.
-    func preserveInputDraft(_ draft: String, for prompt: InputPrompt) {
-        guard !discardedDraftPrompts.contains(prompt.id) else { return }
-        GeminiInputDraftStore.shared.save(draft, for: prompt.target.url)
-    }
-
-    func submitInput(_ value: String) {
-        guard let prompt = inputPrompt else { return }
-        guard let url = GeminiQueryEncoding.url(base: prompt.target.url, query: value),
-              let target = try? GeminiRequestTarget(url.absoluteString) else {
-            inputValidationMessage = "This response is too large for a Gemini request. Shorten it and try again."
-            return
-        }
-        GeminiInputDraftStore.shared.remove(for: prompt.target.url)
-        inputValidationMessage = nil
-        inputPrompt = nil
-        navigate(to: target, disposition: .new)
-    }
-
-    private func navigateHistory(to url: URL) {
-        browserNavigationLogger.notice(
-            "navigateHistory url=\(url.absoluteString, privacy: .public) index=\(self.navigation.historyIndex) hotCache=\(self.cachedPage(for: url) != nil)"
-        )
-        if let page = InternalPage.page(for: url) {
-            browserNavigationLogger.notice("navigateHistory route=internal")
-            showInternalPage(page, disposition: .traversal)
-            return
-        }
-        if let cached = cachedPage(for: url) {
-            browserNavigationLogger.notice("navigateHistory route=hot-cache bytes=\(cached.body.count)")
-            displayCachedPage(cached)
-            return
-        }
-        if let entryID = navigation.currentEntryID, let backForwardCache {
-            browserNavigationLogger.notice("navigateHistory route=durable-cache id=\(entryID.uuidString, privacy: .public)")
-            let generation = browsingDataGeneration
-            Task { [weak self] in
-                let stored = try? await backForwardCache.entry(id: entryID)
-                guard let self, self.browsingDataGeneration == generation,
-                      self.navigation.currentEntryID == entryID else { return }
-                if let page = stored?.page {
-                    browserNavigationLogger.notice("durable-cache hit id=\(entryID.uuidString, privacy: .public) bytes=\(page.body.count)")
-                    self.navigation.cache(page, for: entryID)
-                    self.title = stored?.title ?? page.title ?? self.displayTitle(for: url)
-                    self.favicon = stored?.favicon
-                    self.displayCachedPage(page)
-                } else {
-                    browserNavigationLogger.notice("durable-cache miss id=\(entryID.uuidString, privacy: .public); reloading")
-                    self.navigateHistoryWithoutCache(to: url)
-                }
-            }
-            return
-        }
-        navigateHistoryWithoutCache(to: url)
-    }
-
-    private func navigateHistoryWithoutCache(to url: URL) {
-        if url.isFileURL {
-            openFile(url, disposition: .traversal)
-            return
-        }
-        if decodedDataImage(url.absoluteString) != nil {
-            openDataImage(url, disposition: .traversal)
-            return
-        }
-        // A view-source entry whose cached bytes are gone. makeTarget cannot build a
-        // request for the view-source scheme, so without this the entry would be
-        // unreachable and Back would appear to do nothing.
-        if let resource = ViewSourceURL.unwrap(url),
-           let target = try? GeminiRequestTarget(resource.absoluteString) {
-            navigate(to: target, disposition: .traversal, renderAsSource: true)
-            return
-        }
-        guard let target = makeTarget(for: url) else { return }
-        navigate(to: target, disposition: .traversal)
-    }
-
-    private func navigate(
-        to target: GeminiRequestTarget,
-        disposition: HistoryDisposition,
-        renderAsSource: Bool = false
-    ) {
-        // Keep the glyph while moving within one capsule, so it does not flicker
-        // between pages of the same site.
-        let staysWithinCapsule = CapsuleEndpoint(url: target.url)
-            == committedURL.flatMap(CapsuleEndpoint.init(url:))
-        beginNavigation(disposition: disposition, keepsFavicon: staysWithinCapsule)
-
-        isLoading = true
-        statusText = "Connecting to \(target.endpoint.host)…"
-        locationText = target.url.absoluteString
-
-        navigationTask = Task { [weak self] in
-            guard let self else { return }
-            await self.load(
-                target: target,
-                disposition: disposition,
-                renderAsSource: renderAsSource,
-                bypassesContentCache: disposition == .reload
-            )
+    func useClientCertificate(_ certificateID: UUID, scope: ClientCertificateScopeChoice, for promptID: UUID) {
+        guard let prompt = clientCertificatePrompt, prompt.id == promptID else { return }
+        let account = clientCertificates.accountToken
+        Task { [weak self] in
+            guard let self, clientCertificates.accountToken == account,
+                  await clientCertificates.associate(certificateID: certificateID, with: prompt.target.url, scope: scope),
+                  clientCertificates.accountToken == account else { return }
+            session.resumeClientCertificatePrompt(id: prompt.id)
         }
     }
 
-    private func load(
-        target initialTarget: GeminiRequestTarget,
-        disposition: HistoryDisposition,
-        renderAsSource: Bool = false,
-        bypassesContentCache: Bool = false
-    ) async {
-        await themes.waitUntilReady()
-        guard !Task.isCancelled else { return }
-        var target = initialTarget
-        var responseHeader: GeminiResponseHeader?
-        var mimeType = ""
-        var sourceBytes = Data()
-        var utf8Decoder = IncrementalUTF8Decoder()
-        var gemtextParser = IncrementalGemtextParser()
-        var contentStarted = false
-
-        var sentClientCertificate: ClientCertificateDescriptor?
-        var responseIsCached = false
-        var receivedAt = Date()
-        let events = resourceRetriever.events(
-            for: target,
-            proxy: settings.preferences.proxy,
-            bypassesCache: bypassesContentCache
-        )
-
-        do {
-            for await event in events {
-                try Task.checkCancellation()
-                switch event {
-                case .connecting:
-                    statusText = "Connecting securely…"
-                case .serverIdentity(let identity):
-                    serverIdentity = identity
-                    statusText = "Verifying capsule identity…"
-                case .redirect(let next):
-                    target = next
-                    locationText = next.url.absoluteString
-                case .loadingCachedResponse:
-                    statusText = "Loading cached response…"
-                case .response(let response):
-                    target = response.target
-                    let header = response.header
-                    responseHeader = header
-                    sentClientCertificate = response.offeredCertificate
-                    responseIsCached = response.origin == .cache
-                    receivedAt = response.receivedAt
-                    responseStatus = header.status
-                    responseMeta = header.meta
-                    responseWasCached = responseIsCached
-                    responseReceivedAt = receivedAt
-                    statusText = "Response \(header.status)"
-
-                    if header.isInput {
-                        let isSensitive = header.status == 11
-                        inputPrompt = InputPrompt(
-                            target: target,
-                            message: header.meta,
-                            isSensitive: isSensitive,
-                            initialText: isSensitive
-                                ? ""
-                                : GeminiInputDraftStore.shared.text(for: target.url)
-                        )
-                        isLoading = false
-                        statusText = "Input required"
-                        return
-                    }
-
-                    if header.requiresClientCertificate {
-                        guard target.url.scheme?.lowercased() == "gemini",
-                              CapsuleEndpoint(url: target.url) == target.endpoint else {
-                            showGeneratedPage(
-                                title: "Proxy Requires an Identity",
-                                message: "Major Tom does not send client certificates to Gemini proxies.",
-                                details: header.meta, url: target.url, disposition: disposition
-                            )
-                            return
-                        }
-                        pendingClientCertificateChallenge = (
-                            target: target,
-                            disposition: disposition,
-                            renderAsSource: renderAsSource
-                        )
-                        clientCertificatePrompt = ClientCertificatePrompt(
-                            target: target,
-                            status: header.status,
-                            message: header.meta,
-                            attemptedCertificate: sentClientCertificate,
-                            matchingCertificateIsUnavailable:
-                                response.matchedCertificate?.isValid() == true
-                                    && response.offeredCertificate == nil,
-                            matchingCertificateIsInvalid:
-                                response.matchedCertificate?.isValid() == false
-                        )
-                        isLoading = false
-                        statusText = header.status == 60
-                            ? "Client identity required"
-                            : "Client identity rejected"
-                        return
-                    }
-
-                    if header.isTemporaryFailure || header.isPermanentFailure {
-                        // 43 and 53 are the proxy-specific failures. Reported generically
-                        // they read as "the capsule is broken", when in fact the proxy
-                        // is misconfigured or unwilling — a very different fix.
-                        let isProxied = target.url.scheme?.lowercased() != "gemini"
-                        var title = header.isTemporaryFailure
-                            ? "Temporary Capsule Failure"
-                            : header.isPermanentFailure
-                                ? "Permanent Capsule Failure"
-                                : "Capsule Failure"
-                        var message = header.meta
-                        if header.status == 43 {
-                            title = "Proxy Error"
-                            message = header.meta.isEmpty
-                                ? "The proxy could not fetch this resource from the remote host."
-                                : header.meta
-                        } else if header.status == 53 {
-                            title = "Proxy Request Refused"
-                            message = isProxied
-                                ? "The configured proxy will not serve this URL. Check the proxy address in Settings ▸ Networking, and that it is a Gemini proxy willing to fetch \(target.url.scheme ?? "this scheme")."
-                                : "That capsule does not serve this address and will not proxy the request."
-                        }
-                        if header.status == 44 {
-                            let seconds = max(0, Int(header.meta.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
-                            retryNotBefore = Date().addingTimeInterval(TimeInterval(seconds))
-                            message = "The capsule asked Major Tom to wait \(seconds) seconds before trying again."
-                            slowDownTask?.cancel()
-                            slowDownTask = Task { [weak self] in
-                                try? await Task.sleep(for: .seconds(seconds))
-                                guard !Task.isCancelled else { return }
-                                self?.retryNotBefore = nil
-                            }
-                        }
-                        showGeneratedPage(
-                            title: title,
-                            message: message,
-                            details: "Gemini status \(header.status)\n\(target.url.absoluteString)",
-                            url: target.url,
-                            disposition: disposition,
-                            archiveURL: DeloreanArchive.isWorthOffering(status: header.status)
-                                ? DeloreanArchive.captures(of: target.url)
-                                : nil
-                        )
-                        return
-                    }
-
-                    guard header.isSuccess else {
-                        showGeneratedPage(
-                            title: "Unsupported Response",
-                            message: "The capsule returned an unsupported Gemini response.",
-                            details: "Status \(header.status): \(header.meta)",
-                            url: target.url,
-                            disposition: disposition
-                        )
-                        return
-                    }
-
-                    usedClientCertificate = responseIsCached ? nil : sentClientCertificate
-
-                    mimeType = response.mimeType
-                    if renderAsSource {
-                        // No document is begun and nothing is committed yet: the source
-                        // view needs the complete text, so a fetch that fails partway
-                        // leaves the page currently on screen untouched.
-                        statusText = "Receiving source\u{2026}"
-                    } else if mimeType == "text/gemini" || mimeType.hasPrefix("text/") {
-                        currentSourceBytes = Data()
-                        currentMIMEType = mimeType
-                        canSavePage = false
-                        canShowSource = false
-                        let continuation = beginDocument(at: target.url)
-                        documentContinuation = continuation
-                        continuation.yield(renderer.documentStart(
-                            themeCSS: themeCSS,
-                            baseURL: target.url,
-                            kind: mimeType == "text/gemini" ? .gemtext : .plainText,
-                            appearance: themeAppearance
-                        ))
-                        if mimeType != "text/gemini" {
-                            continuation.yield(renderer.beginPlainText())
-                        }
-                        commit(target.url, disposition: disposition)
-                        contentStarted = true
-                        statusText = "Receiving \(mimeType)…"
-                    }
-
-                case .body(let data):
-                    guard let header = responseHeader, header.isSuccess else { continue }
-                    sourceBytes.append(data)
-                    currentSourceBytes = sourceBytes
-                    // Source view renders once, from the finished bytes.
-                    guard !renderAsSource else { continue }
-                    if mimeType == "text/gemini" {
-                        let decoded = utf8Decoder.decode(data)
-                        for parsedEvent in gemtextParser.receive(decoded) {
-                            emit(parsedEvent, baseURL: target.url)
-                        }
-                        // One write per network chunk, not one per line.
-                        flushDocument()
-                    } else if mimeType.hasPrefix("text/") {
-                        let decoded = utf8Decoder.decode(data)
-                        yieldToDocument(renderer.renderPlainTextChunk(decoded))
-                        flushDocument()
-                    }
-
-                case .finished(let result):
-                    switch result {
-                    case .cancelled: return
-                    case .trustDeclined: throw GeminiTransportError.trustDeclined
-                    case .failed(let error, _): throw error
-                    case .completed: break
-                    }
-                    guard let header = responseHeader, header.isSuccess else { return }
-                    var displayedSuccessfulContent = false
-                    if renderAsSource {
-                        guard mimeType.hasPrefix("text/") else {
-                            showGeneratedPage(
-                                title: "Source Not Available",
-                                message: "Major Tom can only show the source of a text response.",
-                                details: "\(mimeType.isEmpty ? header.meta : mimeType)\n\(sourceBytes.count) bytes",
-                                url: target.url,
-                                disposition: disposition
-                            )
-                            return
-                        }
-                        presentSource(
-                            sourceBytes,
-                            of: target.url,
-                            mimeType: mimeType,
-                            disposition: disposition,
-                            receivedAt: receivedAt
-                        )
-                        return
-                    }
-                    if mimeType == "text/gemini" {
-                        displayedSuccessfulContent = true
-                        let tail = utf8Decoder.finish()
-                        let finalEvents = gemtextParser.receive(tail) + gemtextParser.finish()
-                        for parsedEvent in finalEvents {
-                            emit(parsedEvent, baseURL: target.url)
-                        }
-                        finishCurrentDocument()
-                    } else if mimeType.hasPrefix("text/") {
-                        displayedSuccessfulContent = true
-                        yieldToDocument(renderer.renderPlainTextChunk(utf8Decoder.finish()))
-                        yieldToDocument(renderer.endPlainText())
-                        finishCurrentDocument()
-                    } else if mimeType.hasPrefix("image/") {
-                        displayedSuccessfulContent = true
-                        showImagePage(data: sourceBytes, mimeType: mimeType, url: target.url, disposition: disposition)
-                    } else {
-                        showGeneratedPage(
-                            title: "Unsupported Content",
-                            message: "Major Tom cannot display this response type yet. No file was downloaded.",
-                            details: "\(mimeType.isEmpty ? header.meta : mimeType)\n\(sourceBytes.count) bytes",
-                            url: target.url,
-                            disposition: disposition
-                        )
-                    }
-                    isLoading = false
-                    currentSourceBytes = sourceBytes
-                    currentMIMEType = mimeType
-                    canSavePage = true
-                    canShowSource = mimeType.hasPrefix("text/")
-                    cache(CachedPage(
-                        url: target.url,
-                        mimeType: mimeType,
-                        body: sourceBytes,
-                        completion: .complete,
-                        receivedAt: receivedAt,
-                        title: title,
-                        documentTitle: documentTitle,
-                        responseStatus: header.status,
-                        responseMeta: header.meta,
-                        clientCertificateID: sentClientCertificate?.id
-                    ))
-                    if displayedSuccessfulContent {
-                        recordSuccessfulVisit(
-                            target.url,
-                            title: documentTitle ?? title,
-                            disposition: disposition
-                        )
-                    }
-                    statusText = responseIsCached
-                        ? "Cached • \(sourceBytes.count) bytes"
-                        : "Loaded \(sourceBytes.count) bytes"
-                    // Only now, once the reader has actually landed on this capsule: the
-                    // RFC forbids probing for a favicon any earlier.
-                    Task { await refreshFavicon(forCapsuleAt: target.url) }
-                    navigationTask = nil
-                    return
-                }
-            }
-        } catch let error as GeminiRetrievalRedirectError {
-            guard !Task.isCancelled else { return }
-            switch error {
-            case .loop(let url), .limit(let url):
-                showGeneratedPage(
-                    title: "Too Many Redirects",
-                    message: "Major Tom stopped this navigation because the capsule redirected in a loop.",
-                    details: url.absoluteString, url: url, disposition: disposition
-                )
-            case .invalid(let source, let meta):
-                showGeneratedPage(
-                    title: "Invalid Redirect",
-                    message: "The capsule returned a redirect that Major Tom could not understand.",
-                    details: meta, url: source, disposition: disposition
-                )
-            }
-        } catch is CancellationError {
-            return
-        } catch GeminiTransportError.trustDeclined {
-            // The reader refused this capsule's identity, so the navigation was
-            // cancelled rather than failed. Leave the page that is on screen alone and
-            // say so in the status area; an error page here would read as though
-            // something had gone wrong.
-            isLoading = false
-            statusText = "Connection cancelled"
-            if let committedURL { locationText = committedURL.absoluteString }
-            return
-        } catch {
-            guard !Task.isCancelled else { return }
-            if contentStarted {
-                for parsedEvent in gemtextParser.receive(utf8Decoder.finish()) + gemtextParser.finish() {
-                    emit(parsedEvent, baseURL: target.url)
-                }
-                finishCurrentDocument(message: "The connection ended before the response completed: \(friendly(error))")
-                currentSourceBytes = sourceBytes
-                currentMIMEType = mimeType
-                canSavePage = !sourceBytes.isEmpty
-                canShowSource = mimeType.hasPrefix("text/") && !sourceBytes.isEmpty
-                if let committedURL {
-                    cache(CachedPage(
-                        url: committedURL,
-                        mimeType: mimeType,
-                        body: sourceBytes,
-                        completion: .incomplete,
-                        receivedAt: Date(),
-                        responseStatus: responseHeader?.status,
-                        responseMeta: responseHeader?.meta,
-                        clientCertificateID: usedClientCertificate?.id
-                    ))
-                }
-                isLoading = false
-                statusText = "Incomplete response"
-            } else {
-                showGeneratedPage(
-                    title: "Could Not Open Capsule",
-                    message: friendly(error),
-                    details: target.url.absoluteString,
-                    url: target.url,
-                    disposition: disposition,
-                    archiveURL: offersArchive(after: error)
-                        ? DeloreanArchive.captures(of: target.url)
-                        : nil
-                )
-            }
+    func showPageInformation() {
+        guard let committedURL else { return }
+        var information = PageInformation(url: committedURL, status: responseStatus, meta: responseMeta,
+            byteCount: currentSourceBytes.count, mimeType: currentMIMEType, responseWasCached: responseWasCached,
+            responseReceivedAt: responseReceivedAt, identity: serverIdentity, trusted: nil,
+            clientCertificate: usedClientCertificate,
+            clientCertificateAssociation: usedClientCertificate.flatMap { certificate in
+                ClientCertificateAssociation.mostSpecific(matching: committedURL,
+                    in: clientCertificates.associations.filter { $0.certificateID == certificate.id })
+            })
+        Task {
+            if let endpoint = CapsuleEndpoint(url: committedURL) { information.trusted = await trustStore?.identity(for: endpoint) }
+            pageInformation = information
         }
     }
 
-    /// Uses the same scheme and proxy policy as Networking's redirect hops.
-    private func makeTarget(for url: URL) -> GeminiRequestTarget? {
-        GeminiRequestTarget.navigationTarget(for: url, proxy: settings.preferences.proxy)
-    }
-
-    private func canOpenInApp(_ url: URL) -> Bool {
-        url.isFileURL
-            || makeTarget(for: url) != nil
-            || decodedDataImage(url.absoluteString) != nil
-    }
-
-    private func openLink(_ url: URL) {
-        if url.scheme?.lowercased() == "gemini",
-           let target = try? GeminiRequestTarget(url.absoluteString) {
-            navigate(to: target, disposition: .new)
-        } else if url.isFileURL {
-            // Relative links inside a local document resolve to file URLs.
-            openFile(url)
-        } else if decodedDataImage(url.absoluteString) != nil {
-            openDataImage(url)
-        } else {
-            openExternalURL(url)
-        }
-    }
-
-    private func openDataImage(
-        _ url: URL,
-        disposition: HistoryDisposition = .new
-    ) {
-        guard let decoded = decodedDataImage(url.absoluteString) else { return }
-        beginNavigation(disposition: disposition)
-
-        currentSourceBytes = decoded.data
-        currentMIMEType = decoded.mimeType
-        canSavePage = true
-        canShowSource = false
-        showImagePage(
-            data: decoded.data,
-            mimeType: decoded.mimeType,
-            url: url,
-            disposition: disposition
-        )
-        recordSuccessfulVisit(url, title: title, disposition: disposition)
-        statusText = "Inline image • \(formattedByteCount(decoded.data.count))"
-    }
-
-    private func openExternalURL(_ url: URL) {
-        let scheme = url.scheme?.lowercased() ?? ""
-
-        // With a Gemini proxy configured, http/https stay inside Major Tom: the proxy
-        // fetches the page and returns Gemtext. Without one they go to the default
-        // browser as before.
-        if ["http", "https"].contains(scheme), let target = makeTarget(for: url) {
-            navigate(to: target, disposition: .new)
-            return
-        }
-
-        let permitted = ["http", "https", "mailto"]
-        guard permitted.contains(scheme) else {
-            validationMessage = "Major Tom does not permit the \(url.scheme ?? "unknown") URL scheme."
-            return
-        }
-        NSWorkspace.shared.open(url)
-    }
-
-    private func beginDocument(at sourceURL: URL) -> AsyncThrowingStream<Data, any Error>.Continuation {
-        // Settings can replace a document without beginning a new navigation.
-        // Its old image work must stop just as it does when leaving the page.
-        imageTasks.values.forEach { $0.cancel() }
-        imageTasks.removeAll()
-        browserNavigationLogger.notice(
-            "beginDocument source=\(sourceURL.absoluteString, privacy: .public) replacing=\(self.activeWebDocumentURL?.absoluteString ?? "nil", privacy: .public) modelIndex=\(self.navigation.historyIndex)"
-        )
-        documentContinuation?.finish()
-        renderer = HTMLDocumentStreamRenderer(contentPalette: contentPalette)
-        // Whatever was buffered belongs to the document just abandoned. Only a caller
-        // that streams sets `documentContinuation` again; the one-shot pages that render
-        // straight into their own continuation deliberately leave it nil.
-        documentContinuation = nil
-        documentBuffer.removeAll(keepingCapacity: false)
-        // Line numbering restarts with each document, and no expansion survives it.
-        linkSequence = 0
-        expandedInlineImages.removeAll()
-        expandableImageLines.removeAll()
-        inlineImageURLs.removeAll()
-        let document = documentStore.createDocument()
-        activeWebDocumentURL = document.url
-        browserNavigationLogger.notice(
-            "page.load start document=\(document.url.absoluteString, privacy: .public) source=\(sourceURL.absoluteString, privacy: .public)"
-        )
-        let navigation = page.load(document.url)
-        let restoration = pendingScrollRestoration
-        Task { @MainActor [weak self] in
-            do {
-                for try await event in navigation {
-                    browserNavigationLogger.notice(
-                        "page.load event document=\(document.url.absoluteString, privacy: .public) event=\(String(describing: event), privacy: .public)"
-                    )
-                    guard event == .finished else { continue }
-                    if let restoration {
-                        await self?.restoreScrollPosition(restoration)
-                    }
-                    if self?.hasPresentedInitialDocument == false {
-                        self?.hasPresentedInitialDocument = true
-                    }
-                    break
-                }
-            } catch {
-                browserNavigationLogger.error(
-                    "page.load failed document=\(document.url.absoluteString, privacy: .public) error=\(String(describing: error), privacy: .public)"
-                )
-                // A superseding navigation owns both the placeholder and any pending
-                // restoration. Its own beginDocument call will handle the new document.
-                if let restoration,
-                   self?.pendingScrollRestoration?.historyIndex == restoration.historyIndex {
-                    self?.pendingScrollRestoration = nil
-                    self?.isRestoringHistoryScroll = false
-                }
-            }
-        }
-        return document.continuation
-    }
-
-    private func restoreScrollPosition(
-        _ restoration: (historyIndex: Int, offset: Double)
-    ) async {
-        guard navigation.historyIndex == restoration.historyIndex,
-              pendingScrollRestoration?.historyIndex == restoration.historyIndex else { return }
-        let restoredImageCount = await restorePresentationState()
-        if restoredImageCount > 0 {
-            pendingInlineImageScrollCorrection = restoration
-        }
-        await applyScrollRestoration(restoration)
-    }
-
-    private func applyScrollRestoration(
-        _ restoration: (historyIndex: Int, offset: Double)
-    ) async {
-        guard navigation.historyIndex == restoration.historyIndex,
-              pendingScrollRestoration?.historyIndex == restoration.historyIndex else { return }
-        do {
-            _ = try await page.callJavaScript(
-                BrowserDocumentScript.restoreScroll(offset: restoration.offset)
-            )
-        } catch {
-            // Never leave a document permanently hidden if WebKit accepted the load but
-            // rejected or interrupted the restoration script.
-            _ = try? await page.callJavaScript(
-                BrowserDocumentScript.revealDocument
-            )
-        }
-        if pendingScrollRestoration?.historyIndex == restoration.historyIndex {
-            pendingScrollRestoration = nil
-            isRestoringHistoryScroll = false
-        }
-    }
-
-    private func restorePresentationState() async -> Int {
-        guard let entry = navigation.currentEntry else { return 0 }
-        let collapsed = entry.presentation.collapsedPreformatted
-        if !collapsed.isEmpty {
-            _ = try? await page.callJavaScript(
-                BrowserDocumentScript.restoreCollapsed(indices: collapsed)
-            )
-        }
-        var restoredImageCount = 0
-        for url in entry.presentation.expandedImages {
-            guard let lineIdentifier = expandableImageLines[url],
-                  !expandedInlineImages.contains(lineIdentifier) else { continue }
-            expandedInlineImages.insert(lineIdentifier)
-            restoredImageCount += 1
-            startInlineImage(lineIdentifier: lineIdentifier, url: url, restoresScroll: true)
-        }
-        pendingRestoredInlineImageCount = restoredImageCount
-        return restoredImageCount
-    }
-
-    private func abandonScrollRestoration(for disposition: HistoryDisposition) {
-        guard case .new = disposition else { return }
-        pendingScrollRestoration = nil
-        pendingRestoredInlineImageCount = 0
-        pendingInlineImageScrollCorrection = nil
-        isRestoringHistoryScroll = false
-    }
-
-    /// Buffers rendered HTML for the document currently streaming.
-    ///
-    /// Every yield is a separate `Data` crossing the custom `majortom-document` scheme
-    /// handler into WebKit's networking process, and the renderer produces one per
-    /// Gemtext event — five thousand of them for a five-thousand-line page. The source
-    /// view already batches for exactly this reason.
-    ///
-    /// The buffer is flushed once per network chunk as well as on this threshold, so a
-    /// page still renders visibly incrementally: content arrives no less often than the
-    /// capsule sends it, just not in fragments smaller than the network delivered.
-    private func yieldToDocument(_ data: Data) {
-        guard documentContinuation != nil else { return }
-        documentBuffer.append(data)
-        if documentBuffer.count >= Self.documentFlushByteCount {
-            flushDocument()
-        }
-    }
-
-    private func flushDocument() {
-        guard !documentBuffer.isEmpty else { return }
-        documentContinuation?.yield(documentBuffer)
-        documentBuffer.removeAll(keepingCapacity: true)
-    }
-
-    private static let documentFlushByteCount = 16 * 1_024
-
-    private func finishCurrentDocument(message: String? = nil) {
-        guard let continuation = documentContinuation else { return }
-        flushDocument()
-        continuation.yield(renderer.documentEnd(incompleteMessage: message))
-        continuation.finish()
-        documentContinuation = nil
-        documentBuffer.removeAll(keepingCapacity: false)
-    }
-
-    /// - Parameter archiveURL: when present, the page offers a link to past captures of
-    ///   the address that failed.
-    private func showGeneratedPage(
-        title: String,
-        message: String,
-        details: String,
-        url: URL,
-        disposition: HistoryDisposition,
-        archiveURL: URL? = nil
-    ) {
-        let continuation = beginDocument(at: url)
-        continuation.yield(renderer.documentStart(
-            themeCSS: themeCSS,
-            baseURL: url,
-            kind: .message,
-            appearance: themeAppearance
-        ))
-        continuation.yield(renderer.renderMessage(title: title, message: message, details: details))
-        // Rendered through the ordinary link renderer, so it looks and behaves like any
-        // other Gemtext link: the navigation decider handles the click with no extra
-        // machinery, and it picks up the usual hint glyph.
-        if let archiveURL {
-            continuation.yield(renderer.render(
-                .link(
-                    destination: archiveURL.absoluteString,
-                    label: "Check for previous versions of this page"
-                ),
-                options: settings.preferences.renderingOptions,
-                baseURL: url
-            ))
-        }
-        continuation.yield(renderer.documentEnd())
-        continuation.finish()
-        commit(url, disposition: disposition)
-        currentSourceBytes = Data()
-        currentMIMEType = ""
-        canSavePage = false
-        canShowSource = false
-        isLoading = false
-        statusText = title
-        navigationTask = nil
-    }
-
-    private func showImagePage(
-        data: Data,
-        mimeType: String,
-        url: URL,
-        disposition: HistoryDisposition
-    ) {
-        let continuation = beginDocument(at: url)
-        continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: url, kind: .image, appearance: themeAppearance))
-        let source = URL(string: "data:\(mimeType);base64,\(data.base64EncodedString())")!
-        continuation.yield(renderer.renderStandaloneImage(source: source))
-        continuation.yield(renderer.documentEnd())
-        continuation.finish()
-        commit(url, disposition: disposition)
-    }
-
-    private func commit(_ url: URL, disposition: HistoryDisposition) {
-        committedURL = url
-        title = displayTitle(for: url)
-        documentTitle = nil
-        titleClaim = GemtextTitleClaim()
-        locationText = url.absoluteString
-        if case .new = disposition {
-            // A new branch supersedes any Back/Forward restoration whose WebKit load
-            // had not yet finished.
-            pendingScrollRestoration = nil
-            isRestoringHistoryScroll = false
-        }
-        navigation.commit(url, disposition: NavigationState.Disposition(disposition))
-        updateNavigationAvailability()
-    }
-
-    private func recordSuccessfulVisit(
-        _ url: URL,
-        title: String?,
-        disposition: HistoryDisposition
-    ) {
-        guard disposition != .traversal, InternalPage.page(for: url) == nil else { return }
-        BrowsingHistoryStore.shared.record(url, title: title)
-    }
-
-    private func updateNavigationAvailability() {
-        canGoBack = navigation.canGoBack
-        canGoForward = navigation.canGoForward
-    }
-
-    private func displayCachedPage(_ cached: CachedPage) {
-        currentResponseCanBeCached = true
-        navigation.recordCurrentAccess()
-        browserNavigationLogger.notice(
-            "displayCachedPage url=\(cached.url.absoluteString, privacy: .public) bytes=\(cached.body.count) modelIndex=\(self.navigation.historyIndex)"
-        )
-        navigationTask?.cancel()
-        // Showing a retained page is a different visit from the one being left, so the
-        // per-visit state that `beginNavigation` resets for a network load is reset here
-        // too. Without this, pressing Stop once left automatic image loading paused on
-        // every page reached by Back or Forward, and a "slow down" answer on one page
-        // kept Reload disabled on the next.
-        automaticImagesPaused = false
-        slowDownTask?.cancel()
-        slowDownTask = nil
-        retryNotBefore = nil
-        if pendingScrollRestoration == nil, navigation.currentEntry != nil {
-            pendingScrollRestoration = (
-                historyIndex: navigation.historyIndex,
-                offset: navigation.scrollOffset
-            )
-            isRestoringHistoryScroll = (navigation.currentEntry?.presentation)
-                .map(Self.needsPresentationRestoration) ?? false
-        }
-        internalPage = nil
-        isLoading = false
-        // A restored/cached page has no live TLS connection. Leaving the previous
-        // identity here would make Page Info describe a different page's certificate.
-        serverIdentity = nil
-        usedClientCertificate = cached.clientCertificateID.flatMap(clientCertificates.descriptor(id:))
-        committedURL = cached.url
-        locationText = cached.url.absoluteString
-        currentSourceBytes = cached.body
-        currentMIMEType = cached.mimeType
-        // Successful body-bearing cache entries from older releases predate persisted
-        // headers. Gemini defines 20 as the ordinary success response, so retain useful
-        // Page Info for those sessions while preserving exact 2x codes going forward.
-        responseStatus = cached.responseStatus
-            ?? (cached.url.scheme?.lowercased() == "gemini" ? 20 : nil)
-        responseMeta = cached.responseMeta ?? (responseStatus == nil ? "" : cached.mimeType)
-        responseWasCached = true
-        responseReceivedAt = cached.receivedAt
-        title = cached.title ?? displayTitle(for: cached.url)
-        documentTitle = cached.documentTitle
-        // Re-rendering a cached page replays its events, so seed the claim with the
-        // title already known or a fence caption could displace a real heading.
-        titleClaim = GemtextTitleClaim(existingTitle: cached.documentTitle)
-        canSavePage = !cached.body.isEmpty
-        canShowSource = cached.mimeType.hasPrefix("text/") && !ViewSourceURL.isViewSource(cached.url)
-        if ViewSourceURL.isViewSource(cached.url) {
-            renderSourceDocument(cached.body, at: cached.url)
-        } else {
-            renderCurrentContent()
-        }
-        applyZoom()
-        statusText = cached.completion == .complete
-            ? "Cached • \(cached.body.count) bytes"
-            : "Cached \(cached.completion.rawValue) response"
-        Task { await refreshFavicon(forCapsuleAt: cached.url) }
-    }
-
-    /// Keeps a small hot set in the tab while the durable cache owns the global limits.
-    private func cache(_ page: CachedPage) {
-        guard currentResponseCanBeCached, !isClearingBrowsingData else { return }
-        if page.clientCertificateID == nil {
-            navigation.cache(page)
-        } else {
-            navigation.removeCurrentCachedPage()
-        }
-        navigation.updateCurrentMetadata(title: page.documentTitle ?? page.title, favicon: favicon)
-        if page.clientCertificateID != nil,
-           let backForwardCache, let entry = navigation.currentEntry {
-            let tabID = navigation.tabID
-            let position = navigation.historyIndex
-            enqueueBackForwardWrite {
-                try? await backForwardCache.removeResponse(id: entry.id)
-                try? await backForwardCache.save(entry, tabID: tabID, position: position)
-            }
-            return
-        }
-        persistCurrentBackForwardEntry()
-    }
-
-    /// Back/Forward first checks the tab's hot set, then its entry in the standalone cache.
-    private func cachedPage(for url: URL) -> CachedPage? {
-        navigation.cachedPage(for: url)
-    }
-
-    private func scheduleBackForwardPersistence() {
-        backForwardDebounceTask?.cancel()
-        backForwardDebounceTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled else { return }
-            self?.persistCurrentBackForwardEntry()
-        }
-    }
-
-    private func persistCurrentBackForwardEntry() {
-        guard !isClearingBrowsingData else { return }
-        guard let backForwardCache, let entry = navigation.currentEntry else { return }
-        let tabID = navigation.tabID
-        let position = navigation.historyIndex
-        enqueueBackForwardWrite {
-            try? await backForwardCache.save(entry, tabID: tabID, position: position)
-        }
-    }
-
-    private func enqueueBackForwardWrite(
-        _ operation: @escaping @Sendable () async -> Void
-    ) {
-        let previous = backForwardWriteTask
-        backForwardWriteTask = Task {
-            await previous?.value
-            guard !Task.isCancelled else { return }
-            await operation()
-        }
-    }
-
-    private static func needsPresentationRestoration(_ state: HistoryPresentationState) -> Bool {
-        state.scrollY > 0 || !state.expandedImages.isEmpty || !state.collapsedPreformatted.isEmpty
-    }
-
-    /// Whether a failed connection is one where an archived copy might help.
-    ///
-    /// Only failures to reach the capsule at all — DNS, TCP, or the TLS handshake, and a
-    /// capsule that stopped answering. Anything about identity is excluded on purpose: a
-    /// changed key or a declined trust decision is a security signal, and offering to read
-    /// the page from somewhere else instead would undercut the warning rather than help.
-    private func offersArchive(after error: any Error) -> Bool {
-        guard let transportError = error as? GeminiTransportError else { return false }
-        switch transportError {
-        case .connectionFailed, .connectionTimedOut, .responseTimedOut:
-            return true
-        case .certificateUnavailable, .publicKeyFingerprintFailed, .trustDeclined,
-             .responseFailed, .responseTooLarge:
+    fileprivate func prepareHistorySwipe(direction: BrowserHistorySwipeDirection, viewportWidth: CGFloat, offset: CGFloat) async -> Bool {
+        historySwipeGeneration &+= 1
+        let generation = historySwipeGeneration
+        historySwipePresentation = HistorySwipePresentation(direction: direction, viewportWidth: viewportWidth, offset: 0, isReady: false)
+        guard let id = await session.prepareHistoryPreview(direction: direction == .back ? .back : .forward),
+              generation == historySwipeGeneration else {
+            if generation == historySwipeGeneration { historySwipePresentation = nil }
             return false
         }
+        pendingHistorySwipe = PendingHistorySwipe(id: id)
+        historySwipePresentation = HistorySwipePresentation(direction: direction, viewportWidth: viewportWidth,
+            offset: direction.sign * min(abs(offset), viewportWidth), isReady: true)
+        return true
     }
 
-    /// Whether the current address is one the archive could hold captures of.
-    var canCheckArchive: Bool {
-        committedURL.flatMap(DeloreanArchive.captures(of:)) != nil
+    fileprivate func updateHistorySwipe(offset: CGFloat) {
+        guard var presentation = historySwipePresentation, presentation.isReady else { return }
+        presentation.offset = presentation.direction.sign
+            * min(max(0, presentation.direction.sign * offset), presentation.viewportWidth)
+        historySwipePresentation = presentation
     }
 
-    /// Opens Delorean's list of captures for the current address.
-    func openArchive() {
-        guard let committedURL,
-              let archiveURL = DeloreanArchive.captures(of: committedURL),
-              let target = try? GeminiRequestTarget(archiveURL.absoluteString) else { return }
-        navigate(to: target, disposition: .new)
-    }
-
-    private func friendly(_ error: any Error) -> String {
-        if let error = error as? GeminiRetrievalError {
-            switch error {
-            case .responseStatus(let header): return "The capsule returned Gemini status \(header.status): \(header.meta)"
-            case .incompleteResponse: return "The response ended before it completed."
-            }
+    fileprivate func finishHistorySwipe(cancelled: Bool) {
+        guard let pendingHistorySwipe, var presentation = historySwipePresentation else { return }
+        let generation = historySwipeGeneration
+        if !cancelled {
+            session.acceptHistoryPreview(id: pendingHistorySwipe.id)
         }
-        if let error = error as? GeminiRetrievalRedirectError {
-            switch error {
-            case .loop, .limit: return "The capsule redirected too many times or in a loop."
-            case .invalid(_, let meta): return "The capsule returned a redirect Major Tom could not understand: \(meta)"
-            }
+        presentation.offset = cancelled ? 0 : presentation.direction.sign * presentation.viewportWidth
+        withAnimation(.easeOut(duration: 0.22)) {
+            historySwipePresentation = presentation
         }
-        if let transportError = error as? GeminiTransportError {
-            switch transportError {
-            case .certificateUnavailable:
-                return "The capsule did not provide a usable certificate."
-            case .publicKeyFingerprintFailed:
-                return "Major Tom could not identify the capsule's public key."
-            case .trustDeclined:
-                return "The capsule identity was not trusted."
-            case .connectionFailed(let failure):
-                return failure.userFacingDescription
-            case .responseFailed(let protocolError):
-                return protocolError.userFacingDescription
-            case .connectionTimedOut:
-                return "The connection attempt timed out. The capsule may be offline or unreachable from this network."
-            case .responseTimedOut:
-                return "The capsule stopped responding for 30 seconds."
-            case .responseTooLarge(let limit):
-                return "The response exceeded Major Tom's \(limit / 1_024 / 1_024) MB safety limit."
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .milliseconds(230))
+            if !cancelled {
+                for _ in 0..<20 where self?.isRestoringHistoryScroll == true {
+                    try? await Task.sleep(for: .milliseconds(25))
+                }
             }
+            guard self?.historySwipeGeneration == generation else { return }
+            self?.historySwipePresentation = nil
+            self?.pendingHistorySwipe = nil
         }
-        return error.localizedDescription
     }
 
-    private var contentPalette: ContentThemePalette {
-        themes.resolved?.palette ?? .fallback
+    fileprivate func cancelHistorySwipePreparation() {
+        historySwipeGeneration += 1
+        session.cancelHistoryPreview()
+        pendingHistorySwipe = nil
+        historySwipePresentation = nil
     }
 
-    private var themeAppearance: ContentThemeAppearance {
-        themes.resolved?.appearance ?? .dark
-    }
-
-    private var themeCSS: String {
+    private static func contentStyle(themes: ContentThemeStore, preferences: BrowserPreferences, zoom: Double, hides: Bool, inset: Double) -> BrowserContentStyle {
         var theme = themes.resolved?.css ?? ContentThemeStylesheets.base + ContentThemeStylesheets.print
         // This style arrives in the document's first HTML chunk, before WebKit can paint
         // its initial y=0 layout. restoreScrollPosition reveals it only after the saved
         // offset has crossed the compositor boundary, avoiding a one-frame top flash.
-        if pendingScrollRestoration?.historyIndex == navigation.historyIndex,
-           (navigation.currentEntry?.presentation).map(Self.needsPresentationRestoration) == true {
+        if hides {
             theme += """
 
             /* A restored document remains hidden until its saved scroll offset is applied. */
@@ -2597,582 +782,24 @@ final class BrowserModel: ObservableObject {
 
             """
         }
-        theme += "\n" + settings.preferences.contentWidth.css
-        theme += "\n:root { --mt-content-top-inset: \(imageViewportTopInset)px; --mt-image-pending-icon: \(InlineImagePresentationScript.pendingIconCSS); }"
+        theme += "\n" + preferences.contentWidth.css
+        theme += "\n:root { --mt-content-top-inset: \(inset)px; --mt-image-pending-icon: \(InlineImagePresentationScript.pendingIconCSS); }"
         // Screen-only zoom survives navigation without overriding print's 100% scale.
-        return theme + """
+        theme += """
 
         /* Screen zoom follows the reader's setting while printing stays at its own scale. */
         @media screen {
           /* Apply zoom to the complete document. */
           :root {
-            zoom: \(pageZoom);
+            zoom: \(zoom);
           }
         }
 
         """
+        return BrowserContentStyle(css: theme, palette: themes.resolved?.palette ?? .fallback,
+            appearance: themes.resolved?.appearance ?? .dark)
     }
 
-    private func preferencesChanged(to preferences: BrowserPreferences) {
-        defer { lastPreferences = preferences }
-
-        // Handled ahead of the guard below, which is about re-rendering a document:
-        // turning favicons off should clear the glyph even on a page that cannot be
-        // re-rendered, such as a generated error page.
-        if preferences.showsFavicons != lastPreferences.showsFavicons {
-            if preferences.showsFavicons {
-                if let committedURL {
-                    Task { await refreshFavicon(forCapsuleAt: committedURL) }
-                }
-            } else {
-                favicon = nil
-            }
-        }
-
-        guard committedURL != nil else { return }
-
-        if preferences.contentWidth != lastPreferences.contentWidth {
-            applyThemeWithoutReload()
-            return
-        }
-
-        guard canSavePage else { return }
-
-        let renderingChanged = preferences.renderingOptions != lastPreferences.renderingOptions
-            || preferences.sameCapsuleImageLoading != lastPreferences.sameCapsuleImageLoading
-            || preferences.imageRequestInterval != lastPreferences.imageRequestInterval
-            || preferences.automaticallyLoadsDataImages != lastPreferences.automaticallyLoadsDataImages
-        guard renderingChanged, !isLoading else { return }
-        renderCurrentContent()
-    }
-
-    private func contentThemeChanged() {
-        guard committedURL != nil else { return }
-        if isLoading {
-            // Finish the current stream before rebuilding ANSI runs from source bytes.
-            themeNeedsANSIRefresh = true
-            applyThemeWithoutReload()
-        } else if usesANSIColors(with: settings.preferences) {
-            prepareScrollRestoration(for: navigation.historyIndex)
-            renderCurrentContent()
-        } else {
-            applyThemeWithoutReload()
-        }
-    }
-
-    /// Whether the document on screen may have ANSI colors baked into it.
-    ///
-    /// Read from the received bytes rather than tracked while rendering: an escape
-    /// character anywhere in a gemtext response is enough to make re-rendering the
-    /// cheaper answer than being wrong about it.
-    private func usesANSIColors(with preferences: BrowserPreferences) -> Bool {
-        preferences.renderingOptions.rendersANSIColors
-            && currentMIMEType == "text/gemini"
-            && canSavePage
-            && !isLoading
-            && currentSourceBytes.contains(0x1B)
-    }
-
-    private func applyThemeWithoutReload() {
-        let css = themeCSS
-        let appearance = themeAppearance.rawValue
-        Task {
-            _ = try? await page.callJavaScript(
-                BrowserDocumentScript.themeUpdate(css: css, appearance: appearance)
-            )
-        }
-    }
-
-    /// Zoom now lives in `themeCSS`, so re-applying the stylesheet is all that is
-    /// needed. Previously this set an inline style on the document element, which a
-    /// subsequent navigation discarded along with the document, silently resetting
-    /// every page to 100% while `pageZoom` still read 1.3.
-    private func applyZoom() {
-        applyThemeWithoutReload()
-    }
-
-    private func renderCurrentContent() {
-        guard let committedURL else { return }
-        if ViewSourceURL.isViewSource(committedURL) {
-            renderSourceDocument(currentSourceBytes, at: committedURL)
-            return
-        }
-        if currentMIMEType == "text/gemini" {
-            var decoder = IncrementalUTF8Decoder()
-            var parser = IncrementalGemtextParser()
-            let events = parser.receive(decoder.decode(currentSourceBytes) + decoder.finish()) + parser.finish()
-            let continuation = beginDocument(at: committedURL)
-            // Set once, before emitting: `emit` writes through this property, and
-            // reassigning it inside the loop was routing rather than expressing state.
-            documentContinuation = continuation
-            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: committedURL, appearance: themeAppearance))
-            for event in events {
-                emit(event, baseURL: committedURL)
-            }
-            finishCurrentDocument()
-        } else if currentMIMEType.hasPrefix("text/") {
-            let continuation = beginDocument(at: committedURL)
-            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: committedURL, kind: .plainText, appearance: themeAppearance))
-            continuation.yield(renderer.renderPlainText(String(decoding: currentSourceBytes, as: UTF8.self)))
-            continuation.yield(renderer.documentEnd())
-            continuation.finish()
-        } else if currentMIMEType.hasPrefix("image/") {
-            showImagePage(data: currentSourceBytes, mimeType: currentMIMEType, url: committedURL, disposition: .reload)
-        } else {
-            // A body Major Tom cannot display, such as application/pgp-keys. The live
-            // load shows a notice and keeps the bytes for Save Page As. Showing a
-            // retained copy must do the same: doing nothing here used to leave the
-            // previous page on screen under the new address after Back or Forward.
-            let continuation = beginDocument(at: committedURL)
-            continuation.yield(renderer.documentStart(
-                themeCSS: themeCSS,
-                baseURL: committedURL,
-                kind: .message,
-                appearance: themeAppearance
-            ))
-            continuation.yield(renderer.renderMessage(
-                title: "Unsupported Content",
-                message: "Major Tom cannot display this response type yet. No file was downloaded.",
-                details: "\(currentMIMEType.isEmpty ? responseMeta : currentMIMEType)\n\(currentSourceBytes.count) bytes"
-            ))
-            continuation.yield(renderer.documentEnd())
-            continuation.finish()
-        }
-    }
-
-    /// Renders an adjacent model-history entry into the noninteractive transition
-    /// WebView. This never changes the tab cursor and never initiates a network request.
-    private func renderHistorySwipeDestination(
-        _ cached: CachedPage?,
-        entry: BackForwardEntry
-    ) async throws {
-        let document = documentStore.createDocument()
-        let navigation = historySwipePage.load(document.url)
-        document.continuation.yield(historySwipeDocument(cached, entry: entry))
-        document.continuation.finish()
-        for try await event in navigation where event == .finished { break }
-
-        _ = try? await historySwipePage.callJavaScript(
-            BrowserDocumentScript.restorePreview(collapsed: entry.presentation.collapsedPreformatted, offset: entry.presentation.scrollY)
-        )
-    }
-
-    private func historySwipeDocument(_ cached: CachedPage?, entry: BackForwardEntry) -> Data {
-        let renderer = HTMLDocumentStreamRenderer(contentPalette: contentPalette)
-        guard let cached else {
-            var document = renderer.documentStart(
-                themeCSS: themeCSS,
-                baseURL: entry.url,
-                kind: .history,
-                appearance: themeAppearance
-            )
-            document.append(Data("<h1>\(HTMLDocumentStreamRenderer.escape(entry.title ?? displayTitle(for: entry.url)))</h1>".utf8))
-            document.append(renderer.documentEnd())
-            return document
-        }
-
-        var document = renderer.documentStart(
-            themeCSS: themeCSS,
-            baseURL: cached.url,
-            kind: ViewSourceURL.isViewSource(cached.url) ? .source
-                : cached.mimeType.hasPrefix("image/") ? .image
-                : cached.mimeType == "text/gemini" ? .gemtext : .plainText,
-            appearance: themeAppearance
-        )
-        if ViewSourceURL.isViewSource(cached.url) {
-            document.append(Data(HTMLDocumentStreamRenderer.sourceStart.utf8))
-            for line in SourceLineSplitter.lines(of: String(decoding: cached.body, as: UTF8.self)) {
-                document.append(Data(HTMLDocumentStreamRenderer.sourceLine(line).utf8))
-            }
-            document.append(Data(HTMLDocumentStreamRenderer.sourceEnd.utf8))
-        } else if cached.mimeType == "text/gemini" {
-            var decoder = IncrementalUTF8Decoder()
-            var parser = IncrementalGemtextParser()
-            let events = parser.receive(decoder.decode(cached.body) + decoder.finish()) + parser.finish()
-            for event in events {
-                document.append(renderer.render(
-                    event,
-                    options: settings.preferences.renderingOptions,
-                    baseURL: cached.url
-                ))
-            }
-        } else if cached.mimeType.hasPrefix("text/") {
-            document.append(renderer.renderPlainText(String(decoding: cached.body, as: UTF8.self)))
-        } else if cached.mimeType.hasPrefix("image/") {
-            let source = URL(string: "data:\(cached.mimeType);base64,\(cached.body.base64EncodedString())")!
-            document.append(renderer.renderStandaloneImage(source: source))
-        } else {
-            document.append(Data("<h1>\(HTMLDocumentStreamRenderer.escape(entry.title ?? displayTitle(for: entry.url)))</h1>".utf8))
-        }
-        document.append(renderer.documentEnd())
-        return document
-    }
-
-    private func emit(_ event: GemtextEvent, baseURL: URL) {
-        if titleClaim.receive(event), let claimed = titleClaim.title {
-            title = claimed
-            documentTitle = claimed
-        }
-        var linkIdentifier: String?
-        var isExpandableImage = false
-        var imageLoading: SameCapsuleImageLoading = .off
-        if case .link(let destination, _) = event {
-            linkSequence += 1
-            linkIdentifier = "mt-link-\(linkSequence)"
-            isExpandableImage = GemtextLinkHint.isInlineImageCandidate(destination: destination, relativeTo: baseURL)
-            if isExpandableImage,
-               let url = URL(string: destination, relativeTo: baseURL)?.absoluteURL,
-               let linkIdentifier {
-                expandableImageLines[url] = linkIdentifier
-                inlineImageURLs[linkIdentifier] = url
-                if !automaticImagesPaused, isSameCapsule(url, baseURL) {
-                    imageLoading = settings.preferences.sameCapsuleImageLoading
-                }
-            }
-        }
-        yieldToDocument(renderer.render(
-            event,
-            options: settings.preferences.renderingOptions,
-            baseURL: baseURL,
-            linkIdentifier: linkIdentifier,
-            isExpandableImage: isExpandableImage,
-            imageLoading: imageLoading
-        ))
-        // Network images are submitted by the page after their link has been parsed.
-        // Data images already contain their bytes and never enter the requestor.
-        guard case .link(let destination, let label) = event,
-              settings.preferences.automaticallyLoadsDataImages,
-              destination.lowercased().hasPrefix("data:image/"),
-              let dataURL = URL(string: destination) else { return }
-        let fileName = label ?? "Inline image"
-        let metadata = inlineDataImageMetadata(destination)
-        yieldToDocument(renderer.renderInlineImage(
-            resourceURL: dataURL,
-            linkURL: dataURL,
-            altText: fileName,
-            figureIdentifier: "mt-inline-\(linkIdentifier ?? String(linkSequence))",
-            fileName: fileName,
-            mimeType: metadata?.mimeType,
-            sizeDescription: metadata.map { formattedByteCount($0.byteCount) }
-        ))
-    }
-
-    func handleInlineImageMessage(lineIdentifier: String, url: URL, action: String, documentURL: URL) {
-        guard activeWebDocumentURL == documentURL, inlineImageURLs[lineIdentifier] == url else { return }
-        if action == "click" {
-            toggleInlineImage(lineIdentifier: lineIdentifier, url: url)
-        } else if action == "load", !automaticImagesPaused, settings.preferences.sameCapsuleImageLoading != .off,
-                  let committedURL, isSameCapsule(url, committedURL),
-                  !expandedInlineImages.contains(lineIdentifier) {
-            startInlineImage(lineIdentifier: lineIdentifier, url: url)
-        }
-    }
-
-    /// A click promotes pending work or joins its active transfer. A displayed manual
-    /// expansion still toggles closed on a second click.
-    func toggleInlineImage(lineIdentifier: String, url: URL) {
-        if imageTasks[lineIdentifier] != nil {
-            Task { await imageLoader.prioritize(url) }
-            return
-        }
-        if expandedInlineImages.remove(lineIdentifier) != nil {
-            navigation.setImage(url, expanded: false)
-            scheduleBackForwardPersistence()
-            Task { await removeInlineImage(lineIdentifier: lineIdentifier) }
-            return
-        }
-        navigation.setImage(url, expanded: true)
-        scheduleBackForwardPersistence()
-        startInlineImage(lineIdentifier: lineIdentifier, url: url, prioritize: true)
-    }
-
-    private func startInlineImage(
-        lineIdentifier: String, url: URL, prioritize: Bool = false, restoresScroll: Bool = false
-    ) {
-        guard imageTasks[lineIdentifier] == nil else { return }
-        expandedInlineImages.insert(lineIdentifier)
-        let documentURL = activeWebDocumentURL
-        imageTasks[lineIdentifier] = Task { [weak self] in
-            guard let self, !Task.isCancelled else { return }
-            await self.expandInlineImage(
-                lineIdentifier: lineIdentifier, url: url,
-                completesScrollRestoration: restoresScroll, prioritize: prioritize
-            )
-            if !Task.isCancelled, self.activeWebDocumentURL == documentURL {
-                self.imageTasks[lineIdentifier] = nil
-            }
-        }
-    }
-
-    func updateImageViewportTopInset(_ inset: CGFloat) {
-        guard imageViewportTopInset != inset else { return }
-        imageViewportTopInset = inset
-        Task {
-            _ = try? await page.callJavaScript(
-                BrowserDocumentScript.imageViewport(topInset: Double(inset)), contentWorld: .defaultClient
-            )
-        }
-    }
-
-    /// Restored image links need a second scroll correction after their layout completes.
-    /// Otherwise WebKit clamps the initial offset against the shorter document and leaves
-    /// a reader above their original position after the image appears.
-    private func expandInlineImage(
-        lineIdentifier: String,
-        url: URL,
-        completesScrollRestoration: Bool = false,
-        prioritize: Bool = false
-    ) async {
-        let documentURL = activeWebDocumentURL
-        let figureIdentifier = "mt-inline-\(lineIdentifier)"
-        let fileName = inlineImageFileName(for: url, fallback: nil)
-        let resource = resourceStore.createResource()
-        // Markup first: the image element has to exist for WebKit to request the
-        // resource URL that the fetch below streams into.
-        await insertInlineImage(
-            lineIdentifier: lineIdentifier,
-            resourceURL: resource.url,
-            linkURL: url,
-            figureIdentifier: figureIdentifier,
-            fileName: fileName
-        )
-        let metadata = await loadInlineImage(
-            url,
-            lineIdentifier: lineIdentifier,
-            prioritize: prioritize,
-            continuation: resource.continuation
-        )
-        guard !Task.isCancelled, activeWebDocumentURL == documentURL else { return }
-        if let metadata {
-            await updateInlineImageMetadata(
-                figureIdentifier: figureIdentifier,
-                metadata: metadata
-            )
-        }
-        if metadata == nil, !Task.isCancelled {
-            expandedInlineImages.remove(lineIdentifier)
-            await removeInlineImage(lineIdentifier: lineIdentifier)
-        }
-        if completesScrollRestoration {
-            await restoredInlineImageDidFinishLoading()
-        }
-    }
-
-    private func restoredInlineImageDidFinishLoading() async {
-        guard pendingRestoredInlineImageCount > 0 else { return }
-        pendingRestoredInlineImageCount -= 1
-        guard pendingRestoredInlineImageCount == 0,
-              let correction = pendingInlineImageScrollCorrection else { return }
-        pendingInlineImageScrollCorrection = nil
-        _ = try? await page.callJavaScript(
-            scrollCorrectionScript(offset: correction.offset)
-        )
-    }
-
-    /// A resource stream finishing does not guarantee that WebKit has decoded and laid
-    /// out its image yet. Wait for every restored inline image, not merely the one whose
-    /// stream happened to finish last, before applying the final absolute offset.
-    private func scrollCorrectionScript(offset: Double) -> String {
-        BrowserDocumentScript.correctScrollAfterImages(offset: offset)
-    }
-
-    private func insertInlineImage(
-        lineIdentifier: String,
-        resourceURL: URL,
-        linkURL: URL,
-        figureIdentifier: String,
-        fileName: String
-    ) async {
-        let figure = String(decoding: renderer.renderInlineImage(
-            resourceURL: resourceURL,
-            linkURL: linkURL,
-            altText: fileName,
-            figureIdentifier: figureIdentifier,
-            fileName: fileName,
-            figureClass: "inline-image"
-        ), as: UTF8.self)
-        await runScript(BrowserDocumentScript.insertImage(lineIdentifier: lineIdentifier, figure: figure))
-    }
-
-    private func removeInlineImage(lineIdentifier: String) async {
-        await runScript(BrowserDocumentScript.removeImage(lineIdentifier: lineIdentifier))
-    }
-
-    private func setImageState(lineIdentifier: String, state: GeminiImageLoader.State, documentURL: URL) async {
-        guard activeWebDocumentURL == documentURL else { return }
-        _ = try? await page.callJavaScript(
-            InlineImagePresentationScript.stateUpdateScript(identifier: lineIdentifier, state: state, documentURL: documentURL),
-            contentWorld: .defaultClient
-        )
-    }
-
-    private func updateInlineImageMetadata(
-        figureIdentifier: String,
-        metadata: LoadedInlineImage
-    ) async {
-        let size = formattedByteCount(metadata.byteCount)
-        await runScript(BrowserDocumentScript.imageMetadata(figureIdentifier: figureIdentifier, mimeType: metadata.mimeType, size: size))
-    }
-
-    private func inlineImageFileName(for url: URL, fallback: String?) -> String {
-        if !url.lastPathComponent.isEmpty { return url.lastPathComponent }
-        if let fallback, !fallback.isEmpty { return fallback }
-        return url.host ?? "Image"
-    }
-
-    private func formattedByteCount(_ byteCount: Int) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file)
-    }
-
-    private func inlineDataImageMetadata(_ source: String) -> LoadedInlineImage? {
-        guard let decoded = decodedDataImage(source) else { return nil }
-        return LoadedInlineImage(mimeType: decoded.mimeType, byteCount: decoded.data.count)
-    }
-
-    private func decodedDataImage(_ source: String) -> DecodedDataImage? {
-        guard let comma = source.firstIndex(of: ",") else { return nil }
-        let header = String(source[..<comma])
-        guard header.lowercased().hasPrefix("data:image/") else { return nil }
-        let mimeType = header.dropFirst("data:".count).split(separator: ";", maxSplits: 1)
-            .first.map(String.init)?.lowercased() ?? "image/*"
-        let payload = String(source[source.index(after: comma)...])
-        let data: Data?
-        if header.lowercased().contains(";base64") {
-            data = Data(base64Encoded: payload, options: .ignoreUnknownCharacters)
-        } else {
-            data = payload.removingPercentEncoding?.data(using: .utf8)
-        }
-        guard let data else { return nil }
-        return DecodedDataImage(data: data, mimeType: mimeType)
-    }
-
-    private func runScript(_ source: String) async {
-        _ = try? await page.callJavaScript(source, contentWorld: .defaultClient)
-    }
-
-    private func refreshFavicon(forCapsuleAt url: URL) async {
-        guard !isClearingBrowsingData else { return }
-        let generation = browsingDataGeneration
-        guard settings.preferences.showsFavicons,
-              url.scheme?.lowercased() == "gemini",
-              let endpoint = CapsuleEndpoint(url: url) else {
-            favicon = nil
-            return
-        }
-        let observation = await faviconLoader.observation(for: endpoint)
-        guard generation == browsingDataGeneration else { return }
-        switch observation.kind {
-        case .unknown:
-            return
-        case .found(let emoji):
-            BookmarksModel.shared.updateFavicon(emoji, for: endpoint, fetchedAt: observation.receivedAt)
-            applyFaviconIfStillCurrent(emoji, endpoint: endpoint)
-        case .absent:
-            BookmarksModel.shared.updateFavicon(nil, for: endpoint, fetchedAt: observation.receivedAt)
-            applyFaviconIfStillCurrent(nil, endpoint: endpoint)
-        }
-    }
-
-    /// The probe outlives the navigation that started it, so a slow answer must not
-    /// decorate a page the reader has since left.
-    private func applyFaviconIfStillCurrent(_ emoji: String?, endpoint: CapsuleEndpoint) {
-        guard let current = committedURL.flatMap(CapsuleEndpoint.init(url:)),
-              current == endpoint else { return }
-        favicon = emoji
-        navigation.updateCurrentMetadata(title: documentTitle ?? title, favicon: emoji)
-        persistCurrentBackForwardEntry()
-    }
-
-    private func loadInlineImage(
-        _ url: URL,
-        lineIdentifier: String,
-        prioritize: Bool,
-        continuation: AsyncThrowingStream<URLSchemeTaskResult, any Error>.Continuation
-    ) async -> LoadedInlineImage? {
-        let documentURL = activeWebDocumentURL
-        // Preserve the loader's event order while crossing to the main actor. The
-        // stream closes on every exit, including cancellation during queue/backoff.
-        let activity = AsyncStream<GeminiImageLoader.State>.makeStream()
-        defer { activity.continuation.finish() }
-        let activityTask = Task { [weak self] in
-            for await state in activity.stream {
-                guard !Task.isCancelled else { return }
-                guard let self, let documentURL else { continue }
-                await self.setImageState(
-                    lineIdentifier: lineIdentifier, state: state, documentURL: documentURL
-                )
-            }
-        }
-        do {
-            let response = try await withTaskCancellationHandler {
-                try await imageLoader.image(
-                    for: url,
-                    interval: settings.preferences.imageRequestInterval,
-                    pageStartedAt: imagePageStartedAt,
-                    prioritize: prioritize,
-                    stateChanged: { activity.continuation.yield($0) }
-                ) { identity, _ in
-                    await ServerTrustPresentation.shared.authorize(identity)
-                }
-            } onCancel: {
-                activityTask.cancel()
-            }
-            try Task.checkCancellation()
-            continuation.yield(.response(URLResponse(
-                url: url,
-                mimeType: response.mimeType,
-                expectedContentLength: response.body.count,
-                textEncodingName: nil
-            )))
-            continuation.yield(.data(response.body))
-            continuation.finish()
-            return LoadedInlineImage(
-                mimeType: response.mimeType ?? "image/unknown",
-                byteCount: response.body.count
-            )
-        } catch {
-            if Task.isCancelled { activityTask.cancel() }
-            continuation.finish(throwing: error)
-            return nil
-        }
-    }
-
-    private func retrieveGeminiResource(
-        _ url: URL
-    ) async throws -> (data: Data, mimeType: String, finalURL: URL) {
-        guard let target = GeminiRequestTarget.navigationTarget(for: url, proxy: settings.preferences.proxy) else {
-            throw URLError(.badURL)
-        }
-        let response = try await resourceRetriever.response(
-            for: target, proxy: settings.preferences.proxy, purpose: .download
-        )
-        return (response.body, response.mimeType ?? "application/octet-stream", response.url)
-    }
-
-    // Both defined once in MajorTomCore, so link hints and inline-image loading can
-    // never disagree about what counts as an image or as the same capsule.
-    private func isProbableImage(_ url: URL) -> Bool {
-        GemtextLinkHint.isProbableImage(url)
-    }
-
-    private func isSameCapsule(_ lhs: URL, _ rhs: URL) -> Bool {
-        GemtextLinkHint.isSameCapsule(lhs, rhs)
-    }
-
-    private func displayTitle(for url: URL) -> String {
-        BrowserPageTitle.fallback(for: url)
-    }
-}
-
-@available(macOS 26.0, *)
-private extension NavigationState.Disposition {
-    init(_ disposition: BrowserModel.HistoryDisposition) {
-        switch disposition {
-        case .new: self = .new
-        case .reload: self = .reload
-        case .traversal: self = .traversal
-        }
-    }
 }
 
 // WKWebView adopts NSTextFinderClient but does not implement its optional
@@ -3553,180 +1180,5 @@ private struct WebViewScrollerInsetAccessor: NSViewRepresentable {
             if let scrollView = firstScrollView(in: child) { return scrollView }
         }
         return nil
-    }
-}
-
-@available(macOS 26.0, *)
-@MainActor
-private final class BrowserNavigationRouter {
-    var openURL: ((URL) -> Void)?
-    var downloadURL: ((URL) -> Void)?
-    var openInNewTab: ((URL, _ inBackground: Bool) -> Void)?
-    var openInNewWindow: ((URL) -> Void)?
-    var canOpenInApp: ((URL) -> Bool)?
-}
-
-@available(macOS 26.0, *)
-private struct BrowserNavigationDecider: WebPage.NavigationDeciding {
-    let router: BrowserNavigationRouter
-
-    @MainActor
-    func decidePolicy(
-        for action: WebPage.NavigationAction,
-        preferences: inout WebPage.NavigationPreferences
-    ) async -> WKNavigationActionPolicy {
-        guard let url = action.request.url else { return .cancel }
-        preferences.allowsContentJavaScript = false
-        if action.navigationType == .backForward {
-            browserNavigationLogger.error(
-                "cancelled unexpected WebKit-owned BackForward destination=\(url.absoluteString, privacy: .public)"
-            )
-            return .cancel
-        }
-        if url.scheme == BrowserDocumentSchemeHandler.scheme { return .allow }
-        let modifiers = action.modifierFlags
-        var linkModifiers: LinkModifierKeys = []
-        if modifiers.contains(.command) { linkModifiers.insert(.command) }
-        if modifiers.contains(.shift) { linkModifiers.insert(.shift) }
-        if modifiers.contains(.option) { linkModifiers.insert(.option) }
-        if modifiers.contains(.control) { linkModifiers.insert(.control) }
-
-        var activation = LinkActivationPolicy.activation(
-            buttonNumber: action.buttonNumber,
-            modifiers: linkModifiers
-        )
-        if action.shouldPerformDownload, activation == .currentTab {
-            activation = .download
-        }
-        switch activation {
-        case .contextMenu:
-            // The injected contextmenu handler presents the native link menu.
-            return .cancel
-        case .download:
-            router.downloadURL?(url)
-            return .cancel
-        case .newBackgroundTab:
-            guard router.canOpenInApp?(url) == true else { break }
-            router.openInNewTab?(url, true)
-            return .cancel
-        case .newForegroundTab:
-            guard router.canOpenInApp?(url) == true else { break }
-            router.openInNewTab?(url, false)
-            return .cancel
-        case .newWindow:
-            guard router.canOpenInApp?(url) == true else { break }
-            router.openInNewWindow?(url)
-            return .cancel
-        case .currentTab:
-            break
-        }
-
-        router.openURL?(url)
-        return .cancel
-    }
-}
-
-@available(macOS 26.0, *)
-private final class BrowserDocumentStore: @unchecked Sendable {
-    struct Document {
-        let url: URL
-        let continuation: AsyncThrowingStream<Data, any Error>.Continuation
-    }
-
-    private let lock = NSLock()
-    private var streams: [String: AsyncThrowingStream<Data, any Error>] = [:]
-
-    func createDocument() -> Document {
-        let id = UUID().uuidString
-        var capturedContinuation: AsyncThrowingStream<Data, any Error>.Continuation!
-        let stream = AsyncThrowingStream<Data, any Error> { continuation in
-            capturedContinuation = continuation
-        }
-        lock.withLock { streams[id] = stream }
-        let url = URL(string: "\(BrowserDocumentSchemeHandler.scheme)://document/\(id)")!
-        return Document(url: url, continuation: capturedContinuation)
-    }
-
-    func takeDocument(id: String) -> AsyncThrowingStream<Data, any Error>? {
-        lock.withLock { streams.removeValue(forKey: id) }
-    }
-}
-
-@available(macOS 26.0, *)
-private struct BrowserDocumentSchemeHandler: URLSchemeHandler, Sendable {
-    static let scheme = "majortom-document"
-    let store: BrowserDocumentStore
-
-    func reply(for request: URLRequest) -> AsyncThrowingStream<URLSchemeTaskResult, any Error> {
-        AsyncThrowingStream { continuation in
-            let task = Task {
-                guard let url = request.url,
-                      let stream = store.takeDocument(id: url.lastPathComponent) else {
-                    browserNavigationLogger.error(
-                        "scheme reply unavailable url=\(request.url?.absoluteString ?? "nil", privacy: .public)"
-                    )
-                    throw URLError(.resourceUnavailable)
-                }
-                browserNavigationLogger.notice("scheme reply start url=\(url.absoluteString, privacy: .public)")
-                continuation.yield(.response(URLResponse(
-                    url: url,
-                    mimeType: "text/html",
-                    expectedContentLength: -1,
-                    textEncodingName: "utf-8"
-                )))
-                for try await data in stream {
-                    try Task.checkCancellation()
-                    continuation.yield(.data(data))
-                }
-                browserNavigationLogger.notice("scheme reply finish url=\(url.absoluteString, privacy: .public)")
-                continuation.finish()
-            }
-            continuation.onTermination = { termination in
-                browserNavigationLogger.notice(
-                    "scheme reply terminated url=\(request.url?.absoluteString ?? "nil", privacy: .public) state=\(String(describing: termination), privacy: .public)"
-                )
-                task.cancel()
-            }
-        }
-    }
-}
-
-@available(macOS 26.0, *)
-private final class BrowserResourceStore: @unchecked Sendable {
-    struct Resource {
-        let url: URL
-        let continuation: AsyncThrowingStream<URLSchemeTaskResult, any Error>.Continuation
-    }
-
-    private let lock = NSLock()
-    private var streams: [String: AsyncThrowingStream<URLSchemeTaskResult, any Error>] = [:]
-
-    func createResource() -> Resource {
-        let id = UUID().uuidString
-        var captured: AsyncThrowingStream<URLSchemeTaskResult, any Error>.Continuation!
-        let stream = AsyncThrowingStream<URLSchemeTaskResult, any Error> { captured = $0 }
-        lock.withLock { streams[id] = stream }
-        return Resource(
-            url: URL(string: "\(BrowserResourceSchemeHandler.scheme)://resource/\(id)")!,
-            continuation: captured
-        )
-    }
-
-    func takeResource(id: String) -> AsyncThrowingStream<URLSchemeTaskResult, any Error>? {
-        lock.withLock { streams.removeValue(forKey: id) }
-    }
-}
-
-@available(macOS 26.0, *)
-private struct BrowserResourceSchemeHandler: URLSchemeHandler, Sendable {
-    static let scheme = "majortom-resource"
-    let store: BrowserResourceStore
-
-    func reply(for request: URLRequest) -> AsyncThrowingStream<URLSchemeTaskResult, any Error> {
-        guard let id = request.url?.lastPathComponent,
-              let stream = store.takeResource(id: id) else {
-            return AsyncThrowingStream { $0.finish(throwing: URLError(.resourceUnavailable)) }
-        }
-        return stream
     }
 }

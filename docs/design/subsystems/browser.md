@@ -63,5 +63,5 @@ independent tabs, history branching, imports, and clearing during outstanding wr
 Include an integration test through Parsing and Presentation. These workflows must
 be testable without a window, live server, or iCloud account.
 
-Code landmarks: `BrowserNavigationState.swift`, `OmnibarIndex.swift`, and the bookmark
+Code landmarks: `BrowserSession.swift`, `BrowserNavigationState.swift`, `OmnibarIndex.swift`, and the bookmark
 and import domain types in `Sources/MajorTomCore`.

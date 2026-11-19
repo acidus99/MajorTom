@@ -204,6 +204,10 @@ public enum DocumentMessageFence {
 
 @MainActor
 extension BrowserDocumentScript {
+    public static func scoped(_ source: String, to documentURL: URL) -> String {
+        "if (location.href !== \(jsLiteral(documentURL.absoluteString))) { return; }\n" + source
+    }
+
     public static func restoreScroll(offset: Double) -> String {
         """
         window.scrollTo(0, \(offset));
