@@ -1,5 +1,14 @@
 import Foundation
 
+/// Monotonic scheduling time is supplied independently from response receipt time.
+struct GeminiImageClock: Sendable {
+    let now: @Sendable () -> ContinuousClock.Instant
+    let sleep: @Sendable (ContinuousClock.Instant) async throws -> Void
+    static let continuous = GeminiImageClock(now: { .now }, sleep: { deadline in
+        try await Task.sleep(until: deadline, clock: .continuous)
+    })
+}
+
 /// Shared by tabs. Only cache misses enter the per-capsule network queues; the
 /// cache remains a passive store and WebKit never owns retrieval policy.
 public actor GeminiImageLoader {
@@ -8,10 +17,6 @@ public actor GeminiImageLoader {
         case pending
         case requesting
     }
-
-    typealias Fetch = @Sendable (
-        GeminiRequestTarget, @escaping GeminiTransport.TrustAuthorization
-    ) async throws -> ContentResponse
 
     private struct Waiter {
         let continuation: CheckedContinuation<ContentResponse, any Error>
@@ -36,7 +41,8 @@ public actor GeminiImageLoader {
     }
 
     private let cache: ContentCache?
-    private let fetch: Fetch
+    private let transportEvents: GeminiResourceRetriever<ClientTLSIdentity>.TransportEvents
+    private let clock: GeminiImageClock
     private var queues: [CapsuleEndpoint: [Request]] = [:]
     private var workers: [CapsuleEndpoint: Task<Void, Never>] = [:]
     private var workerIDs: [CapsuleEndpoint: UUID] = [:]
@@ -44,16 +50,20 @@ public actor GeminiImageLoader {
 
     public init(cache: ContentCache?, transport: GeminiTransport = GeminiTransport()) {
         self.cache = cache
-        self.fetch = { target, authorize in
-            try await Self.fetchImage(target, transport: transport, authorize: authorize)
+        self.transportEvents = { target, _, configuration, authorize in
+            transport.events(for: target, configuration: configuration, authorizeTrust: authorize)
         }
+        self.clock = .continuous
     }
 
-    // Inject only the network boundary: tests exercise the real cache, queue,
-    // cancellation, and monotonic cooldown without contacting a capsule.
-    init(cache: ContentCache?, fetch: @escaping Fetch) {
+    init(
+        cache: ContentCache?,
+        transportEvents: @escaping GeminiResourceRetriever<ClientTLSIdentity>.TransportEvents,
+        clock: GeminiImageClock
+    ) {
         self.cache = cache
-        self.fetch = fetch
+        self.transportEvents = transportEvents
+        self.clock = clock
     }
 
     public func image(
@@ -67,7 +77,8 @@ public actor GeminiImageLoader {
         let cacheGeneration = await cache?.writeGeneration
         let target = try GeminiRequestTarget(url.absoluteString)
         try Task.checkCancellation()
-        if let cached = try? await cache?.freshResponse(for: target.url) {
+        if let cached = try? await cache?.freshResponse(for: target.url),
+           cached.status.map({ $0 / 10 == 2 }) == true, cached.mimeType?.hasPrefix("image/") == true {
             try Task.checkCancellation()
             return cached
         }
@@ -179,115 +190,55 @@ public actor GeminiImageLoader {
     }
 
     private func retrieve(_ request: Request) async throws -> ContentResponse {
-        var target = request.target
-        var redirects = 0
-        while true {
-            try Task.checkCancellation()
-            if let cached = try? await cache?.freshResponse(for: target.url) {
-                try Task.checkCancellation()
-                return cached
-            }
-            let cooldown = cooldowns[target.endpoint] ?? Cooldown()
-            var deadline = request.notBefore
-            if let lastStarted = cooldown.lastStarted {
-                deadline = max(deadline, lastStarted.advanced(by: .seconds(request.interval)))
-            }
-            if let retryNotBefore = cooldown.retryNotBefore {
-                deadline = max(deadline, retryNotBefore)
-            }
-            try await Task.sleep(until: deadline, clock: .continuous)
-            try Task.checkCancellation()
-            // A different tab or direct image navigation may have filled the cache
-            // during the wait. Such a hit does not consume a network slot.
-            if let cached = try? await cache?.freshResponse(for: target.url) {
-                try Task.checkCancellation()
-                return cached
-            }
-            try Task.checkCancellation()
-            cooldowns[target.endpoint, default: Cooldown()].lastStarted = .now
-            setState(.requesting, for: request)
-            let response: ContentResponse
-            do {
-                response = try await fetch(target, request.authorize)
-            } catch {
-                setState(.idle, for: request)
-                throw error
-            }
-            setState(response.status == 44 || response.status.map { $0 / 10 == 3 } == true ? .pending : .idle, for: request)
-            try Task.checkCancellation()
-            if response.status == 44 {
-                var cooldown = cooldowns[target.endpoint] ?? Cooldown()
-                // META is explanatory text, never a numeric retry delay. Saturate
-                // only to keep a malicious endless sequence from overflowing.
-                cooldown.backoff = min(max(request.interval, cooldown.backoff) * 2, 86_400)
-                cooldown.retryNotBefore = ContinuousClock.now.advanced(by: .seconds(cooldown.backoff))
-                cooldowns[target.endpoint] = cooldown
-                continue
-            }
-            if let status = response.status, status / 10 == 2 {
-                cooldowns[target.endpoint]?.backoff = 0
-                cooldowns[target.endpoint]?.retryNotBefore = nil
-            }
-            if let status = response.status, status / 10 == 3 {
-                guard redirects < 5,
-                      let meta = String(data: response.meta, encoding: .utf8),
-                      let url = URL(string: meta, relativeTo: target.url)?.absoluteURL,
-                      GemtextLinkHint.isSameCapsule(url, target.url) else {
-                    throw URLError(.badServerResponse)
-                }
-                target = try GeminiRequestTarget(url.absoluteString)
-                redirects += 1
-                continue
-            }
-            guard let status = response.status, status / 10 == 2,
-                  response.mimeType?.hasPrefix("image/") == true else {
-                throw URLError(.cannotDecodeContentData)
-            }
-            // Complete the write before returning so the next queued duplicate can
-            // reuse it. There is no second in-memory response cache.
-            _ = try? await cache?.store(response, resourceType: .image, lifetime: GeminiCacheDecider.imageLifetime, generation: request.cacheGeneration)
-            try Task.checkCancellation()
-            return response
+        let retriever = GeminiResourceRetriever<ClientTLSIdentity>(
+            transportEvents: transportEvents, cache: cache, authorizeTrust: request.authorize,
+            imageSchedule: GeminiImageRequestSchedule(
+                waitForSlot: { try await self.waitForSlot(request) },
+                didStart: { try await self.didStart(request) },
+                didReceive: { await self.didReceive($0, for: request) }
+            ),
+            cacheWriteGeneration: request.cacheGeneration
+        )
+        let response = try await retriever.response(for: request.target, purpose: .inlineImage)
+        guard response.mimeType?.hasPrefix("image/") == true else {
+            throw URLError(.cannotDecodeContentData)
         }
+        return response
     }
 
-    private static func fetchImage(
-        _ target: GeminiRequestTarget,
-        transport: GeminiTransport,
-        authorize: @escaping GeminiTransport.TrustAuthorization
-    ) async throws -> ContentResponse {
-        var header: GeminiResponseHeader?
-        var receivedAt = Date()
-        var body = Data()
-        let events = transport.events(
-            for: target,
-            configuration: GeminiTransportConfiguration(maximumResponseByteCount: 16 * 1_024 * 1_024),
-            authorizeTrust: authorize
-        )
-        for try await event in events {
-            try Task.checkCancellation()
-            switch event {
-            case .responseHeader(let responseHeader):
-                header = responseHeader
-                receivedAt = Date()
-            case .body(let data):
-                body.append(data)
-            case .completed:
-                guard let header else { throw URLError(.badServerResponse) }
-                let mime = header.meta.split(separator: ";", maxSplits: 1).first
-                    .map { $0.trimmingCharacters(in: .whitespaces).lowercased() }
-                return ContentResponse(
-                    url: target.url,
-                    status: header.status,
-                    meta: Data(header.meta.utf8),
-                    mimeType: header.isSuccess ? mime : nil,
-                    body: body,
-                    receivedAt: receivedAt
-                )
-            default:
-                break
-            }
+    private func waitForSlot(_ request: Request) async throws {
+        let cooldown = cooldowns[request.target.endpoint] ?? Cooldown()
+        var deadline = request.notBefore
+        if let lastStarted = cooldown.lastStarted {
+            deadline = max(deadline, lastStarted.advanced(by: .seconds(request.interval)))
         }
-        throw URLError(.badServerResponse)
+        if let retryNotBefore = cooldown.retryNotBefore {
+            deadline = max(deadline, retryNotBefore)
+        }
+        try await clock.sleep(deadline)
+        try Task.checkCancellation()
+    }
+
+    private func didStart(_ request: Request) throws {
+        try Task.checkCancellation()
+        guard queues[request.target.endpoint]?.first?.id == request.id else { throw CancellationError() }
+        cooldowns[request.target.endpoint, default: Cooldown()].lastStarted = clock.now()
+        setState(.requesting, for: request)
+    }
+
+    private func didReceive(_ header: GeminiResponseHeader, for request: Request) {
+        let endpoint = request.target.endpoint
+        guard queues[endpoint]?.first?.id == request.id else { return }
+        setState(header.status == 44 || header.isRedirect ? .pending : .idle, for: request)
+        if header.status == 44 {
+            var cooldown = cooldowns[endpoint] ?? Cooldown()
+            // META is explanatory text, never a numeric retry delay.
+            cooldown.backoff = min(max(request.interval, cooldown.backoff) * 2, 86_400)
+            cooldown.retryNotBefore = clock.now().advanced(by: .seconds(cooldown.backoff))
+            cooldowns[endpoint] = cooldown
+        } else if header.isSuccess {
+            cooldowns[endpoint]?.backoff = 0
+            cooldowns[endpoint]?.retryNotBefore = nil
+        }
     }
 }

@@ -4,13 +4,24 @@ public enum GeminiRetrievalPurpose: Sendable {
     case navigation
     case download
     case favicon
+    case inlineImage
 
     var redirectLimit: Int { self == .navigation ? 10 : (self == .favicon ? 0 : 5) }
     var configuration: GeminiTransportConfiguration {
-        self == .favicon
-            ? GeminiTransportConfiguration(idleTimeout: .seconds(10), maximumResponseByteCount: 4 * 1_024)
-            : GeminiTransportConfiguration()
+        switch self {
+        case .favicon: GeminiTransportConfiguration(idleTimeout: .seconds(10), maximumResponseByteCount: 4 * 1_024)
+        case .inlineImage: GeminiTransportConfiguration(maximumResponseByteCount: 16 * 1_024 * 1_024)
+        default: GeminiTransportConfiguration()
+        }
     }
+}
+
+/// The shared image queue reserves each network hop. Cache hits, including hits
+/// discovered while waiting, consume no slot and do not reset capsule backoff.
+struct GeminiImageRequestSchedule: Sendable {
+    let waitForSlot: @Sendable () async throws -> Void
+    let didStart: @Sendable () async throws -> Void
+    let didReceive: @Sendable (GeminiResponseHeader) async -> Void
 }
 
 public enum GeminiRetrievalError: Error, Sendable {
@@ -91,6 +102,8 @@ public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
     private let cache: ContentCache?
     private let resolveIdentity: IdentityResolver
     private let authorizeTrust: GeminiTransport.TrustAuthorization
+    private let imageSchedule: GeminiImageRequestSchedule?
+    private let cacheWriteGeneration: UInt64?
 
     public init(
         transportEvents: @escaping TransportEvents,
@@ -102,6 +115,21 @@ public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
         self.cache = cache
         self.resolveIdentity = resolveIdentity
         self.authorizeTrust = authorizeTrust
+        self.imageSchedule = nil
+        self.cacheWriteGeneration = nil
+    }
+
+    init(
+        transportEvents: @escaping TransportEvents, cache: ContentCache?,
+        authorizeTrust: @escaping GeminiTransport.TrustAuthorization,
+        imageSchedule: GeminiImageRequestSchedule, cacheWriteGeneration: UInt64?
+    ) {
+        self.transportEvents = transportEvents
+        self.cache = cache
+        self.resolveIdentity = { _ in nil }
+        self.authorizeTrust = authorizeTrust
+        self.imageSchedule = imageSchedule
+        self.cacheWriteGeneration = cacheWriteGeneration
     }
 
     public func events(
@@ -166,45 +194,57 @@ public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
         var visited = Set<URL>()
         var redirects = 0
         var receivedBody = false
+        let generation: UInt64?
+        if let cacheWriteGeneration { generation = cacheWriteGeneration }
+        else { generation = await cache?.writeGeneration }
+        visited.insert(target.url)
         do {
             while true {
                 try Task.checkCancellation()
-                guard !visited.contains(target.url) else {
-                    throw GeminiRetrievalRedirectError.loop(target.url)
-                }
                 guard redirects <= purpose.redirectLimit else {
                     throw GeminiRetrievalRedirectError.limit(target.url)
                 }
-                visited.insert(target.url)
-                let generation = await cache?.writeGeneration
                 let isDirectGemini = target.url.scheme?.lowercased() == "gemini"
                     && CapsuleEndpoint(url: target.url) == target.endpoint
-                let identity = isDirectGemini && purpose != .favicon ? await resolveIdentity(target.url) : nil
+                let identity = isDirectGemini && (purpose == .navigation || purpose == .download) ? await resolveIdentity(target.url) : nil
                 try Task.checkCancellation()
                 let offered = identity?.credential == nil ? nil : identity?.descriptor
-                let cached: ContentResponse?
+                var cached: ContentResponse?
                 if bypassesCache {
                     try? await cache?.removeResponse(for: target.url)
                     cached = nil
                 } else if purpose != .favicon, offered == nil,
                           let response = try? await cache?.freshResponse(for: target.url),
-                          let status = response.status, status / 10 == 2 {
+                          let status = response.status, status / 10 == 2,
+                          purpose != .inlineImage || response.mimeType?.hasPrefix("image/") == true {
                     cached = response
                 } else {
                     cached = nil
                 }
                 try Task.checkCancellation()
+                if cached == nil, let imageSchedule {
+                    try await imageSchedule.waitForSlot()
+                    try Task.checkCancellation()
+                    if let response = try? await cache?.freshResponse(for: target.url),
+                       response.status.map({ $0 / 10 == 2 }) == true,
+                       response.mimeType?.hasPrefix("image/") == true {
+                        cached = response
+                    }
+                }
                 let events: AsyncThrowingStream<GeminiTransportEvent, any Error>
                 if let cached {
                     continuation.yield(.loadingCachedResponse)
                     events = GeminiResponseReplay.events(for: cached)
                 } else {
+                    try await imageSchedule?.didStart()
+                    try Task.checkCancellation()
                     events = transportEvents(target, identity?.credential, purpose.configuration, authorizeTrust)
                 }
                 var response: GeminiRetrievalResponse?
                 var cacheBody = Data()
                 var cacheDecision = ContentCacheDecision.doNotStore
                 var redirectTarget: GeminiRequestTarget?
+                var retriesImage = false
                 for try await event in events {
                     try Task.checkCancellation()
                     switch event {
@@ -213,12 +253,20 @@ public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
                     case .serverIdentity(let identity):
                         continuation.yield(.serverIdentity(identity))
                     case .responseHeader(let header):
+                        if cached == nil, !header.isSuccess { await imageSchedule?.didReceive(header) }
+                        if purpose == .inlineImage, imageSchedule != nil, header.status == 44 {
+                            retriesImage = true
+                            break
+                        }
                         if header.isRedirect && purpose != .favicon {
                             guard let url = URL(
                                 string: header.meta.trimmingCharacters(in: .whitespacesAndNewlines),
                                 relativeTo: target.url
                             )?.absoluteURL,
                                   let next = GeminiRequestTarget.navigationTarget(for: url, proxy: proxy) else {
+                                throw GeminiRetrievalRedirectError.invalid(source: target.url, meta: header.meta)
+                            }
+                            if purpose == .inlineImage, !GemtextLinkHint.isSameCapsule(next.url, initialTarget.url) {
                                 throw GeminiRetrievalRedirectError.invalid(source: target.url, meta: header.meta)
                             }
                             redirectTarget = next
@@ -264,6 +312,7 @@ public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
                         continuation.yield(.body(data))
                     case .completed:
                         guard let response else { throw GeminiProtocolError.responseEndedBeforeHeader }
+                        if cached == nil { await imageSchedule?.didReceive(response.header) }
                         if case .store(let type, let lifetime) = cacheDecision {
                             _ = try? await cache?.store(
                                 ContentResponse(
@@ -277,12 +326,14 @@ public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
                         try Task.checkCancellation()
                         return .completed
                     }
-                    if redirectTarget != nil { break }
+                    if redirectTarget != nil || retriesImage { break }
                 }
                 try Task.checkCancellation()
+                if retriesImage { continue }
                 guard let next = redirectTarget else {
                     throw GeminiProtocolError.responseEndedBeforeHeader
                 }
+                guard visited.insert(next.url).inserted else { throw GeminiRetrievalRedirectError.loop(next.url) }
                 target = next
                 redirects += 1
             }

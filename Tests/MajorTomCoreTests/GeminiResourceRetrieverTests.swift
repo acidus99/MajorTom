@@ -12,6 +12,23 @@ final class GeminiResourceRetrieverTests: XCTestCase {
     private let url = URL(string: "gemini://example.com/start")!
     private let bytes = fixtureBytes
 
+    func testInlineImagesNeverResolveIdentitiesAndBoundSameCapsuleRedirects() async throws {
+        let source = ScriptedDocumentSource { target in
+            let hop = Int(target.url.lastPathComponent) ?? 0
+            return [.responseHeader(try fixtureHeader(31, "/\(hop + 1)"))]
+        }
+        let retriever = makeRetriever(source.events, resolve: { _ in
+            XCTFail("Automatic inline images must remain anonymous")
+            return nil
+        })
+        do {
+            _ = try await retriever.response(for: GeminiRequestTarget("gemini://example.com/0"), purpose: .inlineImage)
+            XCTFail("Six image redirects must fail")
+        } catch GeminiRetrievalRedirectError.limit {}
+        XCTAssertEqual(source.requests.count, 6)
+        XCTAssertTrue(source.requests.allSatisfy { $0.credential == nil })
+    }
+
     func testFaviconRequestsAreAnonymousBoundedAndDoNotFollowRedirects() async throws {
         let source = ScriptedDocumentSource { _ in [.responseHeader(try fixtureHeader(31, "/redirect"))] }
         let retriever = makeRetriever(source.events, resolve: { _ in
