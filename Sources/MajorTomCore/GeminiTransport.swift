@@ -250,9 +250,19 @@ private final class GeminiConnectionSession: @unchecked Sendable {
                 continuation.yield(.serverIdentity(identity))
 
                 let completion = TrustVerificationCompletion(complete)
+                // The reader may take as long as they need to answer a trust question.
+                // The idle timer measures the network, not the person, so it is paused
+                // while the decision is pending and restarted once it is known. This
+                // block runs on `queue`, which owns `timeoutTask`.
+                self.timeoutTask?.cancel()
+                self.timeoutTask = nil
                 Task {
                     let isAllowed = await authorizeTrust(identity, certificateDER)
                     if !isAllowed { self.trustWasDeclined = true }
+                    self.queue.async {
+                        guard !self.hasFinished else { return }
+                        self.resetTimeout()
+                    }
                     completion.call(isAllowed)
                 }
             },
