@@ -1063,6 +1063,13 @@ final class BrowserModel: ObservableObject {
         browserNavigationLogger.notice(
             "model cursor moved index=\(self.navigation.historyIndex) url=\(url.absoluteString, privacy: .public)"
         )
+        // A navigation still waiting for its response is abandoned by this traversal.
+        // Cancel it now rather than when the destination is displayed: reading the
+        // destination from the durable store takes a moment, and a response arriving in
+        // that gap used to commit as a new page from the destination entry, discarding
+        // the history ahead of it.
+        navigationTask?.cancel()
+        navigationTask = nil
         prepareScrollRestoration(for: navigation.historyIndex)
         updateNavigationAvailability()
         navigateHistory(to: url)
