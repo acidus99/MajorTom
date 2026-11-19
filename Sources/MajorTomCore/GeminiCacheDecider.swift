@@ -12,11 +12,16 @@ public struct GeminiCacheDecider: Sendable {
 
     public init() {}
 
+    /// - Parameter clientIdentityOffered: true when the request presented a client
+    ///   certificate. Such a response may be personalised, so it is never stored: the
+    ///   cache is keyed by URL alone and is read by requests that offer no identity.
     public func decision(
         for request: GeminiRequestTarget,
-        response: ContentResponse
+        response: ContentResponse,
+        clientIdentityOffered: Bool = false
     ) -> ContentCacheDecision {
-        guard request.url.scheme?.lowercased() == "gemini",
+        guard !clientIdentityOffered,
+              request.url.scheme?.lowercased() == "gemini",
               let status = response.status,
               status / 10 == 2,
               response.mimeType?.lowercased().hasPrefix("image/") == true else {

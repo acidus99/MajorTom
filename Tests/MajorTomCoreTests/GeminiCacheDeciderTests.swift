@@ -51,6 +51,30 @@ final class GeminiCacheDeciderTests: XCTestCase {
         )
     }
 
+    func testDoesNotCacheImageFetchedWithClientIdentity() throws {
+        // Prevents a personalised image, fetched while presenting a client certificate,
+        // from being stored under its URL and replayed to requests that offer none.
+        let target = try GeminiRequestTarget("gemini://example.com/private/avatar.png")
+        let response = makeResponse(url: target.url, status: 20, mimeType: "image/png")
+
+        XCTAssertEqual(
+            GeminiCacheDecider().decision(
+                for: target,
+                response: response,
+                clientIdentityOffered: true
+            ),
+            .doNotStore
+        )
+        XCTAssertEqual(
+            GeminiCacheDecider().decision(
+                for: target,
+                response: response,
+                clientIdentityOffered: false
+            ),
+            .store(resourceType: .image, lifetime: 24 * 60 * 60)
+        )
+    }
+
     func testCachedGeminiResponseReplaysHeaderBodyAndCompletion() async throws {
         let response = makeResponse(
             url: URL(string: "gemini://example.com/image.png")!,

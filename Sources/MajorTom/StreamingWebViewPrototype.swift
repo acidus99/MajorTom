@@ -1903,19 +1903,27 @@ final class BrowserModel: ObservableObject {
         var gemtextParser = IncrementalGemtextParser()
         var contentStarted = false
 
-        if bypassesContentCache {
-            try? await contentCache?.removeResponse(for: target.url)
-        }
-        let cachedResponse = bypassesContentCache
-            ? nil
-            : try? await contentCache?.freshResponse(for: target.url)
-        let responseIsCached = cachedResponse != nil
-        var receivedAt = cachedResponse?.receivedAt ?? Date()
-
+        // Resolved before the cache is consulted: a request that will offer a client
+        // identity must not be answered from the shared, URL-keyed cache.
         let resolvedClientCertificate = await clientCertificates.resolvedCertificate(for: target.url)
         let sentClientCertificate = resolvedClientCertificate?.tlsIdentity == nil
             ? nil
             : resolvedClientCertificate?.descriptor
+
+        if bypassesContentCache {
+            try? await contentCache?.removeResponse(for: target.url)
+        }
+        let cachedResponse: ContentResponse?
+        if bypassesContentCache {
+            cachedResponse = nil
+        } else {
+            cachedResponse = await reusableCachedResponse(
+                for: target.url,
+                offeringClientIdentity: sentClientCertificate != nil
+            )
+        }
+        let responseIsCached = cachedResponse != nil
+        var receivedAt = cachedResponse?.receivedAt ?? Date()
 
         do {
             let events: AsyncThrowingStream<GeminiTransportEvent, any Error>
@@ -2138,7 +2146,12 @@ final class BrowserModel: ObservableObject {
                             body: sourceBytes,
                             receivedAt: receivedAt
                         )
-                        storeInContentCacheIfNeeded(response, for: target, generation: cacheGeneration)
+                        storeInContentCacheIfNeeded(
+                            response,
+                            for: target,
+                            clientIdentityOffered: sentClientCertificate != nil,
+                            generation: cacheGeneration
+                        )
                     }
                     if renderAsSource {
                         guard mimeType.hasPrefix("text/") else {
@@ -2757,15 +2770,36 @@ final class BrowserModel: ObservableObject {
         }
     }
 
+    /// The only way navigation and downloads may read the shared content cache.
+    ///
+    /// - A request that offers a client identity is never answered from the cache: an
+    ///   entry is keyed by URL alone and was fetched without that identity.
+    /// - Only successful responses are replayed. The favicon feature records "this
+    ///   capsule has no favicon" as a synthesized status 51 under the favicon's URL.
+    ///   That is bookkeeping, not something the capsule sent, and must never be shown
+    ///   to the reader as a page or saved as a download.
+    private func reusableCachedResponse(
+        for url: URL,
+        offeringClientIdentity: Bool
+    ) async -> ContentResponse? {
+        guard !offeringClientIdentity,
+              let response = try? await contentCache?.freshResponse(for: url),
+              let status = response.status,
+              status / 10 == 2 else { return nil }
+        return response
+    }
+
     private func storeInContentCacheIfNeeded(
         _ response: ContentResponse,
         for target: GeminiRequestTarget,
+        clientIdentityOffered: Bool,
         generation: UInt64?
     ) {
         guard let contentCache else { return }
         guard case .store(let resourceType, let lifetime) = cacheDecider.decision(
             for: target,
-            response: response
+            response: response,
+            clientIdentityOffered: clientIdentityOffered
         ) else { return }
         enqueueContentCacheWrite {
             _ = try? await contentCache.store(
@@ -3635,7 +3669,11 @@ final class BrowserModel: ObservableObject {
         let cacheGeneration = await contentCache?.writeGeneration
         var body = Data()
         var mimeType = "application/octet-stream"
-        let cachedResponse = try? await contentCache?.freshResponse(for: target.url)
+        // Downloads never offer a client identity.
+        let cachedResponse = await reusableCachedResponse(
+            for: target.url,
+            offeringClientIdentity: false
+        )
         let responseIsCached = cachedResponse != nil
         var receivedAt = cachedResponse?.receivedAt ?? Date()
         let events: AsyncThrowingStream<GeminiTransportEvent, any Error>
@@ -3697,7 +3735,7 @@ final class BrowserModel: ObservableObject {
                 mimeType: mimeType,
                 body: body,
                 receivedAt: receivedAt
-            ), for: target, generation: cacheGeneration)
+            ), for: target, clientIdentityOffered: false, generation: cacheGeneration)
         }
         return (body, mimeType, url)
     }
