@@ -8,10 +8,30 @@ final class BrowsingDataController: ObservableObject {
     static let shared = BrowsingDataController()
     @Published private(set) var action: BrowsingDataAction = .clearBrowsingData
     @Published private(set) var requestedRange: BrowsingDataTimeRange?
-    @Published private(set) var isClearing = false
+    let workflow: BrowsingDataWorkflow
+    private var observation: AnyCancellable?
+    var isClearing: Bool { workflow.isClearing }
 
-    /// Settings chooses the range before confirmation; menu commands choose it in
-    /// the shared confirmation window. Capture the choice separately from the rows.
+    private init() {
+        workflow = BrowsingDataWorkflow(services: BrowsingDataServices(
+            clearReusableResponses: { cutoff in
+                guard let cache = SharedContentCache.shared else { throw BrowsingDataWorkflowError.storageUnavailable }
+                try await cache.removeResponses(since: cutoff)
+            },
+            persistLiveSession: {
+                if !NativeTabCoordinator.shared.browsingDataModels.isEmpty {
+                    try NativeTabCoordinator.shared.persistSessionAfterClearing()
+                }
+            },
+            clearSavedVisits: { try SessionRestorationStore.shared.clearBrowsingData($0, since: $1) },
+            clearHistory: { try BrowsingHistoryStore.shared.clear(since: $0) },
+            clearInputDrafts: { try GeminiInputDraftStore.shared.clear(since: $0) }
+        ))
+        observation = workflow.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }
+    }
+
+    func register(_ session: BrowserSession) { workflow.register(session) }
+
     func present(_ action: BrowsingDataAction, range: BrowsingDataTimeRange? = nil) {
         guard !isClearing else { return }
         requestedRange = range
@@ -19,28 +39,32 @@ final class BrowsingDataController: ObservableObject {
     }
 
     func clear(_ action: BrowsingDataAction, range: BrowsingDataTimeRange) async throws {
-        guard !isClearing else { return }
-        isClearing = true
-        let cutoff = range.cutoff(at: Date())
-        let browsers = NativeTabCoordinator.shared.browsingDataModels
-        for browser in browsers { browser.prepareForClearing(action, since: cutoff) }
-        defer {
-            for browser in browsers { browser.finishClearing() }
-            isClearing = false
+        do { try await workflow.clear(action, range: range) }
+        catch BrowsingDataWorkflowError.operationInProgress {
+            throw NSError(domain: "BrowsingData", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "Another clearing operation is already running."
+            ])
         }
-        // Increment the cache generation before draining writes. Requests that were
-        // already fetching cannot repopulate the cache after the deletion boundary.
-        try await SharedContentCache.shared?.removeResponses(since: cutoff)
-        for browser in browsers { await browser.drainWritesForClearing() }
-        // Save sanitized live metadata first, so the persistent content selection sees
-        // recent uses of older responses and the final cursor positions.
-        if !browsers.isEmpty { try NativeTabCoordinator.shared.persistSessionAfterClearing() }
-        try SessionRestorationStore.shared.clearBrowsingData(action, since: cutoff)
-        if action == .clearBrowsingData {
-            try BrowsingHistoryStore.shared.clear(since: cutoff)
-            try GeminiInputDraftStore.shared.clear(since: cutoff)
+        catch BrowsingDataWorkflowError.failed(let stage, let underlying) {
+            let item: String
+            switch stage {
+            case .reusableResponses: item = "cached responses"
+            case .pendingWrites: item = "pending writes"
+            case .liveSession: item = "the open-window session"
+            case .savedVisits: item = "saved visits"
+            case .history: item = "browsing history"
+            case .inputDrafts: item = "input drafts"
+            }
+            let detail = underlying is BrowsingDataWorkflowError
+                ? "The required local storage is unavailable."
+                : "The local store could not be updated. Try again."
+            throw NSError(domain: "BrowsingData", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Clearing \(item) failed. \(detail)",
+                NSUnderlyingErrorKey: underlying
+            ])
         }
     }
+
 }
 
 struct BrowsingDataView: View {
@@ -111,7 +135,7 @@ struct BrowsingDataView: View {
                         } catch {
                             Logger(subsystem: "dev.gemi.major-tom", category: "BrowsingData")
                                 .error("Clearing browsing data failed: \(String(describing: error), privacy: .private)")
-                            errorMessage = "Some data could not be cleared. Try again."
+                            errorMessage = error.localizedDescription
                         }
                     }
                 }

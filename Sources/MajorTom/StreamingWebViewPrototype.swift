@@ -354,6 +354,7 @@ final class BrowserModel: ObservableObject {
         self.inlineImageScriptHandler = inlineImageScriptHandler
         self.scrollPositionScriptHandler = scrollPositionScriptHandler
         self.preformattedStateScriptHandler = preformattedStateScriptHandler
+        BrowsingDataController.shared.register(session)
         contextMenuScriptHandler.browser = self
         linkHoverScriptHandler.browser = self
         linkActivationScriptHandler.browser = self
