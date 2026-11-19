@@ -38,7 +38,7 @@ final class BookmarksModel: ObservableObject {
     private var didLoadDurableCollection = false
 
     init() {
-        let database = SharedMajorTomDatabase.shared
+        let database = ApplicationServices.storage.durable
         self.database = database
         if let fileURL = MajorTomDataScope.supportFile(named: "bookmarks.json") {
             legacyFileURL = fileURL
@@ -89,7 +89,7 @@ final class BookmarksModel: ObservableObject {
         guard faviconRefreshTask == nil else { return }
         faviconRefreshTask = Task { [weak self] in
             defer { self?.faviconRefreshTask = nil }
-            let responses = await GeminiFaviconLoader.cachedObservations(cache: SharedContentCache.shared)
+            let responses = await GeminiFaviconLoader.cachedObservations(cache: ApplicationServices.contentCache)
             var known: [CapsuleEndpoint: String] = [:]
             var observations: [CapsuleEndpoint: BookmarkFaviconSnapshot] = [:]
             for (endpoint, response) in responses {
@@ -117,7 +117,7 @@ final class BookmarksModel: ObservableObject {
             let snapshot: BookmarkFaviconSnapshot?
             if let endpoint = CapsuleEndpoint(url: url),
                let faviconURL = GeminiFavicon.url(for: endpoint),
-               let response = await GeminiFaviconLoader.cachedObservation(for: faviconURL, cache: SharedContentCache.shared),
+               let response = await GeminiFaviconLoader.cachedObservation(for: faviconURL, cache: ApplicationServices.contentCache),
                response.kind != .unknown {
                 snapshot = BookmarkFaviconSnapshot(
                     emoji: response.emoji,

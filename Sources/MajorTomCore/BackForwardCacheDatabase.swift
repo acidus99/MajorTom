@@ -38,17 +38,6 @@ public final class BackForwardCacheDatabase: @unchecked Sendable {
         fileURL = nil
     }
 
-    public static func defaultFileURL(fileManager: FileManager = .default) throws -> URL {
-        guard let root = fileManager.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else {
-            throw CocoaError(.fileNoSuchFile)
-        }
-        return root
-            .appendingPathComponent("Major Tom", isDirectory: true)
-            .appendingPathComponent(filename)
-    }
 
     public func read<Value>(_ body: (Database) throws -> Value) throws -> Value {
         try writer.read(body)

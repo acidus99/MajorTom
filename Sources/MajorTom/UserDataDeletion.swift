@@ -23,7 +23,7 @@ enum UserDataDeletion {
         deleteClientIdentities: { try await ClientCertificateStore.shared.deleteAll() },
         deleteBookmarks: { try await BookmarksModel.shared.deleteAll() },
         deleteCapsuleTrust: {
-            guard let store = SharedTrustedIdentityStore.shared else {
+            guard let store = ApplicationServices.storage.trust else {
                 throw ServerTrustAuthorityError.storeUnavailable
             }
             try await store.removeAllUserTrust()

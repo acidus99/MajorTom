@@ -24,7 +24,7 @@ final class ClientCertificateStore: ObservableObject {
     static let shared = ClientCertificateStore(
         defaults: MajorTomDataScope.defaults,
         keychain: ClientCertificateKeychain(namespace: MajorTomDataScope.keychainNamespace),
-        database: SharedMajorTomDatabase.shared
+        database: ApplicationServices.storage.durable
     )
 
     @Published private(set) var certificates: [ClientCertificateDescriptor] = []

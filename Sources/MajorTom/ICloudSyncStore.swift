@@ -145,7 +145,7 @@ final class ICloudSyncStore: NSObject, ObservableObject, @preconcurrency CKSyncE
             defaults.set(id.uuidString, forKey: Self.deviceIDKey)
         }
         localDeviceName = Host.current().localizedName ?? "Mac"
-        localDatabase = SharedMajorTomDatabase.shared
+        localDatabase = ApplicationServices.storage.durable
         repository = localDatabase.map(CloudSyncRepository.init(database:))
         if cloudEnvironment != nil {
             let value = CKContainer(identifier: "iCloud.dev.gemi.major-tom")

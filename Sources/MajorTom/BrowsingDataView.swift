@@ -15,7 +15,7 @@ final class BrowsingDataController: ObservableObject {
     private init() {
         workflow = BrowsingDataWorkflow(services: BrowsingDataServices(
             clearReusableResponses: { cutoff in
-                guard let cache = SharedContentCache.shared else { throw BrowsingDataWorkflowError.storageUnavailable }
+                guard let cache = ApplicationServices.contentCache else { throw BrowsingDataWorkflowError.storageUnavailable }
                 try await cache.removeResponses(since: cutoff)
             },
             persistLiveSession: {

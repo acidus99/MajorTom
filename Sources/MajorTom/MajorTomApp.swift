@@ -289,14 +289,15 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
 
         // Open durable stores before the first tab needs them.
         Task.detached(priority: .utility) {
-            _ = SharedTrustedIdentityStore.shared
-            _ = SharedContentCache.shared
+            _ = ApplicationServices.storage.trust
+            _ = ApplicationServices.contentCache
         }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.regular)
         NSApplication.shared.registerForRemoteNotifications()
+        ApplicationServices.presentStorageOpeningFailures()
         installCommandKeyMonitor()
         // Observed here rather than in a window's view so About is handled consistently
         // while the application is running.
@@ -596,9 +597,9 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
             await BookmarksModel.shared.flushPendingWrites()
             await ClientCertificateStore.shared.flushPendingWrites()
             await ICloudSyncStore.shared.prepareForTermination()
-            try? SharedContentCacheDatabase.shared?.checkpointAndClose()
-            try? SharedBackForwardCacheDatabase.shared?.checkpointAndClose()
-            try? SharedMajorTomDatabase.shared?.checkpointAndClose()
+            try? ApplicationServices.storage.content?.checkpointAndClose()
+            try? ApplicationServices.storage.session?.checkpointAndClose()
+            try? ApplicationServices.storage.durable?.checkpointAndClose()
             hasPreparedForTermination = true
             terminationTask = nil
             sender.reply(toApplicationShouldTerminate: true)
@@ -618,9 +619,9 @@ private final class MajorTomApplicationDelegate: NSObject, NSApplicationDelegate
         // may still be waiting. History and drafts commit directly to SQLite.
         BrowserSettingsStore.shared.flushPendingWrites()
         ICloudSyncStore.shared.stopForTermination()
-        try? SharedContentCacheDatabase.shared?.checkpointAndClose()
-        try? SharedBackForwardCacheDatabase.shared?.checkpointAndClose()
-        try? SharedMajorTomDatabase.shared?.checkpointAndClose()
+        try? ApplicationServices.storage.content?.checkpointAndClose()
+        try? ApplicationServices.storage.session?.checkpointAndClose()
+        try? ApplicationServices.storage.durable?.checkpointAndClose()
     }
 
     /// AppKit sends this responder-chain action when the native tab bar's plus button

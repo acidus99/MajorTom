@@ -2,82 +2,6 @@ import Combine
 import Foundation
 import MajorTomCore
 
-/// The one `TrustedIdentityStore` for the whole application.
-///
-/// One actor owns trust decisions for every tab and persists endpoint rows through the
-/// shared database. Losing a record silently downgrades a later key substitution to a
-/// first-use auto-trust, so there must never be competing in-memory catalogues.
-enum SharedTrustedIdentityStore {
-    static let shared: TrustedIdentityStore? = {
-        guard let legacyFileURL = MajorTomDataScope.supportFile(
-            named: "trusted-identities.json"
-        ) else { return nil }
-        if let database = SharedMajorTomDatabase.shared {
-            return try? TrustedIdentityStore(
-                database: database,
-                legacyFileURL: legacyFileURL
-            )
-        }
-        // The JSON file is the authority only until it has been imported into the
-        // database, which deletes it. Once it is gone, an unavailable database must
-        // not be replaced by a new, empty store: every capsule would then look like a
-        // first visit and a changed key would be trusted without a warning. Returning
-        // nil makes `BrowserModel.authorize` refuse the connection instead.
-        guard FileManager.default.fileExists(atPath: legacyFileURL.path) else { return nil }
-        return try? TrustedIdentityStore(fileURL: legacyFileURL)
-    }()
-}
-
-/// The one local SQLite database for browser-owned durable state.
-enum SharedMajorTomDatabase {
-    static let shared: MajorTomDatabase? = {
-        guard let fileURL = MajorTomDataScope.supportFile(
-            named: MajorTomDatabase.filename
-        ) else { return nil }
-        return try? MajorTomDatabase(fileURL: fileURL)
-    }()
-}
-
-/// Window, tab, and Back/Forward snapshots live in their own SQLite file so response
-/// bodies never share a database with bookmarks, trust, certificates, or sync state.
-enum SharedBackForwardCacheDatabase {
-    static let shared: BackForwardCacheDatabase? = {
-        guard let fileURL = MajorTomDataScope.supportFile(
-            named: BackForwardCacheDatabase.filename
-        ) else { return nil }
-        return try? BackForwardCacheDatabase(fileURL: fileURL)
-    }()
-}
-
-enum SharedBackForwardCacheStore {
-    static let shared = SharedBackForwardCacheDatabase.shared.map(BackForwardCacheStore.init(database:))
-}
-
-/// Reusable network responses live independently of browser history and user data.
-enum SharedContentCacheDatabase {
-    static let shared: ContentCacheDatabase? = {
-        guard let fileURL = MajorTomDataScope.supportFile(named: ContentCacheDatabase.filename),
-              let database = try? ContentCacheDatabase(fileURL: fileURL) else { return nil }
-        // The old JSON file was only a disposable cache. Once the replacement database
-        // is available, leaving it behind would imply that it was still authoritative.
-        let legacyFile = fileURL.deletingLastPathComponent().appendingPathComponent("favicons.json")
-        try? FileManager.default.removeItem(at: legacyFile)
-        return database
-    }()
-}
-
-enum SharedContentCache {
-    static let shared: ContentCache? = {
-        guard let database = SharedContentCacheDatabase.shared else { return nil }
-        return ContentCache(database: database)
-    }()
-}
-
-/// Network pacing and capsule backoff must survive navigation and span tabs.
-enum SharedGeminiImageLoader {
-    static let shared = GeminiImageLoader(cache: SharedContentCache.shared)
-}
-
 // PageCompletionState, CachedPage and RestoredTabState now live in MajorTomCore beside
 // NavigationState, which owns the rules that operate on them. They are durable domain
 // records, which the architecture document places in Core rather than in the app shell.
@@ -111,7 +35,7 @@ final class SessionRestorationStore {
     private let sessionRepository: SessionRepository?
 
     private init() {
-        sessionRepository = SharedBackForwardCacheDatabase.shared.map(SessionRepository.init(database:))
+        sessionRepository = ApplicationServices.storage.session.map(SessionRepository.init(database:))
     }
 
     /// Migration only: reads a session written by a release that predates native
@@ -260,7 +184,7 @@ final class BrowsingHistoryStore: ObservableObject {
     private let repository: BrowsingHistoryRepository?
 
     init() {
-        repository = SharedMajorTomDatabase.shared.map(BrowsingHistoryRepository.init(database:))
+        repository = ApplicationServices.storage.durable.map(BrowsingHistoryRepository.init(database:))
 
         if let repository {
             // Import is additive and transactional. The legacy blob remains available to
@@ -361,7 +285,7 @@ final class BrowsingHistoryStore: ObservableObject {
 final class GeminiInputDraftStore {
     static let shared = GeminiInputDraftStore()
 
-    private let repository = SharedMajorTomDatabase.shared.map(
+    private let repository = ApplicationServices.storage.durable.map(
         GeminiInputDraftRepository.init(database:)
     )
     private var memoryFallback: [URL: (text: String, updatedAt: Date)] = [:]

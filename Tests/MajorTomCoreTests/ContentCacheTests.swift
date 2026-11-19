@@ -3,14 +3,6 @@ import XCTest
 @testable import MajorTomCore
 
 final class ContentCacheTests: XCTestCase {
-    func testDefaultFileUsesContentCacheFilename() throws {
-        let manager = ContentCacheStubFileManager(applicationSupport: URL(fileURLWithPath: "/tmp"))
-        let url = try ContentCacheDatabase.defaultFileURL(fileManager: manager)
-
-        XCTAssertEqual(ContentCacheDatabase.filename, "ContentCache.db")
-        XCTAssertEqual(url.path, "/tmp/Major Tom/ContentCache.db")
-    }
-
     func testSchemaUsesURLAsOnlyPrimaryKeyAndIncludesMIMEType() throws {
         let database = try ContentCacheDatabase(inMemory: ())
         let columns = try database.read { try $0.columns(in: "content_cache") }
@@ -160,18 +152,5 @@ final class ContentCacheTests: XCTestCase {
             body: body,
             receivedAt: receivedAt
         )
-    }
-}
-
-private final class ContentCacheStubFileManager: FileManager, @unchecked Sendable {
-    private let applicationSupport: URL
-
-    init(applicationSupport: URL) {
-        self.applicationSupport = applicationSupport
-        super.init()
-    }
-
-    override func urls(for directory: SearchPathDirectory, in domainMask: SearchPathDomainMask) -> [URL] {
-        directory == .applicationSupportDirectory ? [applicationSupport] : []
     }
 }

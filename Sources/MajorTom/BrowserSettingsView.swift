@@ -404,7 +404,7 @@ private struct DataManagementSettingsView: View {
 
 private struct TrustedIdentitiesSettingsView: View {
     @State private var identities: [TrustedServerIdentity] = []
-    private let store = SharedTrustedIdentityStore.shared
+    private let store = ApplicationServices.storage.trust
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {

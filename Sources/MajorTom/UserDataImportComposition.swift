@@ -14,7 +14,7 @@ enum UserDataImportComposition {
             importIdentity: { try await ClientCertificateStore.shared.importIdentity($0) },
             associate: { await ClientCertificateStore.shared.associate(certificateID: $0, with: $1, scope: .pathAndDescendants) },
             importTrust: {
-                guard let store = SharedTrustedIdentityStore.shared else { throw ServerTrustAuthorityError.storeUnavailable }
+                guard let store = ApplicationServices.storage.trust else { throw ServerTrustAuthorityError.storeUnavailable }
                 return try await store.importTrustedIdentities($0)
             },
             importBookmarks: {

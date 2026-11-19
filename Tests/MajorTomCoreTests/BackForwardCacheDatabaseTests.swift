@@ -14,16 +14,6 @@ final class BackForwardCacheDatabaseTests: XCTestCase {
         XCTAssertFalse(columns.contains("mime_type"))
     }
 
-    func testDefaultFileUsesItsOwnDatabaseFilename() throws {
-        let base = URL(fileURLWithPath: "/tmp")
-        let manager = StubFileManager(applicationSupport: base)
-        let url = try BackForwardCacheDatabase.defaultFileURL(fileManager: manager)
-
-        XCTAssertEqual(BackForwardCacheDatabase.filename, "BFCache.db")
-        XCTAssertEqual(url.lastPathComponent, BackForwardCacheDatabase.filename)
-        XCTAssertEqual(url.deletingLastPathComponent().lastPathComponent, "Major Tom")
-    }
-
     func testStoreRoundTripsResponseAndPresentationWithoutMIMEColumn() async throws {
         let database = try BackForwardCacheDatabase(inMemory: ())
         let store = BackForwardCacheStore(database: database)
@@ -90,18 +80,5 @@ final class BackForwardCacheDatabaseTests: XCTestCase {
             try Int.fetchOne($0, sql: "SELECT key_window_index FROM browser_session")
         }, 0)
         try reopened.checkpointAndClose()
-    }
-}
-
-private final class StubFileManager: FileManager, @unchecked Sendable {
-    private let applicationSupport: URL
-
-    init(applicationSupport: URL) {
-        self.applicationSupport = applicationSupport
-        super.init()
-    }
-
-    override func urls(for directory: SearchPathDirectory, in domainMask: SearchPathDomainMask) -> [URL] {
-        directory == .applicationSupportDirectory ? [applicationSupport] : []
     }
 }

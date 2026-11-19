@@ -21,10 +21,6 @@ final class MajorTomDatabaseTests: XCTestCase {
         }
     }
 
-    func testDurableDatabaseUsesDBFilename() {
-        XCTAssertEqual(MajorTomDatabase.filename, "MajorTom.db")
-    }
-
     func testFoundationMigrationIsApplied() throws {
         let database = try MajorTomDatabase(inMemory: ())
 

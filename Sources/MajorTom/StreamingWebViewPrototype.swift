@@ -225,7 +225,7 @@ final class BrowserModel: ObservableObject {
     private let settings = BrowserSettingsStore.shared
     private let themes = ContentThemeStore.shared
     private let clientCertificates = ClientCertificateStore.shared
-    private let trustStore = SharedTrustedIdentityStore.shared
+    private let trustStore = ApplicationServices.storage.trust
     private var cancellables = Set<AnyCancellable>()
     private var downloadTask: Task<Void, Never>?
     private var downloadPanel: NSSavePanel?
@@ -324,7 +324,7 @@ final class BrowserModel: ObservableObject {
         let settings = BrowserSettingsStore.shared
         let themes = ContentThemeStore.shared
         let certificates = ClientCertificateStore.shared
-        let cache = SharedContentCache.shared
+        let cache = ApplicationServices.contentCache
         let retriever = GeminiResourceRetriever<ClientTLSIdentity>(
             transportEvents: { target, identity, configuration, authorize in
                 transport.events(for: target, clientIdentity: identity, configuration: configuration, authorizeTrust: authorize)
@@ -339,9 +339,9 @@ final class BrowserModel: ObservableObject {
             Self.contentStyle(themes: themes, preferences: settings.preferences, zoom: zoom, hides: hides, inset: inset)
         }
         services.faviconLoader = GeminiFaviconLoader(cache: cache) { target in try await retriever.response(for: target, purpose: .favicon) }
-        services.imageLoader = SharedGeminiImageLoader.shared
+        services.imageLoader = ApplicationServices.imageLoader
         services.authorizeTrust = { identity, _ in await ServerTrustPresentation.shared.authorize(identity) }
-        services.backForwardCache = SharedBackForwardCacheStore.shared
+        services.backForwardCache = ApplicationServices.backForwardCache
         services.recordVisit = { BrowsingHistoryStore.shared.record($0, title: $1) }
         services.updateBookmarkFavicon = { BookmarksModel.shared.updateFavicon($0, for: $1, fetchedAt: $2) }
         services.certificateDescriptor = { certificates.descriptor(id: $0) }

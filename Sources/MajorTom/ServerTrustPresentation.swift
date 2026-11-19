@@ -14,7 +14,7 @@ struct TrustPrompt: Identifiable {
 /// UI presentation and live composition for the shared Core trust authority.
 @MainActor
 final class ServerTrustPresentation: ObservableObject {
-    static let shared = ServerTrustPresentation(store: SharedTrustedIdentityStore.shared)
+    static let shared = ServerTrustPresentation(store: ApplicationServices.storage.trust)
     @Published private(set) var prompt: TrustPrompt?
     @Published private(set) var presenterWindow: NSWindow?
     @Published var failure: String?

@@ -46,20 +46,6 @@ public final class MajorTomDatabase: @unchecked Sendable {
         fileURL = nil
     }
 
-    /// The normal database location in the user's Application Support directory.
-    public static func defaultFileURL(
-        fileManager: FileManager = .default
-    ) throws -> URL {
-        guard let root = fileManager.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first else {
-            throw CocoaError(.fileNoSuchFile)
-        }
-        return root
-            .appendingPathComponent("Major Tom", isDirectory: true)
-            .appendingPathComponent(filename)
-    }
 
     /// Runs a consistent read without exposing the connection pool itself.
     public func read<Value>(
