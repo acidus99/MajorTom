@@ -50,5 +50,10 @@ Update the owning document when agreed behavior or architecture changes.
 - `make prod` and `make release` are human-run only.
 - Put temporary plans, logs, exports, and review artifacts in `/tmp/MajorTom`.
   Lasting project documents belong under `docs/`.
+- Practice good operational security. Keep secrets and real personal, account,
+  device, and iCloud identifiers out of repository content, including code, docs,
+  test fixtures, logs, and screenshots. File paths can expose usernames: use
+  repository-relative paths or neutral placeholders. Use synthetic test data, keep
+  private diagnostics outside the repository, and review diffs for disclosure.
 - Match surrounding code style. Do not commit unless asked. Never add
   Co-Authored-By or "Generated with" trailers to commits or PRs.
