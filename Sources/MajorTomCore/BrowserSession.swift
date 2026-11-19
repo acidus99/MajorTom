@@ -866,8 +866,7 @@ public final class BrowserSession: ObservableObject {
         var responseHeader: GeminiResponseHeader?
         var mimeType = ""
         var sourceBytes = Data()
-        var utf8Decoder = IncrementalUTF8Decoder()
-        var gemtextParser = IncrementalGemtextParser()
+        var bodyInterpreter = BrowserResponseBody(kind: .unsupported)
         var contentStarted = false
 
         var sentClientCertificate: ClientCertificateDescriptor?
@@ -1014,12 +1013,15 @@ public final class BrowserSession: ObservableObject {
                     usedClientCertificate = responseIsCached ? nil : sentClientCertificate
 
                     mimeType = response.mimeType
+                    bodyInterpreter = BrowserResponseBody(kind: BrowserContentKind(
+                        mimeType: mimeType, url: target.url, showsSource: renderAsSource
+                    ))
                     if renderAsSource {
                         // No document is begun and nothing is committed yet: the source
                         // view needs the complete text, so a fetch that fails partway
                         // leaves the page currently on screen untouched.
                         statusText = "Receiving source\u{2026}"
-                    } else if mimeType == "text/gemini" || mimeType.hasPrefix("text/") {
+                    } else if bodyInterpreter.kind.streamsText {
                         currentSourceBytes = Data()
                         currentMIMEType = mimeType
                         canSavePage = false
@@ -1029,10 +1031,10 @@ public final class BrowserSession: ObservableObject {
                         continuation.yield(renderer.documentStart(
                             themeCSS: themeCSS,
                             baseURL: target.url,
-                            kind: mimeType == "text/gemini" ? .gemtext : .plainText,
+                            kind: bodyInterpreter.kind == .gemtext ? .gemtext : .plainText,
                             appearance: themeAppearance
                         ))
-                        if mimeType != "text/gemini" {
+                        if bodyInterpreter.kind == .plainText {
                             continuation.yield(renderer.beginPlainText())
                         }
                         commit(target.url, disposition: disposition)
@@ -1043,21 +1045,13 @@ public final class BrowserSession: ObservableObject {
                 case .body(let data):
                     guard let header = responseHeader, header.isSuccess else { continue }
                     sourceBytes.append(data)
-                    currentSourceBytes = sourceBytes
+                    // Buffered image, binary and source responses have not replaced
+                    // the displayed visit. Save/Source still belong to that visit.
+                    if contentStarted { currentSourceBytes = sourceBytes }
                     // Source view renders once, from the finished bytes.
                     guard !renderAsSource else { continue }
-                    if mimeType == "text/gemini" {
-                        let decoded = utf8Decoder.decode(data)
-                        for parsedEvent in gemtextParser.receive(decoded) {
-                            emit(parsedEvent, baseURL: target.url)
-                        }
-                        // One write per network chunk, not one per line.
-                        flushDocument()
-                    } else if mimeType.hasPrefix("text/") {
-                        let decoded = utf8Decoder.decode(data)
-                        yieldToDocument(renderer.renderPlainTextChunk(decoded))
-                        flushDocument()
-                    }
+                    emit(bodyInterpreter.receive(data), baseURL: target.url)
+                    flushDocument()
 
                 case .finished(let result):
                     switch result {
@@ -1088,20 +1082,12 @@ public final class BrowserSession: ObservableObject {
                         )
                         return
                     }
-                    if mimeType == "text/gemini" {
+                    if bodyInterpreter.kind.streamsText {
                         displayedSuccessfulContent = true
-                        let tail = utf8Decoder.finish()
-                        let finalEvents = gemtextParser.receive(tail) + gemtextParser.finish()
-                        for parsedEvent in finalEvents {
-                            emit(parsedEvent, baseURL: target.url)
-                        }
+                        emit(bodyInterpreter.finish(), baseURL: target.url)
+                        if bodyInterpreter.kind == .plainText { yieldToDocument(renderer.endPlainText()) }
                         finishCurrentDocument()
-                    } else if mimeType.hasPrefix("text/") {
-                        displayedSuccessfulContent = true
-                        yieldToDocument(renderer.renderPlainTextChunk(utf8Decoder.finish()))
-                        yieldToDocument(renderer.endPlainText())
-                        finishCurrentDocument()
-                    } else if mimeType.hasPrefix("image/") {
+                    } else if bodyInterpreter.kind == .image {
                         displayedSuccessfulContent = true
                         showImagePage(data: sourceBytes, mimeType: mimeType, url: target.url, disposition: disposition)
                     } else {
@@ -1177,9 +1163,8 @@ public final class BrowserSession: ObservableObject {
         } catch {
             guard !Task.isCancelled else { return }
             if contentStarted {
-                for parsedEvent in gemtextParser.receive(utf8Decoder.finish()) + gemtextParser.finish() {
-                    emit(parsedEvent, baseURL: target.url)
-                }
+                emit(bodyInterpreter.finish(), baseURL: target.url)
+                if bodyInterpreter.kind == .plainText { yieldToDocument(renderer.endPlainText()) }
                 finishCurrentDocument(message: "The connection ended before the response completed: \(friendly(error))")
                 currentSourceBytes = sourceBytes
                 currentMIMEType = mimeType
@@ -1629,49 +1614,29 @@ public final class BrowserSession: ObservableObject {
     }
 
     private func renderCurrentContent() {
-        guard let committedURL else { return }
-        if ViewSourceURL.isViewSource(committedURL) {
-            renderSourceDocument(currentSourceBytes, at: committedURL)
-            return
-        }
-        if currentMIMEType == "text/gemini" {
-            var decoder = IncrementalUTF8Decoder()
-            var parser = IncrementalGemtextParser()
-            let events = parser.receive(decoder.decode(currentSourceBytes) + decoder.finish()) + parser.finish()
-            let continuation = beginDocument(at: committedURL)
-            // Set once, before emitting: `emit` writes through this property, and
-            // reassigning it inside the loop was routing rather than expressing state.
+        guard let url = committedURL else { return }
+        let kind = BrowserContentKind(mimeType: currentMIMEType, url: url)
+        switch kind {
+        case .source:
+            renderSourceDocument(currentSourceBytes, at: url)
+        case .gemtext, .plainText:
+            let continuation = beginDocument(at: url)
             documentContinuation = continuation
-            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: committedURL, appearance: themeAppearance))
-            for event in events {
-                emit(event, baseURL: committedURL)
-            }
+            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: url,
+                kind: kind == .gemtext ? .gemtext : .plainText, appearance: themeAppearance))
+            if kind == .plainText { continuation.yield(renderer.beginPlainText()) }
+            emit(BrowserResponseBody.events(for: currentSourceBytes, kind: kind), baseURL: url)
+            if kind == .plainText { yieldToDocument(renderer.endPlainText()) }
             finishCurrentDocument()
-        } else if currentMIMEType.hasPrefix("text/") {
-            let continuation = beginDocument(at: committedURL)
-            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: committedURL, kind: .plainText, appearance: themeAppearance))
-            continuation.yield(renderer.renderPlainText(String(decoding: currentSourceBytes, as: UTF8.self)))
-            continuation.yield(renderer.documentEnd())
-            continuation.finish()
-        } else if currentMIMEType.hasPrefix("image/") {
-            showImagePage(data: currentSourceBytes, mimeType: currentMIMEType, url: committedURL, disposition: .reload)
-        } else {
-            // A body Major Tom cannot display, such as application/pgp-keys. The live
-            // load shows a notice and keeps the bytes for Save Page As. Showing a
-            // retained copy must do the same: doing nothing here used to leave the
-            // previous page on screen under the new address after Back or Forward.
-            let continuation = beginDocument(at: committedURL)
-            continuation.yield(renderer.documentStart(
-                themeCSS: themeCSS,
-                baseURL: committedURL,
-                kind: .message,
-                appearance: themeAppearance
-            ))
-            continuation.yield(renderer.renderMessage(
-                title: "Unsupported Content",
+        case .image:
+            showImagePage(data: currentSourceBytes, mimeType: currentMIMEType, url: url, disposition: .reload)
+        case .unsupported:
+            let continuation = beginDocument(at: url)
+            continuation.yield(renderer.documentStart(themeCSS: themeCSS, baseURL: url,
+                kind: .message, appearance: themeAppearance))
+            continuation.yield(renderer.renderMessage(title: "Unsupported Content",
                 message: "Major Tom cannot display this response type yet. No file was downloaded.",
-                details: "\(currentMIMEType.isEmpty ? responseMeta : currentMIMEType)\n\(currentSourceBytes.count) bytes"
-            ))
+                details: "\(currentMIMEType.isEmpty ? responseMeta : currentMIMEType)\n\(currentSourceBytes.count) bytes"))
             continuation.yield(renderer.documentEnd())
             continuation.finish()
         }
@@ -1691,41 +1656,52 @@ public final class BrowserSession: ObservableObject {
             return document
         }
 
-        var document = renderer.documentStart(
-            themeCSS: themeCSS,
-            baseURL: cached.url,
-            kind: ViewSourceURL.isViewSource(cached.url) ? .source
-                : cached.mimeType.hasPrefix("image/") ? .image
-                : cached.mimeType == "text/gemini" ? .gemtext : .plainText,
-            appearance: themeAppearance
-        )
-        if ViewSourceURL.isViewSource(cached.url) {
+        let kind = BrowserContentKind(mimeType: cached.mimeType, url: cached.url)
+        let documentKind: HTMLDocumentKind
+        switch kind {
+        case .gemtext: documentKind = .gemtext
+        case .plainText: documentKind = .plainText
+        case .source: documentKind = .source
+        case .image: documentKind = .image
+        case .unsupported: documentKind = .message
+        }
+        var document = renderer.documentStart(themeCSS: themeCSS, baseURL: cached.url,
+            kind: documentKind, appearance: themeAppearance)
+        if kind == .source {
             document.append(Data(HTMLDocumentStreamRenderer.sourceStart.utf8))
             for line in SourceLineSplitter.lines(of: String(decoding: cached.body, as: UTF8.self)) {
                 document.append(Data(HTMLDocumentStreamRenderer.sourceLine(line).utf8))
             }
             document.append(Data(HTMLDocumentStreamRenderer.sourceEnd.utf8))
-        } else if cached.mimeType == "text/gemini" {
-            var decoder = IncrementalUTF8Decoder()
-            var parser = IncrementalGemtextParser()
-            let events = parser.receive(decoder.decode(cached.body) + decoder.finish()) + parser.finish()
-            for event in events {
-                document.append(renderer.render(
-                    event,
-                    options: services.preferences().renderingOptions,
-                    baseURL: cached.url
-                ))
+        } else if kind.streamsText {
+            if kind == .plainText { document.append(renderer.beginPlainText()) }
+            for event in BrowserResponseBody.events(for: cached.body, kind: kind) {
+                switch event {
+                case .gemtext(let semantic):
+                    document.append(renderer.render(semantic, options: services.preferences().renderingOptions, baseURL: cached.url))
+                case .text(let text): document.append(renderer.renderPlainTextChunk(text))
+                }
             }
-        } else if cached.mimeType.hasPrefix("text/") {
-            document.append(renderer.renderPlainText(String(decoding: cached.body, as: UTF8.self)))
-        } else if cached.mimeType.hasPrefix("image/") {
+            if kind == .plainText { document.append(renderer.endPlainText()) }
+        } else if kind == .image {
             let source = URL(string: "data:\(cached.mimeType);base64,\(cached.body.base64EncodedString())")!
             document.append(renderer.renderStandaloneImage(source: source))
         } else {
-            document.append(Data("<h1>\(HTMLDocumentStreamRenderer.escape(entry.title ?? displayTitle(for: entry.url)))</h1>".utf8))
+            document.append(renderer.renderMessage(title: "Unsupported Content",
+                message: "Major Tom cannot display this response type yet. No file was downloaded.",
+                details: "\(cached.mimeType.isEmpty ? cached.responseMeta ?? "" : cached.mimeType)\n\(cached.body.count) bytes"))
         }
         document.append(renderer.documentEnd())
         return document
+    }
+
+    private func emit(_ events: [BrowserBodyEvent], baseURL: URL) {
+        for event in events {
+            switch event {
+            case .gemtext(let semantic): emit(semantic, baseURL: baseURL)
+            case .text(let text): yieldToDocument(renderer.renderPlainTextChunk(text))
+            }
+        }
     }
 
     private func emit(_ event: GemtextEvent, baseURL: URL) {

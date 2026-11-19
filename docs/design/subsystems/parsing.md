@@ -42,5 +42,5 @@ Use small self-contained fixtures, malformed input, round-trips where applicable
 and varied byte/chunk splits. Assert semantic events and source fidelity, not
 renderer markup. These tests require only the parser and supplied input.
 
-Code landmarks: `IncrementalUTF8Decoder.swift`, `IncrementalGemtextParser.swift`,
+Code landmarks: `BrowserResponseBody.swift`, `IncrementalUTF8Decoder.swift`, `IncrementalGemtextParser.swift`,
 `SourceLineSplitter.swift`, and `ANSISGR.swift` in `Sources/MajorTomCore`.

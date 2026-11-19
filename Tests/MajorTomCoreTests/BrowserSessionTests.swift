@@ -188,6 +188,28 @@ final class BrowserSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testPendingBufferedResponseCannotReplaceDisplayedSourceBytes() async throws {
+        for (mime, sourceView) in [("image/png", false), ("application/pgp-keys", false), ("text/gemini", true)] {
+            let fixture = SessionFixture()
+            defer { fixture.close() }
+            let original = Data("# Displayed response\n".utf8)
+            await fixture.load(fixture.a, mime: "text/plain", bytes: original)
+            if sourceView {
+                fixture.session.navigate(to: try GeminiRequestTarget(fixture.b.absoluteString),
+                    disposition: .new, renderAsSource: true)
+            } else { fixture.session.openLink(fixture.b) }
+            await fixture.source.waitForRequests(2)
+            fixture.source.send(1, status: 20, meta: mime, chunks: [Data("pending bytes".utf8)], completes: false)
+            await fixture.wait { fixture.session.currentResponseMeta == mime && fixture.session.isLoading }
+            XCTAssertEqual(fixture.session.committedURL, fixture.a)
+            XCTAssertEqual(fixture.session.sourceBytes, original)
+            fixture.session.stop()
+            await fixture.source.waitForTermination(1)
+            XCTAssertEqual(fixture.session.sourceBytes, original)
+        }
+    }
+
+    @MainActor
     func testTrustDeclinedPreservesDisplayedPage() async throws {
         let fixture = SessionFixture()
         defer { fixture.close() }
