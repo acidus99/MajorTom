@@ -20,11 +20,13 @@ struct BrowserSettingsView: View {
                 .tabItem { Label("Networking", systemImage: "network") }
             qualityOfLife
                 .tabItem { Label("Quality of Life", systemImage: "wand.and.stars") }
+            DataManagementSettingsView()
+                .tabItem { Label("Data Management", systemImage: "internaldrive") }
             TrustedIdentitiesSettingsView()
                 .tabItem { Label("Privacy & Security", systemImage: "lock.shield") }
         }
         .padding(20)
-        .frame(width: 650, height: 430)
+        .frame(width: 760, height: 430)
     }
 
     private var general: some View {
@@ -77,9 +79,6 @@ struct BrowserSettingsView: View {
                 HStack {
                     Button("Restore Default Settings", role: .destructive) {
                         store.restoreDefaultSettings()
-                    }
-                    Button("Delete User Data", role: .destructive) {
-                        confirmDeleteUserData()
                     }
                 }
                 Text("Restores browser settings only. Trusted capsule identities and client certificates are kept.")
@@ -261,46 +260,6 @@ struct BrowserSettingsView: View {
         .formStyle(.grouped)
     }
 
-    private func confirmDeleteUserData() {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Delete User Data?"
-        alert.informativeText = "This permanently deletes bookmarks, the homepage, client certificates and their capsule assignments, and trusted capsule identities. This action can’t be undone."
-        let cancel = alert.addButton(withTitle: "Cancel")
-        cancel.keyEquivalent = "\r"
-        let delete = alert.addButton(withTitle: "Delete User Data")
-        delete.hasDestructiveAction = true
-
-        let respond: (NSApplication.ModalResponse) -> Void = { response in
-            // NSAlert assigns 1_000 to its first button and increments for each
-            // following button. Cancel is deliberately first/default; deletion needs
-            // an explicit activation of the second button.
-            guard response.rawValue == 1_001 else { return }
-            Task { @MainActor in
-                await deleteUserData()
-            }
-        }
-        if let window = NSApp.keyWindow {
-            alert.beginSheetModal(for: window, completionHandler: respond)
-        } else {
-            respond(alert.runModal())
-        }
-    }
-
-    private func deleteUserData() async {
-        do {
-            try await ClientCertificateStore.shared.deleteAll()
-            try await BookmarksModel.shared.deleteAll()
-            try await SharedTrustedIdentityStore.shared?.removeAllUserTrust()
-            var preferences = store.preferences
-            preferences.homepage = BrowserPreferences().homepage
-            store.preferences = preferences
-        } catch {
-            let alert = NSAlert(error: error)
-            alert.runModal()
-        }
-    }
-
     private var proxyEnabled: Binding<Bool> {
         Binding(
             get: { store.preferences.proxy != nil },
@@ -324,10 +283,130 @@ struct BrowserSettingsView: View {
     }
 }
 
+private struct DataManagementSettingsView: View {
+    @Environment(\.openWindow) private var openWindow
+    @ObservedObject private var store = BrowserSettingsStore.shared
+    @ObservedObject private var browsingData = BrowsingDataController.shared
+    @State private var browsingRange: BrowsingDataTimeRange = .last24Hours
+    @State private var cacheRange: BrowsingDataTimeRange = .last24Hours
+    @State private var isDeletingUserData = false
+
+    var body: some View {
+        Form {
+            Section("History and Cache") {
+                Text("Clear navigation information, history, and cached content on this Mac.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 12) {
+                    clearingRow(.clearBrowsingData, range: $browsingRange)
+                    clearingRow(.emptyCaches, range: $cacheRange)
+                }
+            }
+            Section("User Data") {
+                Text("Manage bookmarks, certificates, and identities saved on this Mac and in iCloud.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack {
+                        Button("Show Bookmarks") {
+                            NativeTabCoordinator.shared.openLocation(InternalPage.bookmarks.url)
+                        }
+                        .help("Open the bookmarks manager in a new browser tab.")
+                        Button("Manage Certificates and Identities") {
+                            NativeTabCoordinator.shared.openLocation(InternalPage.clientCertificates.url)
+                        }
+                        .help("Open the client certificate and identity manager in a new browser tab.")
+                    }
+                    Divider()
+                    HStack {
+                        Button("Delete User Data…", role: .destructive) {
+                            confirmDeleteUserData()
+                        }
+                        .help("Permanently delete bookmarks, client identities, and local capsule trust, and reset the homepage.")
+                        if isDeletingUserData {
+                            ProgressView().controlSize(.small)
+                            Text("Deleting…").foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .disabled(browsingData.isClearing || isDeletingUserData)
+    }
+
+    private func clearingRow(_ action: BrowsingDataAction, range: Binding<BrowsingDataTimeRange>) -> some View {
+        GridRow {
+            Picker("\(action.title) Time Range", selection: range) {
+                ForEach(BrowsingDataTimeRange.allCases) { range in
+                    Text(range.title).tag(range)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .frame(width: 160)
+            .help("Choose Last 24 Hours or Everything for \(action.title).")
+            Button("\(action.title)…", role: .destructive) {
+                browsingData.present(action, range: range.wrappedValue)
+                openWindow(id: "browsing-data")
+            }
+            .help(action == .clearBrowsingData
+                  ? "Clear history, Back/Forward visits, input drafts, and cached content for the selected period."
+                  : "Discard cached pages, images, and favicons while keeping history and navigation destinations.")
+        }
+    }
+
+    private func confirmDeleteUserData() {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Delete User Data?"
+        alert.informativeText = """
+            Permanently deletes your bookmarks, resets your homepage, and deletes client certificates, private keys, and capsule assignments. It also clears trusted capsule identities on this Mac.
+
+            Bookmark, homepage, and certificate metadata changes sync through iCloud, deleting or resetting that data on your other devices. Keys stored in iCloud Keychain are also deleted there. Capsule trust is cleared only on this Mac.
+
+            This action can’t be undone.
+            """
+        let cancel = alert.addButton(withTitle: "Cancel")
+        cancel.keyEquivalent = "\r"
+        let delete = alert.addButton(withTitle: "Delete User Data")
+        delete.hasDestructiveAction = true
+
+        let respond: (NSApplication.ModalResponse) -> Void = { response in
+            // NSAlert assigns 1_000 to its first button and increments for each
+            // following button. Cancel is deliberately first/default; deletion needs
+            // an explicit activation of the second button.
+            guard response.rawValue == 1_001 else { return }
+            Task { @MainActor in
+                await deleteUserData()
+            }
+        }
+        if let window = NSApp.keyWindow {
+            alert.beginSheetModal(for: window, completionHandler: respond)
+        } else {
+            respond(alert.runModal())
+        }
+    }
+
+    private func deleteUserData() async {
+        isDeletingUserData = true
+        defer { isDeletingUserData = false }
+        do {
+            try await ClientCertificateStore.shared.deleteAll()
+            try await BookmarksModel.shared.deleteAll()
+            try await SharedTrustedIdentityStore.shared?.removeAllUserTrust()
+            var preferences = store.preferences
+            preferences.homepage = BrowserPreferences().homepage
+            store.preferences = preferences
+        } catch {
+            let alert = NSAlert(error: error)
+            alert.runModal()
+        }
+    }
+}
+
 private struct TrustedIdentitiesSettingsView: View {
     @State private var identities: [TrustedServerIdentity] = []
-    @Environment(\.openWindow) private var openWindow
-    @ObservedObject private var browsingData = BrowsingDataController.shared
     private let store = SharedTrustedIdentityStore.shared
 
     var body: some View {
@@ -358,25 +437,6 @@ private struct TrustedIdentitiesSettingsView: View {
                     }
                 }
             }
-            Divider()
-            Text("Browsing Data")
-                .font(.headline)
-            Text("Browsing history, cached content, input drafts, and restored tabs are stored only on this Mac.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            HStack {
-                Button("Clear Browsing Data…", role: .destructive) {
-                    browsingData.action = .clearBrowsingData
-                    openWindow(id: "browsing-data")
-                }
-                .help("Clear history, Back/Forward visits, input drafts, and cached content across all windows.")
-                Button("Empty Caches…", role: .destructive) {
-                    browsingData.action = .emptyCaches
-                    openWindow(id: "browsing-data")
-                }
-                .help("Discard cached content while keeping history, tabs, and reading positions.")
-            }
-            .disabled(browsingData.isClearing)
         }
         .task { await reload() }
     }

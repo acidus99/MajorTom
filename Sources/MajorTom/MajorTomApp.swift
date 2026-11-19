@@ -220,12 +220,12 @@ struct MajorTomApp: App {
                 Button("iCloud Tabs…") { openWindow(id: "icloud-tabs") }
                 Divider()
                 Button("Clear Browsing Data…", role: .destructive) {
-                    browsingData.action = .clearBrowsingData
+                    browsingData.present(.clearBrowsingData)
                     openWindow(id: "browsing-data")
                 }
                 .disabled(browsingData.isClearing)
-                Button("Empty Caches…", role: .destructive) {
-                    browsingData.action = .emptyCaches
+                Button("Clear Content Cache…", role: .destructive) {
+                    browsingData.present(.emptyCaches)
                     openWindow(id: "browsing-data")
                 }
                 .keyboardShortcut("e", modifiers: [.command, .option])
@@ -1273,7 +1273,10 @@ final class NativeTabCoordinator {
         let keyBrowserWindow = NSApplication.shared.keyWindow.flatMap { window in
             registeredTabs[ObjectIdentifier(window)]?.browser == nil ? nil : window
         }
-        if let parent = keyBrowserWindow ?? registeredTabs.values.compactMap(\.window).first {
+        let frontmostBrowserWindow = NSApplication.shared.orderedWindows.first {
+            registeredTabs[ObjectIdentifier($0)]?.browser != nil
+        }
+        if let parent = keyBrowserWindow ?? frontmostBrowserWindow ?? registeredTabs.values.compactMap(\.window).first {
             openTab(url: url, from: parent, inBackground: false)
         } else {
             openWindow(url: url)

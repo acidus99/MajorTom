@@ -160,7 +160,7 @@ Major Tom avoids repeated Gemini image transfers with a local response cache. A 
 successful Gemini image may be reused for 24 hours whether it was first displayed inline,
 opened directly, or fetched for a user action. Reload requests the main page again but reuses
 fresh cached inline images immediately. Only missing or expired inline images enter the paced
-network queue. Empty Caches removes reusable image responses when a fresh transfer is wanted.
+network queue. Clear Content Cache removes reusable image responses when a fresh transfer is wanted.
 Reloading a standalone image requests that main response afresh. Cache reuse never initiates
 a request itself, and cached responses follow the same parsing and presentation path as live responses. Page
 Information identifies content as Live or Cached and shows when the response was originally
@@ -203,15 +203,22 @@ Back/Forward response snapshots are local browser data and never synchronize. Ea
 at most 32 MiB of response bodies in memory; the active session's entries remain in its
 standalone SQLite file so older entries can be loaded on demand.
 
-Privacy & Security settings and the History menu provide Clear Browsing Data… and
-Empty Caches… (Command-Option-E). Both open a native confirmation window with a Time Range
-menu: Last 24 Hours (the default) or Everything. Cancel is the default action, including
+Settings has a Data Management tab between Quality of Life and Privacy & Security.
+Its History and Cache section provides Clear Browsing Data… and Clear Content Cache…,
+each with an independent Time Range menu to the left: Last 24 Hours (the default) or
+Everything. Each button opens a confirmation with a brief explanation of its scope and the
+selected period; the confirmation does not repeat the time selector or enumerate retained data
+and tab-restoration behavior. Both Data Management sections place explanatory text before their
+controls; User Data describes managing bookmarks, certificates, and identities on this Mac and
+in iCloud. The History menu exposes
+the same commands (Command-Option-E for Clear Content Cache), with a time selector in the
+confirmation when no period was chosen beforehand. Cancel is the default action, including
 Return and Escape. Both operations affect every open window and tab on this Mac only.
 
-Empty Caches removes retained response content from both the Back/Forward store and the
+Clear Content Cache removes retained response content from both the Back/Forward store and the
 shared image/favicon cache, including remembered absent favicons. It keeps browsing history,
 input drafts, tab destinations, Back/Forward lists, zoom, and reading positions. Clear Browsing
-Data includes Empty Caches and also removes matching global history visits, Back/Forward
+Data includes Clear Content Cache and also removes matching global history visits, Back/Forward
 visits, and unsubmitted input drafts. Each tab retains its current entry as a navigation anchor;
 older unmatched entries remain accessible, and Back/Forward become disabled if none remain.
 
@@ -312,9 +319,15 @@ by client and shows a client-specific summary of the data Major Tom can import w
 repeating support status. For Lagrange, a bookmark carrying the `.homepage` tag supplies the
 homepage; for Alhena, the optional `home` preference supplies it.
 
-General Settings provides Delete User Data beside Restore Default Settings. It presents a
-warning alert whose default action is Cancel; confirmation permanently deletes bookmarks, the
-homepage, client certificates and their capsule assignments, and user-trusted capsule
-identities. Bundled trust policy remains in place.
+Data Management’s User Data section provides Show Bookmarks and Manage Certificates and
+Identities. Each opens its existing manager in a new selected tab of the most recently used
+browser window, or creates a browser window when none exists, keeping Settings open.
+Delete User Data… is separated from these manager shortcuts and presents a warning whose
+default action is Cancel. The warning explains that it permanently deletes bookmarks, resets
+the homepage, deletes client certificates/private keys and capsule assignments, and clears
+trusted capsule identities on this Mac. Bookmark, homepage, and certificate metadata changes
+sync through iCloud to other devices; keys stored in iCloud Keychain are deleted there too.
+Capsule trust deletion is local only, and bundled trust policy remains in place. Restore Default
+Settings remains in General. Privacy & Security retains capsule trust management.
 
 Potential future work belongs in the working backlog until it has a user-facing purpose and acceptance criteria. Product requirements remain implementation-neutral unless a platform technology is itself part of the user experience.

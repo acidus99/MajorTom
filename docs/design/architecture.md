@@ -296,7 +296,7 @@ than issued independently by Settings. It updates every live tab, drains pre-cle
 writes, saves sanitized session metadata, and removes stored responses. Back/Forward entries
 carry visit and last-access dates independently of response bodies; the standalone v2 migration
 seeds known dates from response receipt times. Missing legacy dates match conservatively.
-Deleting response bodies is independent of deleting navigation entries, so Empty Caches keeps
+Deleting response bodies is independent of deleting navigation entries, so Clear Content Cache keeps
 session layout and reading state. Clear Browsing Data filters noncurrent visits while keeping
 each tab's current entry as an anchor. Current source/rendered data remains display-only and
 is not reconstructed into a retained snapshot on autosave.
@@ -306,8 +306,13 @@ before looking up or requesting content; the store rejects results from earlier 
 Tab generations also fence lazy Back/Forward reads and favicon probes. Active requests and
 swipe staging are stopped; cleared draft prompts cannot re-save their text on dismissal.
 The operations are local, exclude bookmark/security/sync repositories, and propagate storage
-errors to the confirmation window. Native windows are used for the shared commands so Settings
-and the menu expose the same time selector and safe Cancel default.
+errors to the confirmation window. Data Management settings owns separate, transient time
+selections for browsing-data and content-cache clearing. `BrowsingDataController.present`
+captures a selected range for confirmation without a second picker; menu commands leave the
+range unspecified so the shared confirmation offers its own picker. Both entry points use the
+same clearing coordinator and safe Cancel default. Manager shortcuts use `openLocation` to
+create a selected tab in the frontmost browser window even while Settings is the key window;
+no clearing or reset behavior lives in the native tab controls.
 
 Stored Gemini responses replay header, body, and completion events through the same consumer
 used by live transport responses. This is a narrow compatibility boundary, not a universal

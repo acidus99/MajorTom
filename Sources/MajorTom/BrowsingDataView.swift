@@ -6,8 +6,17 @@ import SwiftUI
 @MainActor
 final class BrowsingDataController: ObservableObject {
     static let shared = BrowsingDataController()
-    @Published var action: BrowsingDataAction = .clearBrowsingData
+    @Published private(set) var action: BrowsingDataAction = .clearBrowsingData
+    @Published private(set) var requestedRange: BrowsingDataTimeRange?
     @Published private(set) var isClearing = false
+
+    /// Settings chooses the range before confirmation; menu commands choose it in
+    /// the shared confirmation window. Capture the choice separately from the rows.
+    func present(_ action: BrowsingDataAction, range: BrowsingDataTimeRange? = nil) {
+        guard !isClearing else { return }
+        requestedRange = range
+        self.action = action
+    }
 
     func clear(_ action: BrowsingDataAction, range: BrowsingDataTimeRange) async throws {
         guard !isClearing else { return }
@@ -50,28 +59,34 @@ struct BrowsingDataView: View {
         }
     }
 
+    private var confirmationMessage: String {
+        let selected = controller.requestedRange ?? range
+        if controller.action == .clearBrowsingData {
+            let period = selected == .last24Hours ? "from the last 24 hours" : "for all time"
+            return "Clear this Mac’s browsing history, input drafts, and cached content \(period)."
+        }
+        let period = selected == .last24Hours ? "fetched or used in the last 24 hours" : "for all time"
+        return "Clear cached pages, images, and favicons \(period) from this Mac."
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text(controller.action.title)
                 .font(.headline)
                 .accessibilityAddTraits(.isHeader)
-            Text(controller.action == .clearBrowsingData
-                 ? "Remove browsing history, Back/Forward visits, input drafts, and cached pages, images, and favicons from this Mac."
-                 : "Remove cached pages, images, and favicons from this Mac. Browsing history, Back/Forward destinations, and input drafts are kept.")
+            Text(confirmationMessage)
                 .fixedSize(horizontal: false, vertical: true)
-            Picker("Time Range", selection: $range) {
-                ForEach(BrowsingDataTimeRange.allCases) { range in
-                    Text(range.title).tag(range)
+            if controller.requestedRange == nil {
+                Picker("Time Range", selection: $range) {
+                    ForEach(BrowsingDataTimeRange.allCases) { range in
+                        Text(range.title).tag(range)
+                    }
                 }
+                .pickerStyle(.menu)
+                .help(controller.action == .clearBrowsingData
+                      ? "Clear visits and draft edits from this period, and content fetched or used during it."
+                      : "Clear content fetched or used during this period.")
             }
-            .pickerStyle(.menu)
-            .help(controller.action == .clearBrowsingData
-                  ? "Clear visits and draft edits from this period, and content fetched or used during it."
-                  : "Clear content fetched or used during this period.")
-            Text("All open windows and tabs stay open. Their current pages and reading positions are kept, and their addresses can restore next launch. Requests in progress stop. Content is fetched again when needed.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             if let errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
@@ -88,9 +103,10 @@ struct BrowsingDataView: View {
                     .keyboardShortcut(.defaultAction)
                 Button(controller.action.title, role: .destructive) {
                     let action = controller.action
+                    let selectedRange = controller.requestedRange ?? range
                     Task {
                         do {
-                            try await controller.clear(action, range: range)
+                            try await controller.clear(action, range: selectedRange)
                             dismissWindow(id: "browsing-data")
                         } catch {
                             Logger(subsystem: "dev.gemi.major-tom", category: "BrowsingData")
@@ -113,11 +129,15 @@ struct BrowsingDataView: View {
         }
         .onAppear {
             dialogHasFocus = true
-            range = .last24Hours
+            range = controller.requestedRange ?? .last24Hours
+            errorMessage = nil
+        }
+        .onChange(of: controller.requestedRange) {
+            range = controller.requestedRange ?? .last24Hours
             errorMessage = nil
         }
         .onChange(of: controller.action) {
-            range = .last24Hours
+            range = controller.requestedRange ?? .last24Hours
             errorMessage = nil
         }
     }

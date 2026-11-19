@@ -8,7 +8,7 @@ public enum BrowsingDataAction: String, CaseIterable, Identifiable, Sendable {
     public var title: String {
         switch self {
         case .clearBrowsingData: "Clear Browsing Data"
-        case .emptyCaches: "Empty Caches"
+        case .emptyCaches: "Clear Content Cache"
         }
     }
 }
