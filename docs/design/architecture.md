@@ -59,6 +59,32 @@ focus, and accessibility behavior. Connected groups use SwiftUI glass containers
 compact independent actions because neither SwiftUI nor AppKit provides a public
 equivalent connected-pill control.
 
+The address field uses an `AddressTextField` AppKit bridge to retain the native field
+editor while selecting only the appended inline-completion suffix. A nonactivating
+child panel presents native AppKit buttons and labels without taking keyboard focus.
+`AddressSuggestionsView` uses explicit frames with AppKit alone owning panel geometry;
+unchanged frames are not reapplied. SwiftUI hosting in this transient panel caused
+recursive constraint/layout invalidation during row and selection changes, so this is
+an intentional narrow AppKit bridge. The bridge
+handles suggestion arrows, Return, and Escape; ordinary editing, input methods, Undo,
+selection, and Tab traversal remain native. The existing Command-L route targets this
+field. The panel is dismissed on focus loss, window deactivation, and outside clicks.
+
+`OmnibarIndex` in Core prepares an immutable, deduplicated collection from history,
+bookmarks, and local-tab snapshots. It owns matching, ranking, and conservative Gemini
+address-prefix completion independently of UI and persistence. `OmnibarStore` observes
+the app's existing in-memory history and bookmark mirrors and tab-change notifications,
+rebuilding the shared index off the main actor. Each field searches that prepared index
+off the main actor, maintaining only the highest-ranked few matches. No per-keystroke
+database, CloudKit, favicon, or transport requests occur. Source revisions invalidate
+visible rows and inline completion before rebuilding; per-field generations and source
+revisions reject stale search results. Keyboard selection is retained by destination ID
+when that destination survives an update.
+The shared index retains all tab IDs for a destination. Each field supplies its own
+registered tab ID when searching; result projection excludes that ID without changing
+the shared index or dropping another tab open at the same URL. This applies equally to
+initial suggestions, typed matches, and inline-completion metadata.
+
 ## Navigation and content flow
 
 The application delegate's single local key monitor routes Command-Option-Up and
@@ -317,8 +343,9 @@ no clearing or reset behavior lives in the native tab controls.
 Stored Gemini responses replay header, body, and completion events through the same consumer
 used by live transport responses. This is a narrow compatibility boundary, not a universal
 protocol-neutral streaming framework. The policy can remain a no-op for future protocols
-until their own reuse rules are justified. Omnibar indexing and purposeful offline browsing
-remain separate future systems.
+until their own reuse rules are justified. Omnibar matching indexes local destination
+metadata rather than cached response bodies. Full-text content indexing and purposeful
+offline browsing remain separate future systems.
 
 `GeminiImageLoader` in Core owns inline image retrieval. One app-owned actor is shared by
 all tabs and returns complete `ContentResponse` bytes to the WebKit resource bridge. It

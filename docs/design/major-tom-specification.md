@@ -25,6 +25,38 @@ Major Tom is a multiwindow, tabbed macOS browser. Each tab independently owns it
 
 The unified address field accepts Gemini locations and searches. A submitted explicit Gemini URL navigates; probable hostnames are normalized as Gemini locations; allowed external URLs are handed to macOS; other text is sent to the selected Gemini search provider. Invalid explicit Gemini URLs must produce useful feedback rather than silently becoming searches.
 
+While editing, the address field offers local history, bookmarks, and open tabs across
+browser windows. Matches consider titles and addresses, ignore case and accents, and
+require every word to match. Exact addresses and hostnames precede address prefixes,
+then word prefixes and other matches. Comparable matches favor recent and frequent
+visits, with a modest bookmark and Favorites boost. The same URL appears once with its
+bookmark or open-tab state; different paths and queries remain distinct destinations.
+Only another tab can supply a Switch to Tab action; the current tab is excluded by
+identity, while its page remains eligible through bookmarks or history. If the same URL
+is also open in another tab or window, that other tab remains a switch destination.
+Choosing an open-tab match switches to that tab, with opening another copy available
+through its context menu. Suggestions never fetch content or send partial input to a
+search provider.
+
+A known Gemini address prefix from history or bookmarks can complete inline, with the
+appended suffix selected. Paths and queries retain their case-sensitive meaning. Return
+accepts the inline address completion, or submits the reader's typed address or search;
+a title match never becomes the default navigation without being selected. An explicit
+Search with the selected provider action remains available alongside address suggestions.
+Deletion, selection replacement, mid-address edits, and input-method composition do not
+restore a rejected completion. Up and Down select suggestions and Return activates one;
+Command-Return opens the selected or entered destination in a background tab. Escape
+dismisses the suggestions and rejects an inline suffix first; another Escape restores the
+committed address and leaves the field. Tab retains normal keyboard focus traversal.
+
+The dropdown contains at most eight selectable rows, including Go To or Top Hit and
+Search actions. Initial focus offers at most six Favorites and recent destinations.
+Destination context menus offer Open Link in New Tab, Open Link in New Window, and
+Copy Link. Command-L focuses and selects the field. Suggestions use native semantic
+colors, accessibility labels, and spoken keyboard-selection announcements. Clearing or
+deleting history invalidates its suggestions and inline completions immediately; a
+remaining bookmark or open tab can still supply the same destination.
+
 A location Major Tom is asked to open by the rest of the system opens the same way a location typed into the address field does: a `gemini://` link activated in another application, and a Gemtext or plain-text document opened from the Finder, each become a new selected tab of the frontmost window, or the first window when none is open. A launch caused by one of these shows it alongside any restored session rather than behind the homepage. Opening a location never creates a window the reader cannot see.
 
 Document themes are independent of application appearance. Content appearance can be

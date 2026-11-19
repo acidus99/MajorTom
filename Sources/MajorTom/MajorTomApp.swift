@@ -1284,7 +1284,29 @@ final class NativeTabCoordinator {
     }
 
     func publishCloudTabsIfNeeded() {
+        NotificationCenter.default.post(name: .majorTomOmnibarTabsChanged, object: nil)
         publishCloudTabs()
+    }
+
+    var omnibarTabs: [OmnibarTab] {
+        registeredTabs.values.compactMap { registration in
+            guard registration.window != nil, let url = registration.browser.committedURL else { return nil }
+            return OmnibarTab(id: registration.cloudID, url: url, title: registration.browser.title)
+        }
+    }
+
+    @discardableResult
+    func activateOmnibarTab(_ id: UUID) -> Bool {
+        guard let registration = registeredTabs.values.first(where: { $0.cloudID == id }),
+              let window = registration.window else { return false }
+        window.tabGroup?.selectedWindow = window
+        window.makeKeyAndOrderFront(nil)
+        return true
+    }
+
+    func omnibarTabID(for window: NSWindow?) -> UUID? {
+        guard let window else { return nil }
+        return registeredTabs[ObjectIdentifier(window)]?.cloudID
     }
 
     private func publishCloudTabs() {
@@ -2078,7 +2100,7 @@ private struct BrowserTabView: View {
     @ObservedObject private var settings = BrowserSettingsStore.shared
     @ObservedObject private var themes = ContentThemeStore.shared
     @ObservedObject private var clientCertificates = ClientCertificateStore.shared
-    @FocusState private var locationIsFocused: Bool
+    @State private var locationFocusRequest = 0
     @State private var showsFind = false
     @State private var historySearchFocusRequest = 0
     @State private var contextMenuMonitor: Any?
@@ -2258,19 +2280,21 @@ private struct BrowserTabView: View {
                 .glassEffect(.regular, in: Capsule())
                 .fixedSize()
 
-                TextField("Search or enter capsule address", text: $browser.locationText)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($locationIsFocused)
-                    .onSubmit {
-                        browser.submitLocation()
-                        locationIsFocused = false
-                    }
-                    .onExitCommand {
+                OmnibarAddressField(
+                    text: $browser.locationText,
+                    focusRequest: locationFocusRequest,
+                    searchProvider: settings.preferences.searchProvider,
+                    customSearchEndpoint: settings.preferences.customSearchEndpoint,
+                    submit: { browser.submitLocation() },
+                    search: { browser.searchLocation($0) },
+                    cancel: {
                         browser.locationText = browser.committedURL?.absoluteString ?? browser.locationText
                         browser.validationMessage = nil
-                        locationIsFocused = false
-                    }
-                    .accessibilityLabel("Address and search")
+                    },
+                    openInNewTab: { browser.openInNewTab?($0, true) },
+                    openInNewWindow: { browser.openInNewWindow?($0) }
+                )
+                .frame(height: 24)
 
                 if browser.canStop {
                     BrowserToolbarButton(
@@ -2455,26 +2479,12 @@ private struct BrowserTabView: View {
         browser.submitLocation()
     }
 
-    /// Gives the native field editor one update cycle to become first responder before
-    /// selecting its contents. This also makes Command-L reselect the address when the
-    /// location field already owns focus.
+    /// The bridge focuses and selects synchronously when it receives this request,
+    /// so a delayed select-all cannot replace the reader's first typed character.
     private func focusLocationAndSelectAll() {
-        locationIsFocused = true
-        Task { @MainActor in
-            // SwiftUI updates AppKit's first responder after the FocusState mutation.
-            // A few short retries cover that handoff without selecting the old web view
-            // if its field editor has not been installed yet.
-            for _ in 0..<4 {
-                await Task.yield()
-                guard locationIsFocused, let hostWindow, hostWindow.isKeyWindow else { return }
-                if let editor = hostWindow.firstResponder as? NSTextView,
-                   editor.delegate is NSTextField {
-                    editor.selectAll(nil)
-                    return
-                }
-                try? await Task.sleep(for: .milliseconds(10))
-            }
-        }
+        locationFocusRequest += 1
+        NotificationCenter.default.post(name: .majorTomSelectOmnibar, object: hostWindow,
+                                        userInfo: ["request": locationFocusRequest])
     }
 
     private var contentThemeBackground: Color {

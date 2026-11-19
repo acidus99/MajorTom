@@ -778,6 +778,19 @@ final class BrowserModel: ObservableObject {
         }
     }
 
+    /// An explicit search action must bypass hostname interpretation and completion.
+    func searchLocation(_ query: String) {
+        let preferences = settings.preferences
+        let endpoint = preferences.searchProvider.endpoint(customEndpoint: preferences.customSearchEndpoint)
+        guard let url = GeminiQueryEncoding.url(base: endpoint, query: query),
+              let target = try? GeminiRequestTarget(url.absoluteString) else {
+            validationMessage = "The search endpoint is not a valid Gemini address."
+            return
+        }
+        validationMessage = nil
+        navigate(to: target, disposition: .new)
+    }
+
     func reload() {
         if let internalPage {
             showInternalPage(internalPage, disposition: .reload)
