@@ -3076,6 +3076,25 @@ final class BrowserModel: ObservableObject {
             continuation.finish()
         } else if currentMIMEType.hasPrefix("image/") {
             showImagePage(data: currentSourceBytes, mimeType: currentMIMEType, url: committedURL, disposition: .reload)
+        } else {
+            // A body Major Tom cannot display, such as application/pgp-keys. The live
+            // load shows a notice and keeps the bytes for Save Page As. Showing a
+            // retained copy must do the same: doing nothing here used to leave the
+            // previous page on screen under the new address after Back or Forward.
+            let continuation = beginDocument(at: committedURL)
+            continuation.yield(renderer.documentStart(
+                themeCSS: themeCSS,
+                baseURL: committedURL,
+                kind: .message,
+                appearance: themeAppearance
+            ))
+            continuation.yield(renderer.renderMessage(
+                title: "Unsupported Content",
+                message: "Major Tom cannot display this response type yet. No file was downloaded.",
+                details: "\(currentMIMEType.isEmpty ? responseMeta : currentMIMEType)\n\(currentSourceBytes.count) bytes"
+            ))
+            continuation.yield(renderer.documentEnd())
+            continuation.finish()
         }
     }
 
