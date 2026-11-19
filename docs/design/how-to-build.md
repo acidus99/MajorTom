@@ -94,6 +94,12 @@ summary (database integrity, migration state, outbox and record-type counts). It
 does not copy bookmark data, page bodies, preferences, certificates, or Keychain material. The
 log itself can contain URLs involved in browser activity, so review the archive before sharing.
 
+Performance characterization is separate from the functional suite. Run it explicitly:
+
+```bash
+MAJOR_TOM_PERFORMANCE_TESTS=1 Scripts/run-tests.sh --filter OmnibarIndexTests.testLargeHistorySearchPerformance
+```
+
 The live transport test is opt-in:
 
 ```bash

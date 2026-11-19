@@ -44,6 +44,17 @@ final class GeminiInputDraftRepositoryTests: XCTestCase {
         )
     }
 
+    func testDraftLivesUntilFourteenDayBoundaryThenExpires() throws {
+        let repository = GeminiInputDraftRepository(database: try MajorTomDatabase(inMemory: ()))
+        let url = URL(string: "gemini://example.invalid/draft")!
+        let start = Date(timeIntervalSince1970: 1_000_000)
+        try repository.save("Retained fixture", for: url, at: start)
+        let expiry = start.addingTimeInterval(14 * 24 * 60 * 60)
+        XCTAssertEqual(try repository.draft(for: url, at: expiry.addingTimeInterval(-1))?.text, "Retained fixture")
+        XCTAssertNil(try repository.draft(for: url, at: expiry))
+        XCTAssertNil(try repository.draft(for: url, at: expiry.addingTimeInterval(1)))
+    }
+
     func testExpiredDraftIsDiscarded() throws {
         let database = try MajorTomDatabase(inMemory: ())
         let repository = GeminiInputDraftRepository(database: database)

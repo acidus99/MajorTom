@@ -141,7 +141,15 @@ final class SecuritySyncRepositoryTests: XCTestCase {
             database: database,
             accountIdentityHash: "account"
         )
-        try repository.saveFromCloud(ClientCertificateSyncState(), localFlags: [:])
+        let id = UUID()
+        let descriptor = ClientCertificateDescriptor(id: id, commonName: "Remote fixture", notBefore: .distantPast,
+            notAfter: .distantFuture, certificateSHA256: String(repeating: "a", count: 64), publicKeySHA256: String(repeating: "b", count: 64))
+        let association = ClientCertificateAssociation.entireCapsule(certificateID: id, endpoint: CapsuleEndpoint(host: "example.invalid"))
+        let incoming = ClientCertificateSyncState().reconciled(certificates: [descriptor], associations: [association], at: Date(timeIntervalSince1970: 10))
+        try repository.saveFromCloud(incoming, localFlags: [id: false])
+        let loaded = try repository.load()
+        XCTAssertEqual(loaded.state, incoming)
+        XCTAssertEqual(loaded.localFlags, [id: false])
         XCTAssertFalse(try CloudSyncRepository(database: database)
             .hasPendingChanges(for: "account"))
     }

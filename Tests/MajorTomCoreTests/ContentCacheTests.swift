@@ -92,19 +92,21 @@ final class ContentCacheTests: XCTestCase {
     }
 
     func testTotalLimitEvictsLeastRecentlyAccessedResponse() async throws {
-        let database = try ContentCacheDatabase(inMemory: ())
-        let cache = ContentCache(database: database, maximumTotalBytes: 5)
-        let first = makeResponse(url: "gemini://example.com/first.png", body: Data([1, 2, 3]))
-        let second = makeResponse(url: "gemini://example.com/second.png", body: Data([4, 5, 6]))
+        let cache = ContentCache(database: try ContentCacheDatabase(inMemory: ()), maximumTotalBytes: 6)
+        let first = makeResponse(url: "gemini://example.invalid/a.png", body: Data([1, 2, 3]))
+        let second = makeResponse(url: "gemini://example.invalid/b.png", body: Data([4, 5, 6]))
+        let third = makeResponse(url: "gemini://example.invalid/c.png", body: Data([7, 8, 9]))
         let start = Date(timeIntervalSince1970: 1_000)
-
         try await cache.store(first, resourceType: .image, lifetime: 60, now: start)
         try await cache.store(second, resourceType: .image, lifetime: 60, now: start.addingTimeInterval(1))
-
-        let firstLoaded = try await cache.freshResponse(for: first.url, now: start.addingTimeInterval(2))
-        let secondLoaded = try await cache.freshResponse(for: second.url, now: start.addingTimeInterval(2))
-        XCTAssertNil(firstLoaded)
-        XCTAssertNotNil(secondLoaded)
+        _ = try await cache.freshResponse(for: first.url, now: start.addingTimeInterval(2))
+        try await cache.store(third, resourceType: .image, lifetime: 60, now: start.addingTimeInterval(3))
+        let a = try await cache.freshResponse(for: first.url, now: start.addingTimeInterval(4))
+        let b = try await cache.freshResponse(for: second.url, now: start.addingTimeInterval(4))
+        let c = try await cache.freshResponse(for: third.url, now: start.addingTimeInterval(4))
+        XCTAssertEqual(a?.body, first.body)
+        XCTAssertNil(b, "Accessing A must evict B, rather than following insertion order")
+        XCTAssertEqual(c?.body, third.body)
     }
 
     func testCheckpointAndCloseRemovesCompanionFiles() async throws {

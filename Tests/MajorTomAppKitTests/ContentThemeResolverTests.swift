@@ -204,11 +204,11 @@ final class ContentThemeResolverTests: XCTestCase {
     }
 
     @MainActor
-    func testConsecutiveTextLinesUseOneLinePitchAndBlankLinesAddOneMore() async throws {
+    func testTextPitchAndConsecutiveBlankLinesPreserveSourceSpacing() async throws {
         // Prevents paragraph margins doubling the source's explicit blank-line spacing.
         let renderer = HTMLDocumentStreamRenderer()
         var html = renderer.documentStart()
-        for event: GemtextEvent in [.text("First"), .text("Second"), .blank, .text("Third")] {
+        for event: GemtextEvent in [.text("First"), .text("Second"), .blank, .text("Third"), .blank, .blank, .text("Fourth")] {
             html.append(renderer.render(event))
         }
         html.append(renderer.documentEnd())
@@ -222,12 +222,13 @@ final class ContentThemeResolverTests: XCTestCase {
             (() => {
               const p = [...document.querySelectorAll('main > p')];
               const pitch = parseFloat(getComputedStyle(p[0]).lineHeight);
-              return [pitch, p[1].offsetTop - p[0].offsetTop, p[2].offsetTop - p[1].offsetTop];
+              return [pitch, p[1].offsetTop - p[0].offsetTop, p[2].offsetTop - p[1].offsetTop, p[3].offsetTop - p[2].offsetTop];
             })()
             """)
             let values = try XCTUnwrap(result as? [Double], theme.name)
             XCTAssertEqual(values[1], values[0], accuracy: 1)
             XCTAssertEqual(values[2], values[0] * 2, accuracy: 1)
+            XCTAssertEqual(values[3], values[0] * 3, accuracy: 1)
         }
     }
 

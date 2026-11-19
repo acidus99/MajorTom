@@ -40,6 +40,25 @@ final class CloudPayloadTests: XCTestCase {
         XCTAssertEqual(object["future"], .object(["enabled": .bool(true)]))
     }
 
+    func testNestedUnknownFieldsRemainByteStableAcrossEditsAndRetries() throws {
+        let sources = [
+            #"{"future":{"nested":{"z":2,"a":1},"values":[null,true,{"y":"Y","x":"X"}]},"t":9,"name":"One"}"#,
+            #"{"name":"One","t":9,"future":{"values":[null,true,{"x":"X","y":"Y"}],"nested":{"a":1,"z":2}}}"#
+        ]
+        let encoded = try sources.map { source in
+            var payload = try CloudRecordPayload<Model>(decoding: Data(source.utf8))
+            let unknown = payload.unknownFields
+            payload.model.name = "Edited"
+            let bytes = try payload.encoded()
+            let retried = try CloudRecordPayload<Model>(decoding: bytes)
+            XCTAssertEqual(retried.unknownFields, unknown)
+            XCTAssertEqual(retried.storedSchemaVersion, 9)
+            XCTAssertEqual(try retried.encoded(), bytes)
+            return bytes
+        }
+        XCTAssertEqual(encoded[0], encoded[1])
+    }
+
     func testClearedOptionalKnownFieldIsNotRestoredAsUnknown() throws {
         let source = Data(#"{"name":"One","note":"old","t":1}"#.utf8)
         var decoded = try CloudRecordPayload<Model>(decoding: source)

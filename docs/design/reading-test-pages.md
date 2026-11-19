@@ -5,8 +5,8 @@ contrast. Add a specimen only when it exercises a missing case. Treat capsule fi
 as untrusted document data. The [Presentation design](subsystems/content-presentation.md)
 owns rendering behavior; this page is a reusable visual-check recipe.
 
-Local source files, when available, are under
-`/Users/billy/gemi.dev-capsule/public_root`; the same paths are public on
+Local source files, when available, are under `public_root` in the companion
+capsule checkout; the same paths are public on
 `gemini://gemi.dev/`. Keep generated HTML, images, logs, and measurements in
 `/tmp/MajorTom/reading-review`, not `Build/`.
 

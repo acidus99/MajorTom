@@ -4,37 +4,69 @@ import XCTest
 @testable import MajorTomCore
 
 final class SessionRepositoryTests: XCTestCase {
-    func testSessionRoundTripsWindowsTabsHistoryCursorZoomAndScroll() throws {
+    func testSessionRoundTripsMultipleWindowsTabsSelectionZoomAndForwardHistoryAcrossReopen() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("BFCache.db")
+        let database = try BackForwardCacheDatabase(fileURL: file)
+        let one = URL(string: "gemini://example.invalid/one")!
+        let two = URL(string: "gemini://example.invalid/two")!
+        let first = RestoredTabState(history: [one, two], historyIndex: 0, cachedPages: [], zoom: 1.4,
+            title: "Heading", scrollOffsets: [0: 140, 1: 900])
+        let second = RestoredTabState(history: [two, one], historyIndex: 1, cachedPages: [], zoom: 0.8,
+            title: "Second", scrollOffsets: [0: 80, 1: 120])
+        let third = RestoredTabState(history: [two], historyIndex: 0, cachedPages: [], zoom: 2,
+            title: "Third", scrollOffsets: [0: 40])
+        let session = PersistedApplicationSession(windows: [
+            PersistedBrowserWindow(frame: PersistedWindowFrame(x: 10, y: 20, width: 900, height: 700),
+                tabs: [first, second], selectedIndex: 1),
+            PersistedBrowserWindow(frame: nil, tabs: [third], selectedIndex: 0)
+        ], keyWindowIndex: 1)
+        try SessionRepository(database: database).save(session)
+        try database.checkpointAndClose()
+        let reopened = try BackForwardCacheDatabase(fileURL: file)
+        let loaded = try XCTUnwrap(SessionRepository(database: reopened).load())
+        XCTAssertEqual(loaded.windows.count, 2)
+        XCTAssertEqual(loaded.windows.map(\.selectedIndex), [1, 0])
+        XCTAssertEqual(loaded.windows[0].frame, session.windows[0].frame)
+        XCTAssertNil(loaded.windows[1].frame)
+        XCTAssertEqual(loaded.keyWindowIndex, 1)
+        let tabs = loaded.windows.flatMap(\.tabs)
+        for (actual, expected) in zip(tabs, [first, second, third]) {
+            XCTAssertEqual(actual.tabID, expected.tabID)
+            XCTAssertEqual(actual.history, expected.history)
+            XCTAssertEqual(actual.historyIndex, expected.historyIndex)
+            XCTAssertEqual(actual.zoom, expected.zoom)
+            XCTAssertEqual(actual.title, expected.title)
+            XCTAssertEqual(actual.scrollOffsets, expected.scrollOffsets)
+            XCTAssertEqual(actual.entries.map(\.id), expected.entries.map(\.id))
+        }
+    }
+
+    func testFailedReplacementRollsBackSessionAndResponseBytes() throws {
         let database = try BackForwardCacheDatabase(inMemory: ())
         let repository = SessionRepository(database: database)
-        let one = URL(string: "gemini://example.com/one")!
-        let two = URL(string: "gemini://example.com/two")!
-        let session = PersistedApplicationSession(
-            windows: [PersistedBrowserWindow(
-                frame: PersistedWindowFrame(x: 10, y: 20, width: 900, height: 700),
-                tabs: [RestoredTabState(
-                    history: [one, two],
-                    historyIndex: 0,
-                    cachedPages: [],
-                    zoom: 1.4,
-                    title: "One",
-                    documentTitle: "Heading",
-                    scrollOffsets: [0: 140, 1: 900]
-                )],
-                selectedIndex: 0
-            )],
-            keyWindowIndex: 0
-        )
-
-        try repository.save(session)
-        let loaded = try XCTUnwrap(repository.load())
-
-        XCTAssertEqual(loaded.windows[0].frame, session.windows[0].frame)
-        XCTAssertEqual(loaded.windows[0].tabs[0].history, [one, two])
-        XCTAssertEqual(loaded.windows[0].tabs[0].historyIndex, 0)
-        XCTAssertEqual(loaded.windows[0].tabs[0].title, "Heading")
-        XCTAssertEqual(loaded.windows[0].tabs[0].scrollOffsets, [0: 140, 1: 900])
-        XCTAssertEqual(loaded.keyWindowIndex, 0)
+        let original = URL(string: "gemini://example.invalid/original")!
+        let rejected = URL(string: "gemini://example.invalid/rejected")!
+        func session(_ url: URL, source: String) -> PersistedApplicationSession {
+            PersistedApplicationSession(windows: [PersistedBrowserWindow(frame: nil,
+                tabs: [RestoredTabState(history: [url], historyIndex: 0,
+                    cachedPages: [page(url: url, source: source)], zoom: 1.3, scrollOffsets: [0: 120])], selectedIndex: 0)], keyWindowIndex: 0)
+        }
+        try repository.save(session(original, source: "Original exact bytes"))
+        let before = try XCTUnwrap(repository.load())
+        // Inject a real failure after replacement has begun, rather than checking
+        // table counts after a successful save and calling that atomicity.
+        try database.write { db in
+            try db.execute(sql: """
+                CREATE TRIGGER reject_fixture BEFORE INSERT ON browser_tab_history
+                WHEN NEW.url = 'gemini://example.invalid/rejected'
+                BEGIN SELECT RAISE(ABORT, 'synthetic replacement failure'); END
+                """)
+        }
+        XCTAssertThrowsError(try repository.save(session(rejected, source: "Must not commit")))
+        XCTAssertEqual(try repository.load(), before)
+        XCTAssertEqual(try repository.load()?.windows[0].tabs[0].cachedPages.first?.body, Data("Original exact bytes".utf8))
     }
 
     func testLoadHydratesCurrentPageFromStandaloneCache() throws {
@@ -97,7 +129,7 @@ final class SessionRepositoryTests: XCTestCase {
         XCTAssertEqual(loaded.windows[0].tabs[0].cachedPages.map(\.url), [two])
     }
 
-    func testSavingReplacementSessionRemovesOldRowsAtomically() throws {
+    func testSuccessfulReplacementRemovesOldRows() throws {
         let database = try BackForwardCacheDatabase(inMemory: ())
         let repository = SessionRepository(database: database)
         let first = URL(string: "gemini://example.com/first")!

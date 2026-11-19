@@ -180,7 +180,17 @@ final class OmnibarIndexTests: XCTestCase {
         XCTAssertNil(rebuilt.completion)
     }
 
-    func testLargeHistorySearchPerformance() {
+    func testLargeHistorySearchReturnsBoundedMatchesWithoutInventingCompletion() {
+        let history = (0..<50_000).map {
+            visit("gemini://capsule\($0).invalid/notes/", title: "Gardening Notes \($0)", daysAgo: Double($0 % 365))
+        }
+        let results = index(history).search("garden", now: now)
+        XCTAssertEqual(results.destinations.count, 7)
+        XCTAssertNil(results.completion)
+    }
+
+    func testLargeHistorySearchPerformance() throws {
+        try XCTSkipUnless(ProcessInfo.processInfo.environment["MAJOR_TOM_PERFORMANCE_TESTS"] == "1", "Opt-in performance characterization")
         let history = (0..<50_000).map {
             visit("gemini://capsule\($0).example/notes/", title: "Gardening Notes \($0)", daysAgo: Double($0 % 365))
         }

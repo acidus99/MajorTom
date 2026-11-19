@@ -3,6 +3,17 @@ import XCTest
 @testable import MajorTomCore
 
 final class BrowsingHistoryRepositoryTests: XCTestCase {
+    func testRetentionKeepsTheOneYearBoundaryAndPrunesOnlyOlderVisits() throws {
+        let repository = BrowsingHistoryRepository(database: try MajorTomDatabase(inMemory: ()))
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let cutoff = now.addingTimeInterval(-365 * 24 * 60 * 60)
+        let urls = ["older", "boundary", "newer", "current"].map { URL(string: "gemini://example.invalid/\($0)")! }
+        for (url, date) in zip(urls, [cutoff.addingTimeInterval(-1), cutoff, cutoff.addingTimeInterval(1), now]) {
+            try repository.record(url, at: date)
+        }
+        XCTAssertEqual(Set(try repository.entries().map(\.url)), Set(urls.dropFirst()))
+    }
+
     func testRecordUpsertsOneRowPerURLAndMovesItToTheTop() throws {
         let database = try MajorTomDatabase(inMemory: ())
         let repository = BrowsingHistoryRepository(database: database)

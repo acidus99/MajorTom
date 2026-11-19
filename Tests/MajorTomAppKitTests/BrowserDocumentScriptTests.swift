@@ -53,6 +53,31 @@ final class BrowserDocumentScriptTests: XCTestCase {
             XCTAssertEqual(after["background"] as? String, appearance == "light" ? "rgb(255, 255, 255)" : "rgb(0, 0, 0)")
         }
     }
+    @MainActor
+    func testLiveWidthAndZoomUpdatesKeepDocumentIdentitySelectionAndContent() async throws {
+        let document = ScriptTestDocument()
+        defer { document.close() }
+        let url = URL(string: "majortom-test://document/width-and-zoom")!
+        try await document.load(url)
+        _ = try await document.js("""
+        document.documentElement.dataset.fixtureToken = 'retained';
+        const range = document.createRange(); range.selectNodeContents(document.getElementById('selected'));
+        getSelection().removeAllRanges(); getSelection().addRange(range);
+        """)
+        let before = try await document.snapshot()
+        for (width, size) in [(480, 16), (320, 16), (320, 24)] {
+            _ = try await document.js(BrowserDocumentScript.themeUpdate(
+                css: "body {font-size: \(size)px;} main {width:100%;max-width: \(width)px;}", appearance: "light"))
+            let after = try await document.snapshot()
+            XCTAssertEqual(after["width"] as? Double ?? .nan, Double(width), accuracy: 0.5)
+            XCTAssertEqual(after["font"] as? Double ?? .nan, Double(size), accuracy: 0.5)
+            XCTAssertEqual(after["token"] as? String, "retained")
+            XCTAssertEqual(after["location"] as? String, url.absoluteString)
+            XCTAssertEqual(after["text"] as? String, before["text"] as? String)
+            XCTAssertEqual(after["selection"] as? String, "Selected fixture text")
+        }
+    }
+
 }
 
 @MainActor
@@ -121,7 +146,9 @@ private final class ScriptTestDocument: NSObject, WKNavigationDelegate, WKScript
         let result = try await js("""
         ({text: document.body.textContent, selection: getSelection().toString(), scroll: scrollY,
           location: location.href, appearance: document.documentElement.dataset.appearance,
-          background: getComputedStyle(document.body).backgroundColor})
+          background: getComputedStyle(document.body).backgroundColor,
+          width: document.querySelector('main').getBoundingClientRect().width,
+          font: parseFloat(getComputedStyle(document.body).fontSize), token: document.documentElement.dataset.fixtureToken})
         """)
         return try XCTUnwrap(result as? [String: Any])
     }

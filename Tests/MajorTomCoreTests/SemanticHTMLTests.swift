@@ -37,19 +37,8 @@ final class SemanticHTMLTests: XCTestCase {
         XCTAssertEqual(html.components(separatedBy: "<blockquote>").count - 1, 2)
     }
 
-    func testBlankEventsPreserveLineBreaksWithoutSpacerElements() {
-        let renderer = HTMLDocumentStreamRenderer()
-        let first = String(decoding: renderer.render(.blank), as: UTF8.self)
-        let second = String(decoding: renderer.render(.blank), as: UTF8.self)
-        XCTAssertEqual(first, "<br>\n")
-        XCTAssertEqual(second, first)
-        XCTAssertFalse(first.contains("aria-"))
-    }
-
-    func testOrdinaryPreformattedTextNeedsNeitherCodeNorLineSpans() {
+    func testOrdinaryPreformattedTextPreservesWhitespace() {
         let html = render([.beginPreformatted(altText: "Art"), .preformattedLine("  +--+"), .preformattedLine("  |  |"), .endPreformatted])
-        XCTAssertFalse(html.contains("<code"))
-        XCTAssertFalse(html.contains("<span"))
         XCTAssertTrue(html.contains("  +--+\n  |  |\n"))
     }
 

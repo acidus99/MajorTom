@@ -36,20 +36,28 @@ final class BookmarkRepositoryTests: XCTestCase {
         XCTAssertNil(loaded.favorites.bookmarks.first?.favicon?.emoji)
     }
 
-    func testChangingOneTitleWritesOnlyOneRow() throws {
+    func testChangingOneTitleCreatesExactlyOneOutgoingRecordForThatBookmark() throws {
         let database = try MajorTomDatabase(inMemory: ())
-        let repository = BookmarkRepository(database: database)
+        let repository = BookmarkRepository(database: database, accountIdentityHash: "synthetic-account")
+        let cloud = CloudSyncRepository(database: database)
         var collection = BookmarkCollection()
-        let first = collection.add(title: "One", url: URL(string: "gemini://one.example/")!)
-        collection.add(title: "Two", url: URL(string: "gemini://two.example/")!)
+        let first = collection.add(title: "One", url: URL(string: "gemini://one.invalid/")!)
+        collection.add(title: "Two", url: URL(string: "gemini://two.invalid/")!)
         try repository.replace(with: collection)
-        let before = try database.read { try Int.fetchOne($0, sql: "SELECT total_changes()")! }
-
+        for change in try cloud.pendingChanges(for: "synthetic-account") {
+            XCTAssertTrue(try cloud.acknowledge(recordName: change.recordName, generation: change.generation, for: "synthetic-account"))
+        }
         collection.rename(bookmarkWith: first.id, to: "Renamed")
         try repository.replace(with: collection)
-        let after = try database.read { try Int.fetchOne($0, sql: "SELECT total_changes()")! }
-
-        XCTAssertEqual(after - before, 1)
+        let outgoing = try cloud.pendingChanges(for: "synthetic-account")
+        XCTAssertEqual(outgoing.count, 1)
+        let change = try XCTUnwrap(outgoing.first)
+        XCTAssertEqual(change.recordName, first.id.uuidString)
+        XCTAssertEqual(change.recordType, "MTBookmark")
+        XCTAssertEqual(change.operation, .save)
+        let payload = try JSONDecoder().decode(CloudBookmarkPayload.self, from: XCTUnwrap(change.modelPayload))
+        XCTAssertEqual(payload.title, "Renamed")
+        XCTAssertEqual(payload.url, first.url)
     }
 
     func testPersistedOrderKeysPreserveVisibleOrderForPartialCloudBatch() throws {
@@ -166,9 +174,10 @@ final class BookmarkRepositoryTests: XCTestCase {
         let database = try MajorTomDatabase(inMemory: ())
         let repository = BookmarkRepository(database: database, accountIdentityHash: "account")
         var collection = BookmarkCollection()
-        collection.add(title: "Remote", url: URL(string: "spartan://example/path")!)
+        collection.add(title: "Remote", url: URL(string: "spartan://example/path")!, at: Date(timeIntervalSince1970: 1_000))
 
         try repository.replaceFromCloud(with: collection)
+        XCTAssertEqual(try repository.collection(), collection)
 
         XCTAssertFalse(try CloudSyncRepository(database: database)
             .hasPendingChanges(for: "account"))

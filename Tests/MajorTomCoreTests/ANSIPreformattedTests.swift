@@ -267,6 +267,18 @@ final class ANSIContrastTests: XCTestCase {
 
     /// The invariant the whole feature rests on: whatever a capsule asks for, on
     /// whichever theme the reader chose, the text can be read.
+    private func referenceContrast(_ first: ContentThemeColor, _ second: ContentThemeColor) -> Double {
+        func luminance(_ color: ContentThemeColor) -> Double {
+            let channels = [color.red, color.green, color.blue].map { value -> Double in
+                let sRGB = Double(value) / 255
+                return sRGB <= 0.04045 ? sRGB / 12.92 : pow((sRGB + 0.055) / 1.055, 2.4)
+            }
+            return zip(channels, [0.2126, 0.7152, 0.0722]).reduce(0) { $0 + $1.0 * $1.1 }
+        }
+        let a = luminance(first), b = luminance(second)
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+    }
+
     func testEveryANSIColorIsReadableAcrossBackgroundLuminances() {
         for channel in stride(from: 0, through: 255, by: 15) {
             let background = ContentThemeColor(red: UInt8(channel), green: UInt8(channel), blue: UInt8(channel))
@@ -275,7 +287,7 @@ final class ANSIContrastTests: XCTestCase {
                     let authored = ANSIColor.palette(index).resolved(bold: bold)
                     let adapted = ANSIContrast.adapted(authored, on: background)
                     XCTAssertGreaterThanOrEqual(
-                        adapted.contrastRatio(against: background), ANSIContrast.minimumRatio,
+                        referenceContrast(adapted, background), 4.5,
                         "Palette \(index) is unreadable on \(background.cssHex)"
                     )
                 }

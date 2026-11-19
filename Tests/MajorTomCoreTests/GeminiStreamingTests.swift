@@ -142,12 +142,6 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertTrue(link.contains("&quot;"))
     }
 
-    func testDocumentThemeIsAddressableWithoutReplacingContent() {
-        let document = String(decoding: HTMLDocumentStreamRenderer().documentStart(themeCSS: "body { color: red; }"), as: UTF8.self)
-        XCTAssertTrue(document.contains("id=\"majortom-theme\""))
-        XCTAssertTrue(document.contains("body { color: red; }"))
-    }
-
     func testPreformattedLinesContainOnlyEscapedTextAndNewlines() {
         let renderer = HTMLDocumentStreamRenderer()
         let first = String(decoding: renderer.render(.preformattedLine("one")), as: UTF8.self)

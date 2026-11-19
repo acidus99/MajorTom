@@ -31,11 +31,4 @@ final class JSONValueTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: data), value)
     }
 
-    func testSortedEncodingIsIndependentOfDictionaryConstructionOrder() throws {
-        let first: JSONValue = .object(["b": .number(2), "a": .number(1)])
-        let second: JSONValue = .object(["a": .number(1), "b": .number(2)])
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.sortedKeys]
-        XCTAssertEqual(try encoder.encode(first), try encoder.encode(second))
-    }
 }
