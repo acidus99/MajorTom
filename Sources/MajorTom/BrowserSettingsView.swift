@@ -254,69 +254,77 @@ struct BrowserSettingsView: View {
 
     private var qualityOfLife: some View {
         Form {
-            Toggle("Show capsule favicons", isOn: store.binding(\.showsFavicons))
-            Text("A capsule may publish one emoji at /favicon.txt. Major Tom shows it on the Page Information button and on the tab, asks for it only after you visit the capsule, and remembers the answer for 30 days.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-
-            Picker("Automatically Load Same-Capsule Images", selection: store.binding(\.sameCapsuleImageLoading)) {
-                Text("Off").tag(SameCapsuleImageLoading.off)
-                Text("When Visible").tag(SameCapsuleImageLoading.whenVisible)
+            Section("Inline Emphasis") {
+                Text("Apply Markdown-style italics, bold, and monospace formatting. Asterisks and backticks remain visible, so the original content is unchanged.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Toggle(
+                    "Italicize text between *single asterisks*",
+                    isOn: store.binding(\.renderingOptions.recognizesEmphasis)
+                )
+                Toggle(
+                    "Bold text between **double asterisks**",
+                    isOn: store.binding(\.renderingOptions.recognizesStrongEmphasis)
+                )
+                Toggle(
+                    "Monospace text between `backtick characters`",
+                    isOn: store.binding(\.renderingOptions.recognizesInlineCode)
+                )
             }
-            .help("Load a same-capsule image when its link first becomes visible. You can always click an image link to load it.")
-            Stepper(value: store.binding(\.imageRequestInterval), in: 1...60, step: 1) {
-                Text("Image Request Interval: \(Duration.seconds(store.preferences.imageRequestInterval).formatted(.units(allowed: [.seconds], width: .wide)))")
+            Section("Images") {
+                Picker("Automatically Load Same-Capsule Images", selection: store.binding(\.sameCapsuleImageLoading)) {
+                    Text("Off").tag(SameCapsuleImageLoading.off)
+                    Text("When Visible").tag(SameCapsuleImageLoading.whenVisible)
+                }
+                .help("Load a same-capsule image when its link first becomes visible. You can always click an image link to load it.")
+                Stepper(value: store.binding(\.imageRequestInterval), in: 1...60, step: 1) {
+                    Text("Image Request Interval: \(Duration.seconds(store.preferences.imageRequestInterval).formatted(.units(allowed: [.seconds], width: .wide)))")
+                }
+                .help("Minimum time between inline image requests to a capsule. Cached images appear immediately.")
+                Text("Cached images appear immediately. Other images wait for this interval, including when a page first opens. Capsules that ask Major Tom to slow down are given progressively longer pauses.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Toggle(isOn: store.binding(\.showsFavicons)) {
+                    settingLabel("Show capsule favicons", description: "Show a capsule’s emoji beside its address and on its tab.")
+                }
+                Button("About the Favicon Proposal") {
+                    NativeTabCoordinator.shared.openLocation(URL(string: "gemini://mozz.us/files/rfc_gemini_favicon.gmi")!)
+                }
+                .buttonStyle(.link)
+                .font(.callout)
+                .help("Read Mozz’s favicon proposal in a new browser tab.")
+                Toggle(isOn: store.binding(\.automaticallyLoadsDataImages)) {
+                    settingLabel("Display data: URI images", description: "Automatically display embedded data: URI images.")
+                }
             }
-            .help("Minimum time between inline image requests to a capsule. Cached images appear immediately.")
-            Text("Cached images appear immediately. Other images wait for this interval, including when a page first opens. Capsules that ask Major Tom to slow down are given progressively longer pauses.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-            Toggle("Display inline data images", isOn: store.binding(\.automaticallyLoadsDataImages))
-            Toggle(
-                "Italicize text between *single asterisks*",
-                isOn: store.binding(\.renderingOptions.recognizesEmphasis)
-            )
-            Toggle(
-                "Bold text between **double asterisks**",
-                isOn: store.binding(\.renderingOptions.recognizesStrongEmphasis)
-            )
-            Toggle(
-                "Monospace text between `backtick characters`",
-                isOn: store.binding(\.renderingOptions.recognizesInlineCode)
-            )
-            Text("The asterisks and backticks stay visible. Major Tom only adds styling; it never removes characters the author typed.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Toggle(
-                "Collapse consecutive quote lines",
-                isOn: store.binding(\.renderingOptions.collapsesConsecutiveQuotes)
-            )
-            Text("Renders a run of quote lines as one continuous quotation instead of separate blocks.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Toggle(
-                "Render ANSI colors in preformatted text",
-                isOn: store.binding(\.renderingOptions.rendersANSIColors)
-            )
-            Toggle(
-                "Include ANSI background colors",
-                isOn: store.binding(\.renderingOptions.rendersANSIBackgroundColors)
-            )
-            .disabled(!store.preferences.renderingOptions.rendersANSIColors)
-            Text("Some capsules color their ASCII art with terminal escape codes. Major Tom brightens or darkens each color so it stays readable on your content theme. Background colors are applied only where the capsule also sets a text color, because a background on its own can hide the text underneath it.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-
-            Toggle(
-                "Show link type hints",
-                isOn: store.binding(\.renderingOptions.showsLinkHints)
-            )
-            Text("Marks each link with where it leads: \u{2192} elsewhere in this capsule, \u{21D2} to another capsule, \u{1F310} out to the web, \u{1F5BC}\u{FE0F} an image, \u{1F4E7} an email address.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
+            Section("Text and Links") {
+                Toggle(
+                    "Collapse consecutive quote lines",
+                    isOn: store.binding(\.renderingOptions.collapsesConsecutiveQuotes)
+                )
+                Text("Renders a run of quote lines as one continuous quotation instead of separate blocks.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Toggle(
+                    "Render ANSI colors in preformatted text",
+                    isOn: store.binding(\.renderingOptions.rendersANSIColors)
+                )
+                Toggle(
+                    "Include ANSI background colors",
+                    isOn: store.binding(\.renderingOptions.rendersANSIBackgroundColors)
+                )
+                .disabled(!store.preferences.renderingOptions.rendersANSIColors)
+                Text("Some capsules color their ASCII art with terminal escape codes. Major Tom brightens or darkens each color so it stays readable on your content theme. Background colors are applied only where the capsule also sets a text color, because a background on its own can hide the text underneath it.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Toggle(
+                    "Show link type hints",
+                    isOn: store.binding(\.renderingOptions.showsLinkHints)
+                )
+                Text("Marks each link with where it leads: \u{2192} elsewhere in this capsule, \u{21D2} to another capsule, \u{1F310} out to the web, \u{1F5BC}\u{FE0F} an image, \u{1F4E7} an email address.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
         }
         .formStyle(.grouped)
     }

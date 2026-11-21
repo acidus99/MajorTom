@@ -9,7 +9,6 @@ agents may suggest Features or Bugs. Unverified reports need reproduction.
 - Tab Commands - Review Safari-style commands such as Close Tabs to the Right; identify remaining gaps.
 - Outline - Navigate headings in a collapsible or floating panel.
 - Bookmarks Import - A generic import format alongside Lagrange and Alhena.
-- Settings Organization - Improve Quality of Life grouping and wording.
 - Favorites Discoverability - Decide whether the first bookmark should reveal the Favorites Bar.
 - Connection Feedback - Use the lower-right status area for connection progress; clear it when loaded and preserve link previews.
 - Offline Browsing - Deliberate access to retained content beyond Back/Forward.
