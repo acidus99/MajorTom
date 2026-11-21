@@ -67,6 +67,7 @@ public final class BrowserSettingsStore: ObservableObject {
         )
         let savedFields = storedData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
         let needsThemeReferenceMigration = savedFields.map {
+            $0["contentThemeSelection"] == nil ||
             ($0["lightContentTheme"] as? String) != loadedPreferences.lightContentTheme
                 || ($0["darkContentTheme"] as? String) != loadedPreferences.darkContentTheme
         } ?? false

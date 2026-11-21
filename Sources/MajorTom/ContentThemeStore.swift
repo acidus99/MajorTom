@@ -7,6 +7,7 @@ import MajorTomCore
 @MainActor
 final class ContentThemeStore: ObservableObject {
     @Published private(set) var themes: [ContentTheme] = []
+    @Published private(set) var families: [ContentThemeFamily] = []
     @Published private(set) var resolved: ResolvedContentTheme?
     @Published private(set) var error: String?
     let themeDidChange = PassthroughSubject<Void, Never>()
@@ -105,11 +106,14 @@ final class ContentThemeStore: ObservableObject {
                     themes += custom.themes
                     errors += custom.errors
                 } catch { errors.append(error.localizedDescription) }
-                return (themes: themes, errors: errors)
+                let familyCatalog = ContentThemeFamily.catalog(in: themes)
+                errors += familyCatalog.errors
+                return (themes: themes, families: familyCatalog.families, errors: errors)
             }.value
             guard let self, !Task.isCancelled else { return }
             hasLoadedCatalog = true
             themes = catalog.themes
+            families = catalog.families
             catalogError = catalog.errors.isEmpty ? nil : catalog.errors.joined(separator: "\n")
             error = catalogError
             watchThemes()

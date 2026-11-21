@@ -8,6 +8,7 @@ struct BrowserSettingsView: View {
     @ObservedObject private var store = ApplicationServices.settings
     @ObservedObject private var cloud = ApplicationServices.cloud
     @ObservedObject private var themes = ApplicationServices.themes
+    @State private var themeRadioGroup = ContentThemeRadioGroup()
     @State private var isDefaultGeminiBrowser = false
     @State private var defaultBrowserError: String?
 
@@ -121,36 +122,93 @@ struct BrowserSettingsView: View {
 
     private var appearance: some View {
         Form {
-            Picker("Application appearance", selection: store.binding(\.applicationAppearance)) {
-                Text("System").tag(ApplicationAppearance.system)
-                Text("Light").tag(ApplicationAppearance.light)
-                Text("Dark").tag(ApplicationAppearance.dark)
+            Section("Application Appearance") {
+                Picker(selection: store.binding(\.applicationAppearance)) {
+                    Text("Use System").tag(ApplicationAppearance.system)
+                    Text("Always Light").tag(ApplicationAppearance.light)
+                    Text("Always Dark").tag(ApplicationAppearance.dark)
+                } label: {
+                    settingLabel("Application appearance", description: "Choose a light or dark appearance for windows and controls, or follow the system setting.")
+                }
+                .accessibilityHint("Choose a light or dark appearance for windows and controls, or follow the system setting.")
             }
-            Picker("Content appearance", selection: store.binding(\.contentAppearance)) {
-                Text("System").tag(ContentAppearance.system)
-                Text("Light").tag(ContentAppearance.light)
-                Text("Dark").tag(ContentAppearance.dark)
+            Section("Content") {
+                Picker(selection: store.binding(\.contentAppearance)) {
+                    Text("Use System").tag(ContentAppearance.system)
+                    Text("Always Light").tag(ContentAppearance.light)
+                    Text("Always Dark").tag(ContentAppearance.dark)
+                } label: {
+                    settingLabel("Content appearance", description: "Use a light or dark theme for page content, or follow the system setting.")
+                }
+                .accessibilityHint("Use a light or dark theme for page content, or follow the system setting.")
             }
-            .help("Choose whether content uses the light theme, the dark theme, or follows macOS appearance.")
-            contentThemePicker("Light content theme", appearance: .light, selection: \.lightContentTheme)
-            contentThemePicker("Dark content theme", appearance: .dark, selection: \.darkContentTheme)
-            if let error = themes.error {
-                Text(error)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .help(error)
+            Section("Content Theme") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ContentThemeModeButton(mode: .family, title: "Use theme family",
+                        explanation: "Choose a matched pair of light and dark themes for page content.",
+                        selection: store.binding(\.contentThemeSelection), group: themeRadioGroup)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Choose a matched pair of light and dark themes for page content.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        familyPicker
+                    }
+                    .padding(.leading, 22)
+                    ContentThemeModeButton(mode: .individual, title: "Choose individual themes",
+                        explanation: "Choose light and dark themes separately for page content.",
+                        selection: store.binding(\.contentThemeSelection), group: themeRadioGroup)
+                        .padding(.top, 8)
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Choose light and dark themes separately for page content.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        VStack(spacing: 8) {
+                            contentThemePicker("Light theme", appearance: .light, selection: \.lightContentTheme)
+                            contentThemePicker("Dark theme", appearance: .dark, selection: \.darkContentTheme)
+                        }
+                        .disabled(store.preferences.contentThemeSelection != .individual)
+                    }
+                    .padding(.leading, 22)
+                }
+                if let error = themes.error {
+                    Text(error)
+                        .font(.callout).foregroundStyle(.secondary)
+                        .lineLimit(2).help(error)
+                }
             }
-            Picker("Content width", selection: store.binding(\.contentWidth)) {
-                Text("Narrow").tag(ContentWidth.narrow)
-                Text("Wide").tag(ContentWidth.wide)
-                Text("Full").tag(ContentWidth.full)
+            Section {
+                Picker("Content width", selection: store.binding(\.contentWidth)) {
+                    Text("Narrow").tag(ContentWidth.narrow)
+                    Text("Wide").tag(ContentWidth.wide)
+                    Text("Full").tag(ContentWidth.full)
+                }
             }
-            Text("Application chrome and document themes are independent.")
-                .font(.callout)
-                .foregroundStyle(.secondary)
         }
         .formStyle(.grouped)
+    }
+
+    private func settingLabel(_ title: String, description: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+            Text(description).font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityHint(description)
+    }
+
+    private var familyPicker: some View {
+        LabeledContent("Theme family") {
+            Button {
+                ContentThemeFamilyPickerSelection.shared.prepare()
+                openWindow(id: "content-theme-families")
+            } label: {
+                Text(store.preferences.contentThemeFamily?.name ?? "Choose a Family…")
+                Image(systemName: "chevron.right")
+            }
+            .accessibilityLabel("Choose theme family")
+            .accessibilityValue(store.preferences.contentThemeFamily?.name ?? "None")
+        }
+        .disabled(store.preferences.contentThemeSelection != .family || themes.families.isEmpty)
     }
 
     private func contentThemePicker(

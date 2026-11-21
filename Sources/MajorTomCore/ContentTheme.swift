@@ -37,6 +37,12 @@ public struct ContentTheme: Equatable, Identifiable, Sendable {
     public let css: String
     public let metadata: [String: String]
 
+    public var family: String? {
+        guard let value = metadata["family"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else { return nil }
+        return value
+    }
+
     public var isCustom: Bool { id.hasPrefix("custom/") }
     public var label: String {
         appearance == .both ? name : "\(name) (\(appearance.label))"
@@ -66,7 +72,9 @@ public struct ContentTheme: Equatable, Identifiable, Sendable {
         }
         var fields: [String: String] = [:]
         for line in source[source.index(source.startIndex, offsetBy: 2)..<end.lowerBound].split(whereSeparator: \.isNewline) {
-            let field = line.trimmingCharacters(in: .whitespaces)
+            var field = line.trimmingCharacters(in: .whitespaces)
+            // Accept the colon spelling too, while authoring resources use @family Name.
+            if field.hasPrefix("@family:") { field = "@family " + field.dropFirst("@family:".count) }
             guard field.hasPrefix("@") else { continue }
             let parts = field.dropFirst().split(maxSplits: 1, whereSeparator: \.isWhitespace)
             guard parts.count == 2 else { continue }
@@ -131,7 +139,10 @@ public struct ContentTheme: Equatable, Identifiable, Sendable {
         in themes: [ContentTheme], preferences: BrowserPreferences, systemIsDark: Bool
     ) -> (theme: ContentTheme, appearance: ContentThemeAppearance) {
         let appearance = preferences.contentAppearance.resolved(systemIsDark: systemIsDark)
-        let id = currentIdentifier(appearance == .dark ? preferences.darkContentTheme : preferences.lightContentTheme)
+        let family = preferences.contentThemeSelection == .family
+            ? ContentThemeFamily.selected(in: themes, saved: preferences.contentThemeFamily) : nil
+        let individual = appearance == .dark ? preferences.darkContentTheme : preferences.lightContentTheme
+        let id = family.map { appearance == .dark ? $0.darkTheme : $0.lightTheme } ?? currentIdentifier(individual)
         let theme = themes.first { $0.id == id } ?? fallback(in: themes, for: appearance)
         return (theme, theme.renderingAppearance(for: appearance))
     }

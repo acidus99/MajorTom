@@ -38,7 +38,7 @@ final class ContentThemeTests: XCTestCase {
             XCTAssertEqual(theme.appearance, .both)
             XCTAssertEqual(theme.label, theme.name)
             let preferences = BrowserPreferences(
-                contentAppearance: .system, lightContentTheme: theme.id, darkContentTheme: theme.id
+                contentAppearance: .system, contentThemeSelection: .individual, lightContentTheme: theme.id, darkContentTheme: theme.id
             )
             for systemIsDark in [false, true] {
                 let selected = ContentTheme.selected(in: [theme], preferences: preferences, systemIsDark: systemIsDark)
@@ -111,7 +111,7 @@ final class ContentThemeTests: XCTestCase {
     func testCustomSelectionsRoundTripAndFollowSystemIndependentlyOfApplicationAppearance() throws {
         let theme = try ContentTheme(id: "custom/My Theme.css", css: "/*\n@name My Theme\n@appearance both\n*/")
         let preferences = BrowserPreferences(
-            applicationAppearance: .dark, contentAppearance: .system,
+            applicationAppearance: .dark, contentAppearance: .system, contentThemeSelection: .individual,
             lightContentTheme: theme.id, darkContentTheme: theme.id
         )
         let decoded = try JSONDecoder().decode(BrowserPreferences.self, from: JSONEncoder().encode(preferences))
@@ -126,13 +126,13 @@ final class ContentThemeTests: XCTestCase {
 
     func testEitherSlotCanUseEitherAppearance() throws {
         let light = try ContentTheme(id: "custom/light.css", css: "/*\n@name Light\n@appearance light\n*/")
-        let preferences = BrowserPreferences(darkContentTheme: light.id)
+        let preferences = BrowserPreferences(contentAppearance: .dark, contentThemeSelection: .individual, darkContentTheme: light.id)
         let selected = ContentTheme.selected(in: [light], preferences: preferences, systemIsDark: false)
         XCTAssertEqual(selected.theme, light)
         XCTAssertEqual(selected.appearance, .light)
         for theme in ContentTheme.bundled {
             for slot in [ContentAppearance.light, .dark] {
-                let preferences = BrowserPreferences(contentAppearance: slot,
+                let preferences = BrowserPreferences(contentAppearance: slot, contentThemeSelection: .individual,
                     lightContentTheme: theme.id, darkContentTheme: theme.id)
                 let selected = ContentTheme.selected(in: ContentTheme.bundled, preferences: preferences, systemIsDark: false)
                 XCTAssertEqual(selected.theme, theme)
@@ -155,7 +155,7 @@ final class ContentThemeTests: XCTestCase {
         XCTAssertEqual(custom.id, "custom/palette.css")
         XCTAssertFalse(system.isCustom)
         XCTAssertTrue(custom.isCustom)
-        var preferences = BrowserPreferences(lightContentTheme: system.id, darkContentTheme: custom.id)
+        var preferences = BrowserPreferences(contentThemeSelection: .individual, lightContentTheme: system.id, darkContentTheme: custom.id)
         preferences.reconcileContentThemes(in: [system, custom])
         XCTAssertEqual(preferences.lightContentTheme, system.id)
         XCTAssertEqual(preferences.darkContentTheme, custom.id)
@@ -185,7 +185,7 @@ final class ContentThemeTests: XCTestCase {
         let first = try theme("system/first.css", "Alpha")
         let second = try theme("system/second.css", "Bravo")
         let custom = try theme("custom/first.css", "A Custom")
-        var preferences = BrowserPreferences(lightContentTheme: "custom/missing.css", darkContentTheme: "system/removed.css")
+        var preferences = BrowserPreferences(contentThemeSelection: .individual, lightContentTheme: "custom/missing.css", darkContentTheme: "system/removed.css")
         preferences.reconcileContentThemes(in: [custom, second, first, dark, light])
         XCTAssertEqual(preferences.lightContentTheme, light.id)
         XCTAssertEqual(preferences.darkContentTheme, dark.id)

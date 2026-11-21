@@ -251,6 +251,13 @@ struct MajorTomApp: App {
         .defaultLaunchBehavior(.suppressed)
         .restorationBehavior(.disabled)
 
+        Window("Theme Families", id: "content-theme-families") {
+            ContentThemeFamilyPickerView()
+        }
+        .defaultSize(width: 1_020, height: 740)
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
+
         Settings {
             BrowserSettingsView()
         }

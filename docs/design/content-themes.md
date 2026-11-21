@@ -9,16 +9,28 @@ owns rendering and theme behavior; [TODO](TODOs.txt) tracks future theme-managem
 
 ## Choosing, creating, and editing
 
-In Settings > Appearance, click either content-theme button to open the same theme
-picker. The Light and Dark settings are independent selection slots; both list all
-built-in and custom themes. Settings and the preview title append `(Light)` or `(Dark)`
-to the name for single-appearance files; other appearances add no suffix. Tree rows
-show only the theme name because the enclosing folder identifies its appearance. A
-single-appearance theme keeps its colors and native control appearance in either
-slot. A theme declaring `both` follows the slot's Light or Dark appearance.
+Settings > Appearance separates application appearance (windows and controls) from
+content appearance (page content). Both offer Use System, Always Light, and Always
+Dark. Content Theme offers two mutually exclusive modes:
 
-Built-in and Custom are separate sidebar sections, each with expandable Light and
-Dark folders. A folder appears only when its section contains a theme with that
+- **Use theme family** enables a button that opens the matched Light/Dark pair picker.
+  Families can be selected with any content appearance; that setting chooses the active member.
+- **Choose individual themes** enables the independent Light and Dark theme buttons.
+  Each opens the same preview picker containing all built-in and custom themes.
+
+Short explanations remain visible beneath the controls. Inactive mode controls stay
+visible but disabled. Switching modes preserves the choices in each mode. New
+installations use the built-in One family and Use System content appearance. Existing
+settings retain their individual selections and prior content appearance.
+
+Settings and the preview title append `(Light)` or `(Dark)` to the name for
+single-appearance files; other appearances add no suffix. Tree rows show only the
+theme name because the enclosing folder identifies its appearance. A single-appearance
+theme keeps its colors and native control appearance in either individual slot. A
+theme declaring `both` follows the slot's Light or Dark appearance.
+
+The individual theme picker has Built-in and Custom sidebar sections, each with
+expandable Light and Dark folders. A folder appears only when its section contains a theme with that
 appearance, matched case-insensitively. Themes declaring `both`, a different value,
 or no appearance remain directly under their section. The selected theme's folder
 opens automatically. Empty folders disappear when custom files change or are removed.
@@ -71,13 +83,52 @@ the app container. Use the Finder button rather than relying on a particular pat
 Built-in files stay in the app bundle. Custom files and Appearance settings stay
 local to this Mac.
 
+## Theme families
+
+Optional `@family Name` metadata links files without a separate application registry.
+`@family: Name` is also accepted. Family names are trimmed and matched exactly; the
+picker displays the metadata name. Built-in and custom families are separate sidebar groups,
+so identical family names cannot replace one another across the two sources. Each
+selectable family requires exactly one `light` and one `dark` member, matched by the
+case-insensitive `@appearance` field. Standalone themes and incomplete pairs remain
+available for individual selection. Duplicate members for one appearance exclude
+that family from the picker and produce an explanatory warning.
+
+The family picker shares its native split-view layout, metadata display, preview
+WebKit component, and reading specimen with the individual theme picker. The left
+sidebar lists family names alphabetically under Built-in and Custom. The right pane
+has Light and Dark tabs showing the corresponding CSS, author, description, and
+source link. Highlighting a family changes only these previews. **Use Family** applies
+the pair; **Cancel** leaves saved choices unchanged. Both members must resolve before
+Use Family becomes available. Either preview tab is available regardless of Content
+Appearance. The two picker windows maintain independent preview selections.
+
+Settings remembers the family name, built-in/custom source, and both actual
+`system/<filename>.css` or `custom/<filename>.css` references, separately from the
+individual choices. Renaming a member file updates the family's saved reference if
+the same complete family still exists. Removing a member, changing its metadata, or
+introducing a duplicate can make the selected family unavailable. Replace and save
+that selection with the built-in One family, then the first built-in family
+alphabetically, then the first custom family. Restoring the old file does not restore
+its previous selection. If no complete families remain, clear the saved family and
+switch to individual mode using its repaired file choices. New families do not
+subsequently change that mode automatically.
+
+The ten built-in families are Catppuccin, Dracula (Alucard Classic and Dracula
+Classic), GitHub, Gruvbox, Monokai, Nord, One, Solarized, SynthWave ’84, and Tokyo
+Night. The five original standalone themes stay available individually. Custom
+copies preserve family metadata: copying both members makes a separate Custom
+family, while copying one member alone does not override the built-in family.
+Family selection and custom files stay local to this Mac.
+
 ## Metadata
 
-The first CSS comment must contain `@name`. Appearance and other metadata are optional:
+The first CSS comment must contain `@name`. Appearance, family, and other metadata are optional:
 
 ```css
 /*
 @name Evening Reading
+@family Evening
 @appearance dark
 @author Your Name
 @description A quiet theme for reading.
@@ -151,7 +202,7 @@ selection identifiers migrate to their source/filename references. Slate and Cop
 theme's neutral headings and emphasis, warm copper links and decoration, and native
 selection colors in the three-section format. The original custom file stays untouched.
 Each variant is a separate single-appearance CSS file so either selection slot can
-choose it directly. Existing selections and defaults stay unchanged.
+choose it directly.
 
 Adapted themes describe their feel in the first description sentence and attribute
 the upstream template with “Adapted by Acidus” in the second. Imported palettes credit

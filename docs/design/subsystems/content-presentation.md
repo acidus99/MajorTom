@@ -44,8 +44,11 @@ and surface; preparing a preview cannot mutate the active document or history cu
 
 Application appearance and content appearance are independent. Content supports
 System, Light, and Dark, separate light/dark selections, and Narrow (60ch), Wide
-(80ch), and Full widths. Default content is Dracula Classic; the default light theme
-is Alucard Classic. Either selection slot accepts any theme; single-appearance themes
+(80ch), and Full widths. A theme family selects a matched light/dark pair independently
+of content appearance; individual mode retains independent theme choices. New installations
+use the One family and System content appearance; existing installations preserve their
+settings. Family metadata and file identity rules live in the [theme reference](../content-themes.md).
+Either individual selection slot accepts any theme; single-appearance themes
 retain their declared appearance, while dual-appearance themes follow the slot. Use
 system typography and responsive gutters.
 

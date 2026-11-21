@@ -43,63 +43,21 @@ struct ContentThemePickerView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HSplitView {
-                List(selection: $selection.themeID) {
-                    Section("Built-in") {
-                        themeSection(isCustom: false)
-                    }
-                    Section("Custom") {
-                        themeSection(isCustom: true)
-                    }
+        ContentThemePickerLayout {
+            List(selection: $selection.themeID) {
+                Section("Built-in") {
+                    themeSection(isCustom: false)
                 }
-                .listStyle(.sidebar)
-                .accessibilityLabel("Content themes")
-                .frame(minWidth: 240, idealWidth: 270, maxWidth: 340)
-
-                VStack(alignment: .leading, spacing: 12) {
-                    if let theme = selectedTheme {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(theme.label).font(.title2)
-                            Text(theme.metadata["author"].map { "By \($0)" } ?? "Author not specified")
-                                .font(.subheadline).foregroundStyle(.secondary)
-                            if let description = theme.metadata["description"] {
-                                Text(description).foregroundStyle(.secondary)
-                            }
-                            if let source = theme.sourceURL {
-                                HStack(alignment: .firstTextBaseline) {
-                                    Text("Source:").foregroundStyle(.secondary)
-                                    Link(source.absoluteString, destination: source)
-                                        .lineLimit(1).truncationMode(.middle)
-                                        .help(source.absoluteString)
-                                        .accessibilityLabel("Theme source")
-                                        .accessibilityValue(source.absoluteString)
-                                }
-                                .font(.subheadline)
-                            }
-                        }
-                        .textSelection(.enabled)
-                        .padding([.top, .horizontal])
-
-                        if let error = previewError {
-                            ContentUnavailableView("Couldn’t Preview Theme", systemImage: "exclamationmark.triangle", description: Text(error))
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else if let previewHTML {
-                            ThemePreviewWebView(html: previewHTML, appearance: previewAppearance)
-                                .accessibilityLabel("Theme reading preview")
-                        } else {
-                            ProgressView("Loading Preview…")
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        }
-                    } else {
-                        ContentUnavailableView("Select a Theme", systemImage: "paintpalette")
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
+                Section("Custom") {
+                    themeSection(isCustom: true)
                 }
-                .frame(minWidth: 460, maxWidth: .infinity, maxHeight: .infinity)
             }
+            .listStyle(.sidebar)
+            .accessibilityLabel("Content themes")
 
-            Divider()
+        } detail: {
+            ContentThemePreviewPane(theme: selectedTheme, html: previewHTML, error: previewError, appearance: previewAppearance)
+        } footer: {
             if let error = themes.error {
                 Text(error)
                     .font(.callout).foregroundStyle(.secondary)
@@ -131,7 +89,6 @@ struct ContentThemePickerView: View {
             }
             .padding()
         }
-        .frame(minWidth: 860, minHeight: 620)
         .navigationTitle("Choose \(selection.slot.label) Content Theme")
         .preferredColorScheme(applicationColorScheme)
         .onAppear { revealSelectedTheme() }
@@ -251,8 +208,11 @@ struct ContentThemePickerView: View {
 
     private func useSelectedTheme() {
         guard let theme = selectedTheme else { return }
-        if selection.slot == .light { settings.preferences.lightContentTheme = theme.id }
-        else { settings.preferences.darkContentTheme = theme.id }
+        var preferences = settings.preferences
+        preferences.contentThemeSelection = .individual
+        if selection.slot == .light { preferences.lightContentTheme = theme.id }
+        else { preferences.darkContentTheme = theme.id }
+        settings.preferences = preferences
         dismissWindow(id: "content-themes")
     }
 }
@@ -321,43 +281,5 @@ private struct ThemeNameSheet: View {
         .frame(width: 420)
         .onAppear { nameIsFocused = true }
         .interactiveDismissDisabled(isCreating)
-    }
-}
-
-/// Preview WebKit is independent of browser tabs and has no navigation or resource bridge.
-private struct ThemePreviewWebView: NSViewRepresentable {
-    let html: String
-    let appearance: ContentThemeAppearance
-
-    func makeCoordinator() -> Coordinator { Coordinator() }
-
-    func makeNSView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.websiteDataStore = .nonPersistent()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
-        configuration.userContentController.addUserScript(PreformattedBlockPresentationScript.userScript)
-        let view = WKWebView(frame: .zero, configuration: configuration)
-        view.navigationDelegate = context.coordinator
-        return view
-    }
-
-    func updateNSView(_ view: WKWebView, context: Context) {
-        view.appearance = NSAppearance(named: appearance == .dark ? .darkAqua : .aqua)
-        guard context.coordinator.html != html else { return }
-        context.coordinator.html = html
-        view.loadHTMLString(html, baseURL: nil)
-    }
-
-    final class Coordinator: NSObject, WKNavigationDelegate {
-        var html: String?
-
-        func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction) async -> WKNavigationActionPolicy {
-            let isDocument = navigationAction.navigationType == .other && navigationAction.request.url?.absoluteString == "about:blank"
-            return isDocument ? .allow : .cancel
-        }
-
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            webView.evaluateJavaScript("document.querySelectorAll('details')[1]?.removeAttribute('open')", in: nil, in: .defaultClient) { _ in }
-        }
     }
 }

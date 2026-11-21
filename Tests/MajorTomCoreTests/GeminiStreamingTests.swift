@@ -175,10 +175,12 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertEqual(decoded.darkContentTheme, "system/draculaClassic.css")
     }
 
-    func testBrowserPreferencesUseMajorTomHomepageAndDraculaClassicByDefault() {
+    func testBrowserPreferencesUseMajorTomHomepageAndSystemAppearanceWithOneFamilyByDefault() {
         let preferences = BrowserPreferences()
         XCTAssertEqual(preferences.homepage, "gemini://gemi.dev/major-tom/")
-        XCTAssertEqual(preferences.contentAppearance, .dark)
+        XCTAssertEqual(preferences.contentAppearance, .system)
+        XCTAssertEqual(preferences.contentThemeSelection, .family)
+        XCTAssertEqual(preferences.contentThemeFamily, .defaultSelection)
         XCTAssertEqual(preferences.darkContentTheme, "system/draculaClassic.css")
         XCTAssertFalse(preferences.automaticallyLoadsSameCapsuleImages)
         XCTAssertEqual(preferences.imageRequestInterval, 2)

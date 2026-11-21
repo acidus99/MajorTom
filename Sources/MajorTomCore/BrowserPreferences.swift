@@ -80,6 +80,9 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
     public var customSearchEndpoint: String
     public var applicationAppearance: ApplicationAppearance
     public var contentAppearance: ContentAppearance
+    public var contentThemeSelection: ContentThemeSelection
+    public var contentThemeFamily: ContentThemeFamily?
+    /// Individual choices are remembered independently of the selected family.
     public var lightContentTheme: String
     public var darkContentTheme: String
     public var contentWidth: ContentWidth
@@ -103,7 +106,9 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         searchProvider: SearchProvider = .kennedy,
         customSearchEndpoint: String = "",
         applicationAppearance: ApplicationAppearance = .system,
-        contentAppearance: ContentAppearance = .dark,
+        contentAppearance: ContentAppearance = .system,
+        contentThemeSelection: ContentThemeSelection = .family,
+        contentThemeFamily: ContentThemeFamily? = .defaultSelection,
         lightContentTheme: String = ContentTheme.defaultLightIdentifier,
         darkContentTheme: String = ContentTheme.defaultDarkIdentifier,
         contentWidth: ContentWidth = .narrow,
@@ -121,6 +126,8 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         self.customSearchEndpoint = customSearchEndpoint
         self.applicationAppearance = applicationAppearance
         self.contentAppearance = contentAppearance
+        self.contentThemeSelection = contentThemeSelection
+        self.contentThemeFamily = contentThemeFamily
         self.lightContentTheme = ContentTheme.currentIdentifier(lightContentTheme)
         self.darkContentTheme = ContentTheme.currentIdentifier(darkContentTheme)
         self.contentWidth = contentWidth
@@ -142,6 +149,10 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         }
         lightContentTheme = existingOrFallback(lightContentTheme, slot: .light)
         darkContentTheme = existingOrFallback(darkContentTheme, slot: .dark)
+        contentThemeFamily = ContentThemeFamily.selected(in: themes, saved: contentThemeFamily)
+        if contentThemeFamily == nil, contentThemeSelection == .family {
+            contentThemeSelection = .individual
+        }
     }
 
     private enum LegacyCodingKeys: String, CodingKey { case contentTheme, automaticallyLoadsSameCapsuleImages }
@@ -171,7 +182,12 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
             .decodeIfPresent(String.self, forKey: .contentTheme)
         let legacyTheme = ContentTheme.bundled.first { $0.id == legacy.map(ContentTheme.currentIdentifier) }
         contentAppearance = try container.decodeIfPresent(ContentAppearance.self, forKey: .contentAppearance)
-            ?? (legacyTheme?.appearance == .light ? .light : defaults.contentAppearance)
+            ?? (legacyTheme?.appearance == .light ? .light : .dark)
+        // Decoding means settings already exist: preserve the former independent slots.
+        contentThemeSelection = try container.decodeIfPresent(ContentThemeSelection.self, forKey: .contentThemeSelection)
+            ?? .individual
+        contentThemeFamily = try container.decodeIfPresent(ContentThemeFamily.self, forKey: .contentThemeFamily)
+            ?? (container.contains(.contentThemeSelection) ? nil : defaults.contentThemeFamily)
         let savedLightTheme = try container.decodeIfPresent(String.self, forKey: .lightContentTheme)
             ?? (legacyTheme?.appearance == .light ? legacyTheme?.id : nil)
             ?? defaults.lightContentTheme

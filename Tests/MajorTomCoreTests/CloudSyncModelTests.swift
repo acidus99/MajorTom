@@ -181,6 +181,8 @@ final class CloudSyncModelTests: XCTestCase {
         XCTAssertEqual(applied.applicationAppearance, .light)
         // Prevent a remote width edit from also changing this Mac's reading theme.
         XCTAssertEqual(applied.contentAppearance, local.contentAppearance)
+        XCTAssertEqual(applied.contentThemeSelection, local.contentThemeSelection)
+        XCTAssertEqual(applied.contentThemeFamily, local.contentThemeFamily)
         XCTAssertEqual(applied.lightContentTheme, local.lightContentTheme)
         XCTAssertEqual(applied.darkContentTheme, local.darkContentTheme)
         XCTAssertEqual(applied.contentWidth, local.contentWidth)
@@ -216,6 +218,8 @@ final class CloudSyncModelTests: XCTestCase {
         XCTAssertEqual(applied.homepage, "gemini://legacy.example/")
         XCTAssertEqual(applied.proxy?.host, "this-mac")
         XCTAssertEqual(applied.contentAppearance, local.contentAppearance)
+        XCTAssertEqual(applied.contentThemeSelection, local.contentThemeSelection)
+        XCTAssertEqual(applied.contentThemeFamily, local.contentThemeFamily)
         XCTAssertEqual(applied.lightContentTheme, local.lightContentTheme)
         XCTAssertEqual(applied.darkContentTheme, local.darkContentTheme)
         XCTAssertEqual(applied.contentWidth, local.contentWidth)
@@ -290,7 +294,10 @@ final class CloudSyncModelTests: XCTestCase {
         let original = BrowserPreferences()
         var changed = original
         changed.applicationAppearance = .dark
-        changed.contentAppearance = .system
+        changed.contentAppearance = .dark
+        changed.contentThemeSelection = .individual
+        changed.contentThemeFamily = ContentThemeFamily(name: "Personal", isCustom: true,
+                                                       lightTheme: "custom/day.css", darkTheme: "custom/night.css")
         changed.lightContentTheme = "sandDunes"
         changed.darkContentTheme = "custom:Evening.css"
         changed.contentWidth = .full
@@ -318,6 +325,8 @@ final class CloudSyncModelTests: XCTestCase {
         let applied = decoded.applying(to: local)
         XCTAssertEqual(applied.homepage, remote.values.homepage)
         XCTAssertEqual(applied.contentAppearance, local.contentAppearance)
+        XCTAssertEqual(applied.contentThemeSelection, local.contentThemeSelection)
+        XCTAssertEqual(applied.contentThemeFamily, local.contentThemeFamily)
         XCTAssertEqual(applied.lightContentTheme, local.lightContentTheme)
         XCTAssertEqual(applied.darkContentTheme, local.darkContentTheme)
         XCTAssertEqual(applied.contentWidth, local.contentWidth)
