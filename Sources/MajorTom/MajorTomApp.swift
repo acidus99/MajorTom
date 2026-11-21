@@ -2252,20 +2252,7 @@ private struct BrowserTabView: View {
                     }
                 }
                 .overlay(alignment: .bottomTrailing) {
-                    HStack(spacing: 7) {
-                        if browser.session.isLoading {
-                            ProgressView()
-                                .controlSize(.small)
-                        }
-                        Text(browser.session.statusText)
-                            .lineLimit(1)
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 9)
-                    .padding(.vertical, 5)
-                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 7))
-                    .padding(8)
+                    BrowserPageStatusView(session: session)
                 }
             }
 
