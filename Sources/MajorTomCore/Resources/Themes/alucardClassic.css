@@ -1,0 +1,45 @@
+/*
+@name Alucard Classic
+@appearance light
+@author Dracula Theme
+@description A warm ivory canvas with charcoal text, violet headings, blue links, and rich jewel-toned accents. Adapted by Acidus from the official Alucard Classic palette.
+@source https://draculatheme.com/spec
+*/
+
+/* 1. PALETTE — the main colors of this theme. */
+:root {
+  --background: #fffbeb;
+  --text: #1f1f1f;
+  --secondary-text: #6c664b;
+  --link: #036a96;
+  --accent: #a3144d;
+}
+
+/* 2. CONTENT COLORS — mappings, mixes, and additional colors chosen for this theme. */
+:root {
+  --body-text: var(--text);
+  --heading-text: #644ac9;
+  --bold-text: #a34d14;
+  --italic-text: #846e15;
+  --underline-text: var(--text);
+  --link-text: var(--link);
+  --link-hover-text: var(--accent);
+  --quote-text: #846e15;
+  --caption-text: color-mix(in srgb, var(--text) 40%, var(--secondary-text));
+  --list-marker: var(--accent);
+  --quote-border: var(--secondary-text);
+  --quote-background: transparent;
+  --pre-text: var(--text);
+  --pre-background: #efeddc;
+  --inline-code-text: #14710a;
+  --inline-code-background: var(--pre-background);
+  --selection-background: #cfcfde;
+  --selection-text: var(--text);
+  --focus-ring: var(--heading-text);
+  --danger-text: #cb3a2a;
+}
+
+/* 3. ELEMENT OVERRIDES — optional changes to typography, spacing, and decoration. */
+main {
+  /* Add element overrides here. */
+}

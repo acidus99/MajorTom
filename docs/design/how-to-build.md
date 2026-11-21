@@ -164,8 +164,9 @@ Review the generated notes and assets in GitHub, then publish the draft manually
 
 ### Content theme resources
 
-The Core target's SwiftPM resource bundle contains `Base.css`, `Print.css`, and the
-built-in `Themes/*.css` files. `Scripts/build-app.sh` copies
+The Core target's SwiftPM resource bundle contains `Base.css`, `Print.css`, the
+built-in `Themes/*.css` files, and the separate `ThemeTemplates/*.css` starters.
+The [theme-authoring reference](content-themes.md) owns their behavior. `Scripts/build-app.sh` copies
 `MajorTom_MajorTomCore.bundle` into the app's `Contents/Resources` before signing.
 Keep this bundle with the executable when packaging; built-in themes are never copied
 into the editable Application Support Themes directory.

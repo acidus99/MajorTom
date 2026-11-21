@@ -20,10 +20,10 @@ public enum BrowserDocumentScript {
                 return;
             }
             event.preventDefault();
-            const imageLine = anchor?.closest('.link-line[data-mt-expandable]') ||
+            const imageLine = anchor?.closest('a[data-mt-expandable]') ||
               anchor?.closest('figure')?.previousElementSibling;
             window.webkit.messageHandlers.majorTomContextMenu.postMessage({
-              href: anchor?.href ?? '', imageLine: imageLine?.matches('.link-line') ? imageLine.id : ''
+              href: anchor?.href ?? '', imageLine: imageLine?.matches('a[data-mt-expandable]') ? imageLine.id : ''
             });
         }, true);
         """,
@@ -167,8 +167,8 @@ public enum BrowserDocumentScript {
         source: """
         (() => {
           const report = (block) => {
-            if (!(block instanceof HTMLDetailsElement) || !block.matches('.preformatted.is-multiline')) { return; }
-            const blocks = Array.from(document.querySelectorAll('.preformatted'));
+            if (!(block instanceof HTMLDetailsElement) || !block.matches('details.is-multiline')) { return; }
+            const blocks = Array.from(document.querySelectorAll('details'));
             const index = blocks.indexOf(block);
             if (index < 0) { return; }
             window.webkit.messageHandlers.majorTomPreformattedState.postMessage({ index: index + 1, collapsed: !block.open });
@@ -227,7 +227,7 @@ extension BrowserDocumentScript {
         """
         (() => {
           const collapsed = new Set([\(indices.sorted().map(String.init).joined(separator: ","))]);
-          document.querySelectorAll('.preformatted').forEach((block, index) => {
+          document.querySelectorAll('details').forEach((block, index) => {
             if (collapsed.has(index + 1)) { block.open = false; }
           });
         })();
@@ -248,7 +248,7 @@ extension BrowserDocumentScript {
         """
         (() => {
           const collapsed = new Set([\(collapsed.sorted().map(String.init).joined(separator: ","))]);
-          document.querySelectorAll('.preformatted').forEach((block, index) => {
+          document.querySelectorAll('details').forEach((block, index) => {
             if (collapsed.has(index + 1)) { block.open = false; }
           });
           window.scrollTo(0, \(offset));
@@ -305,7 +305,7 @@ extension BrowserDocumentScript {
           image.dataset.mtMime = \(jsLiteral(mimeType));
           image.dataset.mtSize = \(jsLiteral(size));
           const line = image.closest('figure')?.previousElementSibling;
-          if (line?.matches('.link-line')) { line.dataset.mtImageLoaded = 'true'; }
+          if (line?.matches('a[data-mt-expandable]')) { line.dataset.mtImageLoaded = 'true'; }
           window.majorTomEnhanceInlineImage?.(image);
         })();
         """

@@ -166,20 +166,20 @@ final class GeminiStreamingTests: XCTestCase {
         XCTAssertFalse(unlabelled.contains("<pre title="))
     }
 
-    func testAutomaticThemePreferenceMigratesToDraculaDark() throws {
+    func testAutomaticThemePreferenceMigratesToDraculaClassic() throws {
         let decoded = try JSONDecoder().decode(
             BrowserPreferences.self,
             from: Data(#"{"contentTheme":"automatic"}"#.utf8)
         )
         XCTAssertEqual(decoded.contentAppearance, .dark)
-        XCTAssertEqual(decoded.darkContentTheme, "draculaDark")
+        XCTAssertEqual(decoded.darkContentTheme, "system/draculaClassic.css")
     }
 
-    func testBrowserPreferencesUseMajorTomHomepageAndDraculaDarkByDefault() {
+    func testBrowserPreferencesUseMajorTomHomepageAndDraculaClassicByDefault() {
         let preferences = BrowserPreferences()
         XCTAssertEqual(preferences.homepage, "gemini://gemi.dev/major-tom/")
         XCTAssertEqual(preferences.contentAppearance, .dark)
-        XCTAssertEqual(preferences.darkContentTheme, "draculaDark")
+        XCTAssertEqual(preferences.darkContentTheme, "system/draculaClassic.css")
         XCTAssertFalse(preferences.automaticallyLoadsSameCapsuleImages)
         XCTAssertEqual(preferences.imageRequestInterval, 2)
     }
@@ -272,7 +272,7 @@ final class GeminiStreamingTests: XCTestCase {
             customSearchEndpoint: "gemini://search.example/query",
             applicationAppearance: .dark,
             contentAppearance: .light,
-            lightContentTheme: "draculaLight",
+            lightContentTheme: "system/alucardClassic.css",
             contentWidth: .wide,
             proxy: GeminiProxyConfiguration(host: "proxy.example", port: 8080),
             automaticallyLoadsSameCapsuleImages: false

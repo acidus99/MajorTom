@@ -1,28 +1,45 @@
 /*
 @name Creamsicle
 @appearance light
+@author Acidus
+@description Cream pages with burnt-orange headings, teal links, and caramel emphasis. Apricot panels give quotations and preformatted text a warm backdrop.
 */
 
-/* Document colors and component roles supplied by this theme. */
+/* 1. PALETTE — the main colors of this theme. */
 :root {
   --background: #fff7ed;
-  --surface: #ffcc80;
-  --foreground: #43200d;
-  --muted: #76523e;
-  --heading: #c2410c;
+  --text: #43200d;
+  --secondary-text: #76523e;
   --link: #006477;
-  --link-hover: #9a3412;
   --accent: #ff8c00;
-  --strong: #a83a0b;
-  --emphasis: #7c4a03;
-  --code: #00675b;
-  --danger: #b42318;
-  --selection: #ffad42;
-  --blockquote: var(--foreground);
-  --quote-surface: var(--surface);
-  --quote-border: var(--muted);
-  --quote-radius: 0 .4rem .4rem 0;
-  --caption: color-mix(in srgb, var(--foreground) 40%, var(--muted));
+}
+
+/* 2. CONTENT COLORS — mappings, mixes, and additional colors chosen for this theme. */
+:root {
+  --body-text: var(--text);
+  --heading-text: #c2410c;
+  --bold-text: #a83a0b;
+  --italic-text: #7c4a03;
+  --underline-text: var(--text);
+  --link-text: var(--link);
+  --link-hover-text: #9a3412;
+  --quote-text: var(--text);
+  --caption-text: color-mix(in srgb, var(--text) 40%, var(--secondary-text));
   --list-marker: var(--accent);
-  --selection-foreground: var(--foreground);
+  --quote-border: var(--secondary-text);
+  --quote-background: var(--pre-background);
+  --pre-text: var(--text);
+  --pre-background: #ffcc80;
+  --inline-code-text: #00675b;
+  --inline-code-background: var(--pre-background);
+  --selection-background: #ffad42;
+  --selection-text: var(--text);
+  --focus-ring: var(--heading-text);
+  --danger-text: #b42318;
+}
+
+/* 3. ELEMENT OVERRIDES — optional changes to typography, spacing, and decoration. */
+main {
+  /* Quotations have softly rounded outer corners. */
+  blockquote { border-radius: 0 .4rem .4rem 0; }
 }

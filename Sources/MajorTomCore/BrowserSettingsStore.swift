@@ -65,9 +65,23 @@ public final class BrowserSettingsStore: ObservableObject {
             preferences: loadedPreferences,
             modifiedAt: loadedModifiedAt
         )
-        if needsSameCapsuleImageMigration, storedData != nil {
+        let savedFields = storedData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let needsThemeReferenceMigration = savedFields.map {
+            ($0["lightContentTheme"] as? String) != loadedPreferences.lightContentTheme
+                || ($0["darkContentTheme"] as? String) != loadedPreferences.darkContentTheme
+        } ?? false
+        if storedData != nil, needsSameCapsuleImageMigration || needsThemeReferenceMigration {
             persist()
         }
+    }
+
+    /// Persist repaired references immediately so deleted files cannot remain the saved choice.
+    public func reconcileContentThemes(in themes: [ContentTheme]) {
+        var updated = preferences
+        updated.reconcileContentThemes(in: themes)
+        guard updated != preferences else { return }
+        preferences = updated
+        flushPendingWrites()
     }
 
     private func persist() {

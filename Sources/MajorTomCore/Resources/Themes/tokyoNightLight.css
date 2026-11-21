@@ -1,0 +1,54 @@
+/*
+@name Tokyo Night
+@appearance light
+@author Enkia
+@description A cool mist-gray page with indigo ink, violet highlights, and deep blue links. Adapted by Acidus from the popular Tokyo Night Light template.
+@source https://github.com/tokyo-night/tokyo-night-vscode-theme
+*/
+
+/* 1. PALETTE — the main colors of this theme. */
+:root {
+  --background: #e6e7ed;
+  --text: #343b59;
+  --secondary-text: #707280;
+  --link: #2959aa;
+  --accent: #7b43ba;
+}
+
+/* 2. CONTENT COLORS — mappings, mixes, and additional colors chosen for this theme.
+   Text mixes tune accent brightness and keep small supporting text readable. */
+:root {
+  --body-text: var(--text);
+  --heading-text: var(--accent);
+  --bold-text: color-mix(in srgb, #8f5e15 95%, #000000);
+  --italic-text: #33635c;
+  --underline-text: var(--text);
+  --link-text: var(--link);
+  --link-hover-text: color-mix(in srgb, var(--link-text) 80%, var(--text));
+  --quote-text: var(--text);
+  --caption-text: color-mix(in srgb, var(--secondary-text) 65%, var(--text));
+  --list-marker: var(--accent);
+  --quote-border: var(--accent);
+  --quote-background: var(--pre-background);
+  --pre-text: var(--text);
+  --pre-background: #dfe0e5;
+  --inline-code-text: #0f4b6e;
+  --inline-code-background: var(--pre-background);
+  --selection-background: color-mix(in srgb, var(--accent) 20%, var(--background));
+  --selection-text: var(--text);
+  --focus-ring: var(--link-text);
+  --danger-text: #a83b3b;
+}
+
+/* 3. ELEMENT OVERRIDES — optional changes to typography, spacing, and decoration. */
+main {
+  h1 { /* First-level heading overrides. */ }
+  h2 { /* Second-level heading overrides. */ }
+  h3 { /* Third-level heading overrides. */ }
+  a { /* Link overrides. */ }
+  strong { /* Bold text overrides. */ }
+  em { /* Italic text overrides. */ }
+  blockquote { /* Quotation overrides. */ }
+  summary { /* Preformatted description overrides. */ }
+  pre { /* Preformatted content overrides. */ }
+}

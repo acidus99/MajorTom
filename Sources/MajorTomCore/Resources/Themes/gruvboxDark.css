@@ -1,0 +1,54 @@
+/*
+@name Gruvbox
+@appearance dark
+@author morhetz
+@description A cozy warm-gray canvas with parchment text, golden headings, and rusty orange highlights. Adapted by Acidus from the popular Gruvbox template.
+@source https://github.com/morhetz/gruvbox
+*/
+
+/* 1. PALETTE — the main colors of this theme. */
+:root {
+  --background: #282828;
+  --text: #ebdbb2;
+  --secondary-text: #a89984;
+  --link: #83a598;
+  --accent: #fe8019;
+}
+
+/* 2. CONTENT COLORS — mappings, mixes, and additional colors chosen for this theme.
+   Text mixes tune accent brightness and keep small supporting text readable. */
+:root {
+  --body-text: var(--text);
+  --heading-text: #fabd2f;
+  --bold-text: #fe8019;
+  --italic-text: #d3869b;
+  --underline-text: var(--text);
+  --link-text: var(--link);
+  --link-hover-text: color-mix(in srgb, var(--link-text) 80%, var(--text));
+  --quote-text: var(--text);
+  --caption-text: var(--secondary-text);
+  --list-marker: var(--accent);
+  --quote-border: var(--accent);
+  --quote-background: var(--pre-background);
+  --pre-text: var(--text);
+  --pre-background: #32302f;
+  --inline-code-text: #b8bb26;
+  --inline-code-background: var(--pre-background);
+  --selection-background: color-mix(in srgb, var(--accent) 20%, var(--background));
+  --selection-text: var(--text);
+  --focus-ring: var(--link-text);
+  --danger-text: color-mix(in srgb, #fb4934 90%, #ffffff);
+}
+
+/* 3. ELEMENT OVERRIDES — optional changes to typography, spacing, and decoration. */
+main {
+  h1 { /* First-level heading overrides. */ }
+  h2 { /* Second-level heading overrides. */ }
+  h3 { /* Third-level heading overrides. */ }
+  a { /* Link overrides. */ }
+  strong { /* Bold text overrides. */ }
+  em { /* Italic text overrides. */ }
+  blockquote { /* Quotation overrides. */ }
+  summary { /* Preformatted description overrides. */ }
+  pre { /* Preformatted content overrides. */ }
+}

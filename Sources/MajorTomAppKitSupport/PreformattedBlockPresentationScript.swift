@@ -12,7 +12,7 @@ public enum PreformattedBlockPresentationScript {
         source: """
         (() => {
           const enhance = (block) => {
-            if (!(block instanceof HTMLDetailsElement) || !block.matches('.preformatted')) { return; }
+            if (!(block instanceof HTMLDetailsElement) || !block.matches('details')) { return; }
             const pre = block.querySelector(':scope > pre');
             if (!pre) { return; }
             const text = pre.textContent.replace(/\\n$/, '');
@@ -32,8 +32,8 @@ public enum PreformattedBlockPresentationScript {
           const containingBlocks = (node) => {
             node = node instanceof Element ? node : node.parentElement;
             if (!node) { return []; }
-            const blocks = Array.from(node.querySelectorAll?.('.preformatted') || []);
-            const containing = node.closest?.('.preformatted');
+            const blocks = Array.from(node.querySelectorAll?.('details') || []);
+            const containing = node.closest?.('details');
             if (containing) { blocks.push(containing); }
             return blocks;
           };
@@ -50,14 +50,14 @@ public enum PreformattedBlockPresentationScript {
           }).observe(document, { childList: true, characterData: true, subtree: true });
 
           document.addEventListener('DOMContentLoaded', () => {
-            document.querySelectorAll('.preformatted').forEach(enhance);
+            document.querySelectorAll('details').forEach(enhance);
           });
 
           const expandedMultilineBlockFor = (target) => {
             const element = target instanceof Element ? target : target?.parentElement;
             const pre = element?.closest('pre');
             const block = pre?.parentElement;
-            return block?.matches('details.preformatted.is-multiline[open]') ? block : null;
+            return block?.matches('details.is-multiline[open]') ? block : null;
           };
 
           const collapse = (block) => {

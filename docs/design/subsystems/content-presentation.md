@@ -44,8 +44,10 @@ and surface; preparing a preview cannot mutate the active document or history cu
 
 Application appearance and content appearance are independent. Content supports
 System, Light, and Dark, separate light/dark selections, and Narrow (60ch), Wide
-(80ch), and Full widths. Default content is Dracula Dark; the default light theme
-is Dracula Light. Use system typography and responsive gutters.
+(80ch), and Full widths. Default content is Dracula Classic; the default light theme
+is Alucard Classic. Either selection slot accepts any theme; single-appearance themes
+retain their declared appearance, while dual-appearance themes follow the slot. Use
+system typography and responsive gutters.
 
 CSS is the palette authority. Resolve computed colors in isolated WebKit and apply
 ANSI foreground contrast of at least 4.5:1. Honor ANSI backgrounds only with an

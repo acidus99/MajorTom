@@ -20,7 +20,10 @@ let package = Package(
             dependencies: [
                 .product(name: "GRDB", package: "GRDB.swift")
             ],
-            resources: [.copy("Resources/Base.css"), .copy("Resources/Print.css"), .copy("Resources/Themes")]
+            resources: [
+                .copy("Resources/Base.css"), .copy("Resources/Print.css"),
+                .copy("Resources/Themes"), .copy("Resources/ThemeTemplates")
+            ]
         ),
         .target(name: "MajorTomAppKitSupport", dependencies: ["MajorTomCore"]),
         .executableTarget(

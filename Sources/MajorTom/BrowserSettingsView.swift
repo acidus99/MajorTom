@@ -4,6 +4,7 @@ import MajorTomCore
 import SwiftUI
 
 struct BrowserSettingsView: View {
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject private var store = ApplicationServices.settings
     @ObservedObject private var cloud = ApplicationServices.cloud
     @ObservedObject private var themes = ApplicationServices.themes
@@ -133,8 +134,6 @@ struct BrowserSettingsView: View {
             .help("Choose whether content uses the light theme, the dark theme, or follows macOS appearance.")
             contentThemePicker("Light content theme", appearance: .light, selection: \.lightContentTheme)
             contentThemePicker("Dark content theme", appearance: .dark, selection: \.darkContentTheme)
-            Button("Open Custom Themes in Finder") { themes.openCustomThemesInFinder() }
-                .help("Open the folder for custom CSS themes. Saved changes apply automatically.")
             if let error = themes.error {
                 Text(error)
                     .font(.callout)
@@ -158,17 +157,21 @@ struct BrowserSettingsView: View {
         _ title: String, appearance: ContentThemeAppearance,
         selection: WritableKeyPath<BrowserPreferences, String>
     ) -> some View {
-        let available = themes.themes.filter { $0.appearance.supports(appearance) }
         let selected = store.preferences[keyPath: selection]
-        return Picker(title, selection: store.binding(selection)) {
-            ForEach(available) { theme in
-                Text(theme.label).tag(theme.id)
+        let label = themes.themes.first { $0.id == selected }?.label
+            ?? ContentTheme.fallback(in: themes.themes, for: appearance).label
+        return LabeledContent(title) {
+            Button {
+                ContentThemePickerSelection.shared.prepare(for: appearance)
+                openWindow(id: "content-themes")
+            } label: {
+                Text(label)
+                Image(systemName: "chevron.right")
             }
-            if !available.contains(where: { $0.id == selected }) {
-                Text("Unavailable Theme (Using Dracula \(appearance.label))").tag(selected)
-            }
+            .accessibilityLabel("Choose \(title.lowercased())")
+            .accessibilityValue(label)
         }
-        .help("Select the theme for \(appearance.label.lowercased()) content. Each name shows its supported appearances.")
+        .help("Preview and choose any theme for the \(appearance.label.lowercased()) content setting.")
     }
 
     private var networking: some View {

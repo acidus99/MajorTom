@@ -6,16 +6,20 @@ The goal and working principles live in [AGENTS.md](../../AGENTS.md).
 
 ## Subsystems
 
-| Subsystem | Responsibility |
-| --- | --- |
-| [UI](subsystems/ui.md) | Native windows, tabs, menus, controls, accessibility, and all dialogs. |
-| [Browser](subsystems/browser.md) | User actions, feature workflows, per-tab navigation, and coordination. |
-| [Networking](subsystems/networking.md) | Requests, protocol framing, streaming responses, and resource scheduling. |
-| [Security and Identity](subsystems/security-and-identity.md) | Server trust, client identities, and destination scope. |
-| [Parsing](subsystems/parsing.md) | Response bodies interpreted as structured content. |
-| [Content Presentation](subsystems/content-presentation.md) | Safe WebKit rendering, themes, and document interactions. |
-| [Cache](subsystems/cache.md) | Response reuse, freshness, limits, and invalidation. |
-| [Data Persistence](subsystems/data-persistence.md) | Local storage, repositories, migrations, and remote synchronization. |
+- [UI](subsystems/ui.md): Native windows, tabs, menus, controls, accessibility, and all
+  dialogs.
+- [Browser](subsystems/browser.md): User actions, feature workflows, per-tab navigation,
+  and coordination.
+- [Networking](subsystems/networking.md): Requests, protocol framing, streaming
+  responses, and resource scheduling.
+- [Security and Identity](subsystems/security-and-identity.md): Server trust, client
+  identities, and destination scope.
+- [Parsing](subsystems/parsing.md): Response bodies interpreted as structured content.
+- [Content Presentation](subsystems/content-presentation.md): Safe WebKit rendering,
+  themes, and document interactions.
+- [Cache](subsystems/cache.md): Response reuse, freshness, limits, and invalidation.
+- [Data Persistence](subsystems/data-persistence.md): Local storage, repositories,
+  migrations, and remote synchronization.
 
 These are responsibility boundaries, not a requirement for eight Swift targets.
 Browser contains focused feature components, not one application-wide coordinator.

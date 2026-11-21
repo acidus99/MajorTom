@@ -1,0 +1,54 @@
+/*
+@name Solarized
+@appearance dark
+@author Ethan Schoonover
+@description A deep teal night canvas with warm gold and softly luminous blue-green details. Adapted by Acidus from the popular Solarized template.
+@source https://ethanschoonover.com/solarized/
+*/
+
+/* 1. PALETTE — the main colors of this theme. */
+:root {
+  --background: #002b36;
+  --text: #93a1a1;
+  --secondary-text: #657b83;
+  --link: #268bd2;
+  --accent: #b58900;
+}
+
+/* 2. CONTENT COLORS — mappings, mixes, and additional colors chosen for this theme.
+   Text mixes tune accent brightness and keep small supporting text readable. */
+:root {
+  --body-text: var(--text);
+  --heading-text: var(--accent);
+  --bold-text: color-mix(in srgb, #cb4b16 75%, #ffffff);
+  --italic-text: #859900;
+  --underline-text: var(--text);
+  --link-text: color-mix(in srgb, var(--link) 90%, #ffffff);
+  --link-hover-text: color-mix(in srgb, var(--link-text) 80%, var(--text));
+  --quote-text: var(--text);
+  --caption-text: color-mix(in srgb, var(--secondary-text) 5%, var(--text));
+  --list-marker: var(--accent);
+  --quote-border: var(--accent);
+  --quote-background: var(--pre-background);
+  --pre-text: var(--text);
+  --pre-background: #073642;
+  --inline-code-text: color-mix(in srgb, #2aa198 85%, #ffffff);
+  --inline-code-background: var(--pre-background);
+  --selection-background: color-mix(in srgb, var(--accent) 15%, var(--background));
+  --selection-text: var(--text);
+  --focus-ring: var(--link-text);
+  --danger-text: color-mix(in srgb, #dc322f 70%, #ffffff);
+}
+
+/* 3. ELEMENT OVERRIDES — optional changes to typography, spacing, and decoration. */
+main {
+  h1 { /* First-level heading overrides. */ }
+  h2 { /* Second-level heading overrides. */ }
+  h3 { /* Third-level heading overrides. */ }
+  a { /* Link overrides. */ }
+  strong { /* Bold text overrides. */ }
+  em { /* Italic text overrides. */ }
+  blockquote { /* Quotation overrides. */ }
+  summary { /* Preformatted description overrides. */ }
+  pre { /* Preformatted content overrides. */ }
+}

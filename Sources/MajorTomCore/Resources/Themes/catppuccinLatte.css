@@ -1,0 +1,54 @@
+/*
+@name Catppuccin Latte
+@appearance light
+@author Catppuccin
+@description A soft lavender-white page with gentle mauve, rose, and peach details. Adapted by Acidus from the popular Catppuccin Latte template.
+@source https://catppuccin.com/palette/
+*/
+
+/* 1. PALETTE — the main colors of this theme. */
+:root {
+  --background: #eff1f5;
+  --text: #4c4f69;
+  --secondary-text: #6c6f85;
+  --link: #1e66f5;
+  --accent: #8839ef;
+}
+
+/* 2. CONTENT COLORS — mappings, mixes, and additional colors chosen for this theme.
+   Text mixes tune accent brightness and keep small supporting text readable. */
+:root {
+  --body-text: var(--text);
+  --heading-text: var(--accent);
+  --bold-text: color-mix(in srgb, #fe640b 70%, #000000);
+  --italic-text: color-mix(in srgb, #ea76cb 65%, #000000);
+  --underline-text: var(--text);
+  --link-text: color-mix(in srgb, var(--link) 95%, #000000);
+  --link-hover-text: color-mix(in srgb, var(--link-text) 80%, var(--text));
+  --quote-text: var(--text);
+  --caption-text: color-mix(in srgb, var(--secondary-text) 70%, var(--text));
+  --list-marker: var(--accent);
+  --quote-border: var(--accent);
+  --quote-background: var(--pre-background);
+  --pre-text: var(--text);
+  --pre-background: #e6e9ef;
+  --inline-code-text: color-mix(in srgb, #40a02b 70%, #000000);
+  --inline-code-background: var(--pre-background);
+  --selection-background: color-mix(in srgb, var(--accent) 20%, var(--background));
+  --selection-text: var(--text);
+  --focus-ring: var(--link-text);
+  --danger-text: #d20f39;
+}
+
+/* 3. ELEMENT OVERRIDES — optional changes to typography, spacing, and decoration. */
+main {
+  h1 { /* First-level heading overrides. */ }
+  h2 { /* Second-level heading overrides. */ }
+  h3 { /* Third-level heading overrides. */ }
+  a { /* Link overrides. */ }
+  strong { /* Bold text overrides. */ }
+  em { /* Italic text overrides. */ }
+  blockquote { /* Quotation overrides. */ }
+  summary { /* Preformatted description overrides. */ }
+  pre { /* Preformatted content overrides. */ }
+}

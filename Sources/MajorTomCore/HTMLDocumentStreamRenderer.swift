@@ -95,7 +95,7 @@ public final class HTMLDocumentStreamRenderer {
         let base = baseURL.map {
             "<base href=\"\(Self.escapeAttribute($0.absoluteString))\">"
         } ?? ""
-        let documentClass = kind == .gemtext ? "" : " class=\"\(kind.rawValue)-page\""
+        let documentClass = " class=\"\(kind.rawValue)-page\""
         let html = """
         <!doctype html>
         <html data-appearance="\(appearance.rawValue)">
@@ -167,7 +167,10 @@ public final class HTMLDocumentStreamRenderer {
             let hintMarkup = hint.map {
                 "<span class=\"link-hint\" aria-hidden=\"true\">\(Self.escape($0.rawValue))</span>"
             } ?? ""
-            var attributes = "class=\"link-line\(hint == nil ? "" : " has-hint")\""
+            var attributes = "href=\"\(Self.escapeAttribute(destination))\""
+            if GemtextLinkHint.isInlineImageCandidate(destination: destination, relativeTo: baseURL) {
+                attributes += " class=\"image-link\""
+            }
             if let linkIdentifier {
                 attributes += " id=\"\(Self.escapeAttribute(linkIdentifier))\""
             }
@@ -177,7 +180,7 @@ public final class HTMLDocumentStreamRenderer {
                     attributes += " data-mt-image-auto=\"\(imageLoading.rawValue)\""
                 }
             }
-            html = "<p \(attributes)>\(hintMarkup)<a href=\"\(Self.escapeAttribute(destination))\">\(Self.renderInline(visibleText, options: options))</a></p>"
+            html = "<a \(attributes)>\(hintMarkup)\(Self.renderInline(visibleText, options: options))</a>"
         case .listItem(let text):
             html = "<li>\(Self.renderInline(text, options: options))</li>\n"
         case .quote(let text):
@@ -207,7 +210,7 @@ public final class HTMLDocumentStreamRenderer {
             let tooltip = altText.map {
                 " title=\"\(Self.escapeAttribute($0))\""
             } ?? ""
-            html = "<details class=\"preformatted\" open>\n<summary\(unlabelled)>\(summary)</summary>\n<pre\(tooltip)>"
+            html = "<details open>\n<summary\(unlabelled)>\(summary)</summary>\n<pre\(tooltip)>"
         case .preformattedLine(let text):
             // HTML consumes a newline immediately after <pre>. Double only that
             // initial empty line so the DOM retains the author's first blank line.
@@ -282,7 +285,7 @@ public final class HTMLDocumentStreamRenderer {
         return Data(html.utf8)
     }
 
-    public static let sourceStart = "<h1>Page Source</h1>\n<ol class=\"source-lines\">\n"
+    public static let sourceStart = "<h1>Page Source</h1>\n<ol>\n"
     public static let sourceEnd = "</ol>\n"
 
     public static func sourceLine(_ line: String) -> String {
@@ -316,7 +319,7 @@ public final class HTMLDocumentStreamRenderer {
         Data("""
         <h1>\(Self.escape(title))</h1>
         <p>\(Self.escape(message))</p>
-        <pre class="message-details">\(Self.escape(details))</pre>
+        <pre>\(Self.escape(details))</pre>
 
         """.utf8)
     }

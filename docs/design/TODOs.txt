@@ -5,7 +5,7 @@ agents may suggest Features or Bugs. Unverified reports need reproduction.
 
 - Reading Improvements - Improve plain-text presentation and actions for unsupported non-text content; agree on examples first.
 - Local Translation - Explore macOS APIs and Always Translate. Test: gemini://ploum.net/2026-08-03-offpunk_manifesto.gmi
-- Theme Management - Import, duplicate, and preview CSS themes.
+- Theme Management - Import CSS themes through the picker.
 - Tab Commands - Review Safari-style commands such as Close Tabs to the Right; identify remaining gaps.
 - Outline - Navigate headings in a collapsible or floating panel.
 - Bookmarks Import - A generic import format alongside Lagrange and Alhena.

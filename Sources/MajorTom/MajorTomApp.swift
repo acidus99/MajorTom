@@ -244,6 +244,13 @@ struct MajorTomApp: App {
         .windowResizability(.contentSize)
         .restorationBehavior(.disabled)
 
+        Window("Content Themes", id: "content-themes") {
+            ContentThemePickerView()
+        }
+        .defaultSize(width: 1_020, height: 740)
+        .defaultLaunchBehavior(.suppressed)
+        .restorationBehavior(.disabled)
+
         Settings {
             BrowserSettingsView()
         }

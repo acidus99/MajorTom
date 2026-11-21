@@ -1,0 +1,54 @@
+/*
+@name Solarized
+@appearance light
+@author Ethan Schoonover
+@description A sun-warmed cream page with blue links and earthy violet, orange, and green accents. Adapted by Acidus from the popular Solarized template.
+@source https://ethanschoonover.com/solarized/
+*/
+
+/* 1. PALETTE — the main colors of this theme. */
+:root {
+  --background: #fdf6e3;
+  --text: #4f656c;
+  --secondary-text: #839496;
+  --link: #268bd2;
+  --accent: #cb4b16;
+}
+
+/* 2. CONTENT COLORS — mappings, mixes, and additional colors chosen for this theme.
+   Text mixes tune accent brightness and keep small supporting text readable. */
+:root {
+  --body-text: var(--text);
+  --heading-text: color-mix(in srgb, #6c71c4 90%, #000000);
+  --bold-text: color-mix(in srgb, #cb4b16 95%, #000000);
+  --italic-text: color-mix(in srgb, #859900 75%, #000000);
+  --underline-text: var(--text);
+  --link-text: color-mix(in srgb, var(--link) 80%, #000000);
+  --link-hover-text: color-mix(in srgb, var(--link-text) 80%, var(--text));
+  --quote-text: var(--text);
+  --caption-text: color-mix(in srgb, var(--secondary-text) 10%, var(--text));
+  --list-marker: var(--accent);
+  --quote-border: var(--accent);
+  --quote-background: var(--pre-background);
+  --pre-text: var(--text);
+  --pre-background: #eee8d5;
+  --inline-code-text: color-mix(in srgb, #2aa198 70%, #000000);
+  --inline-code-background: var(--pre-background);
+  --selection-background: color-mix(in srgb, var(--accent) 15%, var(--background));
+  --selection-text: var(--text);
+  --focus-ring: var(--link-text);
+  --danger-text: color-mix(in srgb, #dc322f 95%, #000000);
+}
+
+/* 3. ELEMENT OVERRIDES — optional changes to typography, spacing, and decoration. */
+main {
+  h1 { /* First-level heading overrides. */ }
+  h2 { /* Second-level heading overrides. */ }
+  h3 { /* Third-level heading overrides. */ }
+  a { /* Link overrides. */ }
+  strong { /* Bold text overrides. */ }
+  em { /* Italic text overrides. */ }
+  blockquote { /* Quotation overrides. */ }
+  summary { /* Preformatted description overrides. */ }
+  pre { /* Preformatted content overrides. */ }
+}

@@ -1,24 +1,48 @@
+/* Base defaults have lower priority than normal theme rules. */
+@layer majortom-base {
 /* Default document colors, with related roles inheriting from the main palette. */
 :root {
   --background: Canvas;
   --foreground: CanvasText;
-  --surface: color-mix(in srgb, var(--foreground) 8%, var(--background));
+  --surface: color-mix(in srgb, var(--text) 8%, var(--background));
   --muted: GrayText;
   --accent: AccentColor;
-  --heading: var(--foreground);
+  --heading: var(--text);
   --link: LinkText;
   --link-hover: var(--link);
-  --strong: var(--foreground);
-  --emphasis: var(--foreground);
-  --code: var(--foreground);
-  --caption: color-mix(in srgb, var(--foreground) 40%, var(--muted));
+  --strong: var(--text);
+  --emphasis: var(--text);
+  --code: var(--text);
+  --caption: color-mix(in srgb, var(--text) 40%, var(--muted));
   --list-marker: var(--accent);
-  --blockquote: var(--foreground);
+  --blockquote: var(--text);
   --quote-border: var(--accent);
   --quote-surface: transparent;
   --selection: Highlight;
   --selection-foreground: HighlightText;
   --danger: var(--accent);
+
+  /* Palette and content roles. Legacy names above remain supported for custom files. */
+  --text: var(--foreground);
+  --secondary-text: var(--caption);
+  --body-text: var(--text);
+  --heading-text: var(--heading);
+  --bold-text: var(--strong);
+  --italic-text: var(--emphasis);
+  --underline-text: var(--text);
+  --link-text: var(--link);
+  --link-hover-text: var(--link-hover);
+  --quote-text: var(--blockquote);
+  --caption-text: var(--secondary-text);
+  --quote-background: var(--quote-surface);
+  --pre-text: var(--text);
+  --pre-background: var(--surface);
+  --inline-code-text: var(--code);
+  --inline-code-background: var(--surface);
+  --selection-background: var(--selection);
+  --selection-text: var(--selection-foreground);
+  --focus-ring: var(--heading-text);
+  --danger-text: var(--danger);
 
   /* Shared typography: themes can adjust these without replacing selector rules. */
   --body-font: -apple-system, BlinkMacSystemFont, sans-serif;
@@ -49,7 +73,7 @@
 body {
   margin: 0;
   padding-top: var(--navigation-height);
-  color: var(--foreground);
+  color: var(--body-text);
   background: var(--background);
 }
 
@@ -64,15 +88,15 @@ main {
 
 /* Selected text uses the theme's selection colors. */
 ::selection {
-  color: var(--selection-foreground);
-  background: var(--selection);
+  color: var(--selection-text);
+  background: var(--selection-background);
 }
 
 /* Headings and paragraphs */
 
 /* Headings share compact line spacing; source blank lines supply their outer spacing. */
 h1, h2, h3 {
-  color: var(--heading);
+  color: var(--heading-text);
   line-height: var(--heading-leading);
   margin: 0;
 }
@@ -94,7 +118,7 @@ h3 {
 }
 
 /* Headings following content without a source blank line still have a clear section gap. */
-main > :is(p, ul, blockquote, .preformatted, pre, figure) + :is(h1, h2, h3) {
+main > :is(p, a, ul, blockquote, details, pre, figure) + :is(h1, h2, h3) {
   margin-block-start: 0.75lh;
 }
 
@@ -104,17 +128,17 @@ main > :is(h1, h2, h3) + :is(h1, h2, h3) {
 }
 
 /* Text directly following a heading has a small gap; an intervening br supplies its own. */
-main > :is(h1, h2, h3) + :is(p, ul, blockquote, .preformatted, pre, figure) {
+main > :is(h1, h2, h3) + :is(p, a, ul, blockquote, details, pre, figure) {
   margin-block-start: 0.5lh;
 }
 
 /* Quotes and art get separation when the preceding content has no blank line. */
-main > :is(p, ul, blockquote, .preformatted, pre, figure) + :is(blockquote, .preformatted, pre) {
+main > :is(p, a, ul, blockquote, details, pre, figure) + :is(blockquote, details, pre) {
   margin-block-start: 0.5lh;
 }
 
 /* Content following a quote or art has a gap unless a source break already separates it. */
-main > :is(blockquote, .preformatted, pre) + :is(p, ul, figure) {
+main > :is(blockquote, details, pre) + :is(p, a, ul, figure) {
   margin-block-start: 0.5lh;
 }
 
@@ -130,20 +154,28 @@ p {
 
 /* Strong emphasis retains the author's characters and uses the theme's strong color. */
 strong {
-  color: var(--strong);
+  color: var(--bold-text);
 }
 
 /* Italic emphasis uses the theme's emphasis color. */
 em {
-  color: var(--emphasis);
+  color: var(--italic-text);
+}
+
+/* Underlined text uses the theme's text color, with a matching underline. */
+u {
+  color: var(--underline-text);
+  text-decoration-line: underline;
+  text-decoration-color: currentColor;
+  text-underline-offset: 0.15em;
 }
 
 /* Inline code has a monospace face and a small tinted background. */
 code {
-  color: var(--code);
+  color: var(--inline-code-text);
   font-family: var(--mono-font);
   font-size: 0.92em;
-  background: var(--surface);
+  background: var(--inline-code-background);
   border-radius: 0.25rem;
   padding: 0.08em 0.28em;
 }
@@ -152,50 +184,48 @@ code {
 
 /* Links use the theme's link color with a slightly separated underline. */
 a {
-  color: var(--link);
+  color: var(--link-text);
   text-underline-offset: 0.15em;
 }
 
 /* Hovered and focused links use the theme's alternate link color. */
 a:hover, a:focus {
-  color: var(--link-hover);
+  color: var(--link-hover-text);
 }
 
 /* Keyboard-focused links have a visible outline. */
 a:focus-visible {
-  outline: 2px solid var(--heading);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
-/* Standalone Gemtext links have closer spacing than ordinary paragraphs. */
-.link-line {
+/* Standalone Gemtext links are blocks with a hit area limited to the label. */
+main > a {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
   margin: 0.15rem 0;
 }
 
-/* Links with a destination hint align their labels in a shared text column. */
-.link-line.has-hint {
-  display: grid;
-  grid-template-columns: 1.6rem minmax(0, 1fr);
-  align-items: baseline;
+/* A hinted link reserves a hanging column without adding a line wrapper. */
+main > a:has(> .link-hint) {
+  position: relative;
+  box-sizing: border-box;
+  padding-inline-start: 1.6rem;
 }
 
-/* A link's hit area stops at its visible label rather than filling its grid cell. */
-.link-line.has-hint > a {
-  justify-self: start;
-  min-inline-size: 0;
-  max-inline-size: 100%;
-}
-
-/* Decorative destination hints stay outside text selection and VoiceOver reading. */
+/* Destination hints stay outside text selection and VoiceOver reading. */
 .link-hint {
-  color: var(--caption);
+  position: absolute;
+  inset-inline-start: 0;
+  color: var(--caption-text);
   font-size: 0.9em;
   -webkit-user-select: none;
   user-select: none;
 }
 
 /* A queued image uses the system clock symbol, tinted with the link's color. */
-.link-line.is-image-pending > a::after {
+a.is-image-pending::after {
   content: "";
   display: inline-block;
   width: 0.85em;
@@ -207,7 +237,7 @@ a:focus-visible {
 }
 
 /* Only an active network request spins. */
-.link-line.is-loading > a::after {
+a.is-loading::after {
   content: "";
   display: inline-block;
   width: 0.72em;
@@ -252,8 +282,8 @@ blockquote {
   padding: 0.25rem 0.75rem;
   border-inline-start: 0.25rem solid var(--quote-border);
   border-radius: var(--quote-radius);
-  color: var(--blockquote);
-  background: var(--quote-surface);
+  color: var(--quote-text);
+  background: var(--quote-background);
   font-style: italic;
 }
 
@@ -281,8 +311,8 @@ pre {
   margin: 0;
   padding: 0.75rem;
   border-radius: 0.4rem;
-  color: var(--foreground);
-  background: var(--surface);
+  color: var(--pre-text);
+  background: var(--pre-background);
   font: var(--mono-size) / var(--mono-leading) var(--mono-font);
   font-kerning: none;
   font-variant-ligatures: none;
@@ -291,62 +321,62 @@ pre {
 }
 
 /* A preformatted disclosure groups its caption with the original text. */
-.preformatted {
+details {
   margin: 0;
 }
 
 /* Collapsed preformatted blocks show their descriptive caption as a disclosure control. */
-.preformatted > summary {
+details > summary {
   display: flex;
   align-items: center;
   gap: 0.4rem;
   padding: 0.1rem 0;
-  color: var(--caption);
+  color: var(--caption-text);
   font-size: var(--caption-size);
   cursor: pointer;
   list-style: none;
 }
 
 /* Expanded preformatted blocks show the text instead of repeating its caption. */
-.preformatted[open] > summary {
+details[open] > summary {
   display: none;
 }
 
 /* The caption supplies its own disclosure triangle in place of WebKit's marker. */
-.preformatted > summary::-webkit-details-marker {
+details > summary::-webkit-details-marker {
   display: none;
 }
 
 /* A small triangle identifies the collapsed preformatted disclosure. */
-.preformatted > summary::before {
+details > summary::before {
   content: "\25B8";
   font-size: 0.8em;
   line-height: 1;
 }
 
 /* A fallback caption is italic when the capsule supplied no description. */
-.preformatted > summary.is-unlabelled {
+details > summary.is-unlabelled {
   font-style: italic;
 }
 
 /* Hovered preformatted captions use the ordinary text color. */
-.preformatted > summary:hover {
-  color: var(--foreground);
+details > summary:hover {
+  color: var(--pre-text);
 }
 
 /* The disclosure supplies the outer margin for its preformatted text. */
-.preformatted > pre {
+details > pre {
   margin: 0;
 }
 
 /* Expanded multiline art indicates that a click can collapse the block. */
-.preformatted.is-multiline[open] > pre {
+details.is-multiline[open] > pre {
   cursor: pointer;
 }
 
 /* Keyboard-focused multiline art has a visible collapse-control outline. */
-.preformatted.is-multiline[open] > pre:focus-visible {
-  outline: 3px solid var(--heading);
+details.is-multiline[open] > pre:focus-visible {
+  outline: 3px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -379,7 +409,7 @@ figure img {
 
 /* Image captions use smaller supporting text. */
 figcaption {
-  color: var(--caption);
+  color: var(--caption-text);
   font-size: var(--caption-size);
 }
 
@@ -389,7 +419,7 @@ figcaption {
 .incomplete {
   margin-top: 2rem;
   padding: 0.8rem 1rem;
-  border: 1px solid var(--danger);
+  border: 1px solid var(--danger-text);
   border-radius: 0.6rem;
 }
 
@@ -400,24 +430,24 @@ figcaption {
 
 /* Error headings use the danger color without affecting other page headings. */
 .message-page h1 {
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 /* Technical error details preserve line breaks and wrap long addresses. */
-.message-details {
+.message-page pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
 /* View Source presents the original lines as a native numbered list. */
-.source-lines {
+.source-page ol {
   margin: 1rem 0;
   padding-inline-start: 3.5rem;
   font: var(--mono-size) / 1.5 var(--mono-font);
 }
 
 /* Source lines preserve whitespace, wrap long lines, and give empty lines their height. */
-.source-lines > li {
+.source-page ol > li {
   min-height: 1.5em;
   padding-inline-start: 0.75rem;
   white-space: pre-wrap;
@@ -425,13 +455,13 @@ figcaption {
 }
 
 /* Native source line numbers use the theme's supporting text color. */
-.source-lines > li::marker {
-  color: var(--caption);
+.source-page ol > li::marker {
+  color: var(--caption-text);
 }
 
 /* Hovering a source line highlights the line being inspected. */
-.source-lines > li:hover {
-  background: var(--surface);
+.source-page ol > li:hover {
+  background: var(--pre-background);
 }
 
 /* Standalone image pages */
@@ -481,7 +511,7 @@ figcaption {
 
 /* Keyboard focus on the image zoom control outlines the visible image region. */
 .image-toggle:focus-visible + .image-frame {
-  outline: 3px solid var(--heading);
+  outline: 3px solid var(--focus-ring);
   outline-offset: -3px;
 }
 
@@ -496,4 +526,6 @@ figcaption {
 .image-toggle:checked + .image-frame > img {
   max-width: none;
   max-height: none;
+}
+
 }

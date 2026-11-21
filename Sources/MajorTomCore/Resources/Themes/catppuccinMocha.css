@@ -1,0 +1,54 @@
+/*
+@name Catppuccin Mocha
+@appearance dark
+@author Catppuccin
+@description A cozy violet-black canvas with creamy text and soft peach, pink, and lavender highlights. Adapted by Acidus from the popular Catppuccin Mocha template.
+@source https://catppuccin.com/palette/
+*/
+
+/* 1. PALETTE — the main colors of this theme. */
+:root {
+  --background: #1e1e2e;
+  --text: #cdd6f4;
+  --secondary-text: #a6adc8;
+  --link: #89b4fa;
+  --accent: #cba6f7;
+}
+
+/* 2. CONTENT COLORS — mappings, mixes, and additional colors chosen for this theme.
+   Text mixes tune accent brightness and keep small supporting text readable. */
+:root {
+  --body-text: var(--text);
+  --heading-text: var(--accent);
+  --bold-text: #fab387;
+  --italic-text: #f5c2e7;
+  --underline-text: var(--text);
+  --link-text: var(--link);
+  --link-hover-text: color-mix(in srgb, var(--link-text) 80%, var(--text));
+  --quote-text: var(--text);
+  --caption-text: var(--secondary-text);
+  --list-marker: var(--accent);
+  --quote-border: var(--accent);
+  --quote-background: var(--pre-background);
+  --pre-text: var(--text);
+  --pre-background: #181825;
+  --inline-code-text: #a6e3a1;
+  --inline-code-background: var(--pre-background);
+  --selection-background: color-mix(in srgb, var(--accent) 20%, var(--background));
+  --selection-text: var(--text);
+  --focus-ring: var(--link-text);
+  --danger-text: #f38ba8;
+}
+
+/* 3. ELEMENT OVERRIDES — optional changes to typography, spacing, and decoration. */
+main {
+  h1 { /* First-level heading overrides. */ }
+  h2 { /* Second-level heading overrides. */ }
+  h3 { /* Third-level heading overrides. */ }
+  a { /* Link overrides. */ }
+  strong { /* Bold text overrides. */ }
+  em { /* Italic text overrides. */ }
+  blockquote { /* Quotation overrides. */ }
+  summary { /* Preformatted description overrides. */ }
+  pre { /* Preformatted content overrides. */ }
+}

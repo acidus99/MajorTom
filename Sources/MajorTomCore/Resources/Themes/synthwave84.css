@@ -1,0 +1,54 @@
+/*
+@name SynthWave ’84
+@appearance dark
+@author Robb Owen
+@description A midnight-plum canvas alive with neon pink, electric cyan, and arcade-yellow highlights. Adapted by Acidus from the popular SynthWave ’84 template.
+@source https://github.com/robb0wen/synthwave-vscode
+*/
+
+/* 1. PALETTE — the main colors of this theme. */
+:root {
+  --background: #262335;
+  --text: #ffffff;
+  --secondary-text: #9b8aaf;
+  --link: #36f9f6;
+  --accent: #ff7edb;
+}
+
+/* 2. CONTENT COLORS — mappings, mixes, and additional colors chosen for this theme.
+   Text mixes tune accent brightness and keep small supporting text readable. */
+:root {
+  --body-text: var(--text);
+  --heading-text: var(--accent);
+  --bold-text: #fede5d;
+  --italic-text: #72f1b8;
+  --underline-text: var(--text);
+  --link-text: var(--link);
+  --link-hover-text: color-mix(in srgb, var(--link-text) 80%, var(--text));
+  --quote-text: var(--text);
+  --caption-text: var(--secondary-text);
+  --list-marker: var(--accent);
+  --quote-border: var(--accent);
+  --quote-background: var(--pre-background);
+  --pre-text: var(--text);
+  --pre-background: #241b2f;
+  --inline-code-text: #f97e72;
+  --inline-code-background: var(--pre-background);
+  --selection-background: color-mix(in srgb, var(--accent) 20%, var(--background));
+  --selection-text: var(--text);
+  --focus-ring: var(--link-text);
+  --danger-text: color-mix(in srgb, #fe4450 95%, #ffffff);
+}
+
+/* 3. ELEMENT OVERRIDES — optional changes to typography, spacing, and decoration. */
+main {
+  h1 { /* First-level heading overrides. */ }
+  h2 { /* Second-level heading overrides. */ }
+  h3 { /* Third-level heading overrides. */ }
+  a { /* Link overrides. */ }
+  strong { /* Bold text overrides. */ }
+  em { /* Italic text overrides. */ }
+  blockquote { /* Quotation overrides. */ }
+  summary { /* Preformatted description overrides. */ }
+  pre { /* Preformatted content overrides. */ }
+}

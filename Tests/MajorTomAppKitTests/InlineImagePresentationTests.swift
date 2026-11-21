@@ -18,7 +18,7 @@ final class InlineImagePresentationTests: XCTestCase {
         let off = ImageTestDocument()
         try await off.load(off.html(mode: .off, count: 1))
         XCTAssertTrue(off.messages.isEmpty)
-        _ = try await off.js("document.querySelector('.link-line > a').click()")
+        _ = try await off.js("document.querySelector('main > a').click()")
         try await off.wait { off.messages.count == 1 }
         XCTAssertEqual(off.messages[0]["action"], "click")
     }
@@ -50,16 +50,16 @@ final class InlineImagePresentationTests: XCTestCase {
 
     @MainActor
     func testPendingClockAndActiveSpinnerInBothAppearances() async throws {
-        for theme in ContentTheme.bundled.filter({ ["draculaLight", "draculaDark"].contains($0.id) }) {
+        for theme in ContentTheme.bundled.filter({ ["system/alucardClassic.css", "system/draculaClassic.css"].contains($0.id) }) {
             let document = ImageTestDocument()
             try await document.load(document.html(mode: .whenVisible, count: 1, theme: theme))
-            let original = try await document.js("document.querySelector('.link-line > a').textContent") as? String
+            let original = try await document.js("document.querySelector('main > a').textContent") as? String
             for state in [GeminiImageLoader.State.pending, .requesting, .idle] {
                 _ = try await document.js("window.majorTomSetImageState('image-0', '\(state.rawValue)')")
                 let result = try await document.js("""
                 (() => {
                   const line = document.getElementById('image-0');
-                  const anchor = line.querySelector('a');
+                  const anchor = line;
                   const style = getComputedStyle(anchor, '::after');
                   return {
                     pending: line.classList.contains('is-image-pending'),
@@ -85,7 +85,7 @@ final class InlineImagePresentationTests: XCTestCase {
                     XCTAssertNil(values["description"] as? String)
                 }
             }
-            _ = try await document.js("window.majorTomSetImageState('image-0', 'pending'); document.querySelector('.link-line > a').click()")
+            _ = try await document.js("window.majorTomSetImageState('image-0', 'pending'); document.querySelector('main > a').click()")
             try await document.wait { document.messages.contains { $0["action"] == "click" } }
         }
     }
@@ -162,7 +162,7 @@ final class InlineImagePresentationTests: XCTestCase {
             notBusy: stopped.every(line => line.getAttribute('aria-busy') === 'false'),
             unfinishedGone: !document.getElementById('figure-0') && !document.getElementById('figure-1'),
             finishedKept: !!document.getElementById('figure-2'),
-            linkKept: stopped.every(line => !!line.querySelector('a[href]'))
+            linkKept: stopped.every(line => line.matches('a[href]'))
           };
         })()
         """) as? [String: Bool]
@@ -176,7 +176,7 @@ final class InlineImagePresentationTests: XCTestCase {
         """)
         try await document.renderFrame()
         XCTAssertEqual(document.messages.count, 3)
-        _ = try await document.js("document.querySelector('#image-0 > a').click()")
+        _ = try await document.js("document.querySelector('#image-0').click()")
         try await document.wait { document.messages.count == 4 }
         XCTAssertEqual(document.messages.last?["id"], "image-0")
         XCTAssertEqual(document.messages.last?["action"], "click")

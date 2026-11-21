@@ -6,7 +6,7 @@ import MajorTomCore
 
 @MainActor
 final class ContentThemeStore: ObservableObject {
-    @Published private(set) var themes = ContentTheme.bundled
+    @Published private(set) var themes: [ContentTheme] = []
     @Published private(set) var resolved: ResolvedContentTheme?
     @Published private(set) var error: String?
     let themeDidChange = PassthroughSubject<Void, Never>()
@@ -16,10 +16,13 @@ final class ContentThemeStore: ObservableObject {
     private var watchers: [any DispatchSourceFileSystemObject] = []
     private var cancellables = Set<AnyCancellable>()
     private var appearanceObservation: NSKeyValueObservation?
+    private var catalogGeneration = 0
+    private var catalogTask: Task<Void, Never>?
     private var refreshTask: Task<Void, Never>?
     private var resolutionTask: Task<Void, Never>?
     private var generation = 0
     private var pendingSelection: (theme: ContentTheme, appearance: ContentThemeAppearance)?
+    private var hasLoadedCatalog = false
     private var catalogError: String?
 
     init(settings: BrowserSettingsStore, directory: URL?) {
@@ -45,7 +48,28 @@ final class ContentThemeStore: ObservableObject {
         } catch { self.error = error.localizedDescription }
     }
 
+    func createTheme(name: String, appearance: ContentThemeAppearance, copying original: ContentTheme?) async throws -> ContentTheme {
+        guard let directory else { throw CocoaError(.fileNoSuchFile) }
+        let url = try await Task.detached(priority: .utility) {
+            try ContentThemeAuthoring.create(in: directory, name: name, appearance: appearance, copying: original)
+        }.value
+        reloadThemes()
+        await waitForCatalog()
+        guard let theme = themes.first(where: { $0.id == "custom/" + url.lastPathComponent }) else {
+            throw CocoaError(.fileReadUnknown)
+        }
+        return theme
+    }
+
+    func openInEditor(_ theme: ContentTheme) throws {
+        guard theme.isCustom, let directory,
+              themes.contains(where: { $0.id == theme.id }) else { throw CocoaError(.fileNoSuchFile) }
+        let url = directory.appendingPathComponent(String(theme.id.dropFirst("custom/".count)))
+        guard NSWorkspace.shared.open(url) else { throw CocoaError(.fileReadUnknown) }
+    }
+
     func waitUntilReady() async {
+        await waitForCatalog()
         while resolved == nil, let task = resolutionTask {
             let requestedGeneration = generation
             await task.value
@@ -53,29 +77,58 @@ final class ContentThemeStore: ObservableObject {
         }
     }
 
-    private func reloadThemes() {
-        do {
-            guard let directory else { throw CocoaError(.fileNoSuchFile) }
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let custom = try ContentTheme.loadCustomThemes(in: directory)
-            themes = ContentTheme.bundled + custom.themes
-            catalogError = custom.errors.isEmpty ? nil : custom.errors.joined(separator: "\n")
-            error = catalogError
-            watch(directory)
-        } catch {
-            catalogError = error.localizedDescription
-            self.error = catalogError
+    private func waitForCatalog() async {
+        while let task = catalogTask {
+            let requestedGeneration = catalogGeneration
+            await task.value
+            if requestedGeneration == catalogGeneration { return }
         }
-        resolveSelection()
     }
 
-    private func watch(_ directory: URL) {
+    private func reloadThemes() {
+        catalogGeneration += 1
+        catalogTask?.cancel()
+        let directory = directory
+        catalogTask = Task { @MainActor [weak self] in
+            let catalog = await Task.detached(priority: .utility) {
+                var themes: [ContentTheme] = []
+                var errors: [String] = []
+                do {
+                    let bundled = try ContentTheme.loadBundledThemes(in: ContentTheme.bundledDirectory)
+                    themes += bundled.themes
+                    errors += bundled.errors
+                } catch { errors.append(error.localizedDescription) }
+                do {
+                    guard let directory else { throw CocoaError(.fileNoSuchFile) }
+                    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                    let custom = try ContentTheme.loadCustomThemes(in: directory)
+                    themes += custom.themes
+                    errors += custom.errors
+                } catch { errors.append(error.localizedDescription) }
+                return (themes: themes, errors: errors)
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            hasLoadedCatalog = true
+            themes = catalog.themes
+            catalogError = catalog.errors.isEmpty ? nil : catalog.errors.joined(separator: "\n")
+            error = catalogError
+            watchThemes()
+            resolveSelection()
+        }
+    }
+
+    private func watchThemes() {
         watchers.forEach { $0.cancel() }
         watchers.removeAll()
-        // Watch individual files as well as the directory: editors may modify in place
-        // or replace a file atomically. Reinstall watches after either kind of save.
-        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
-        for url in [directory] + files.filter({ $0.pathExtension.lowercased() == "css" }) {
+        // Watch files for in-place writes and their directories for replacement/deletion.
+        // The custom folder's parent also observes recreation after the folder is removed.
+        var urls = [ContentTheme.bundledDirectory]
+        if let directory { urls += [directory, directory.deletingLastPathComponent()] }
+        for theme in themes {
+            let root = theme.isCustom ? directory : ContentTheme.bundledDirectory
+            if let root { urls.append(root.appendingPathComponent((theme.id as NSString).lastPathComponent)) }
+        }
+        for url in urls {
             let descriptor = open(url.path, O_EVTONLY)
             guard descriptor >= 0 else { continue }
             let source = DispatchSource.makeFileSystemObjectSource(
@@ -100,6 +153,9 @@ final class ContentThemeStore: ObservableObject {
     }
 
     private func resolveSelection() {
+        // Do not reconcile against an initial empty catalog while its files are loading.
+        guard hasLoadedCatalog else { return }
+        settings.reconcileContentThemes(in: themes)
         let systemIsDark = NSApplication.shared.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let selection = ContentTheme.selected(
             in: themes, preferences: settings.preferences, systemIsDark: systemIsDark

@@ -104,8 +104,8 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         customSearchEndpoint: String = "",
         applicationAppearance: ApplicationAppearance = .system,
         contentAppearance: ContentAppearance = .dark,
-        lightContentTheme: String = "draculaLight",
-        darkContentTheme: String = "draculaDark",
+        lightContentTheme: String = ContentTheme.defaultLightIdentifier,
+        darkContentTheme: String = ContentTheme.defaultDarkIdentifier,
         contentWidth: ContentWidth = .narrow,
         proxy: GeminiProxyConfiguration? = nil,
         automaticallyLoadsSameCapsuleImages: Bool = false,
@@ -121,8 +121,8 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         self.customSearchEndpoint = customSearchEndpoint
         self.applicationAppearance = applicationAppearance
         self.contentAppearance = contentAppearance
-        self.lightContentTheme = lightContentTheme
-        self.darkContentTheme = darkContentTheme
+        self.lightContentTheme = ContentTheme.currentIdentifier(lightContentTheme)
+        self.darkContentTheme = ContentTheme.currentIdentifier(darkContentTheme)
         self.contentWidth = contentWidth
         self.proxy = proxy
         self.sameCapsuleImageLoading = sameCapsuleImageLoading ?? (automaticallyLoadsSameCapsuleImages ? .whenVisible : .off)
@@ -131,6 +131,17 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         self.renderingOptions = renderingOptions
         self.showsFavicons = showsFavicons
         self.showsFavoritesBar = showsFavoritesBar
+    }
+
+    /// Replace missing files in both slots, including the currently inactive slot.
+    /// Returning a file later must not resurrect an obsolete selection.
+    public mutating func reconcileContentThemes(in themes: [ContentTheme]) {
+        func existingOrFallback(_ identifier: String, slot: ContentThemeAppearance) -> String {
+            let current = ContentTheme.currentIdentifier(identifier)
+            return themes.contains { $0.id == current } ? current : ContentTheme.fallback(in: themes, for: slot).id
+        }
+        lightContentTheme = existingOrFallback(lightContentTheme, slot: .light)
+        darkContentTheme = existingOrFallback(darkContentTheme, slot: .dark)
     }
 
     private enum LegacyCodingKeys: String, CodingKey { case contentTheme, automaticallyLoadsSameCapsuleImages }
@@ -158,15 +169,17 @@ public struct BrowserPreferences: Equatable, Codable, Sendable {
         // Preserve a fixed theme's appearance when upgrading from the Swift palettes.
         let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
             .decodeIfPresent(String.self, forKey: .contentTheme)
-        let legacyTheme = ContentTheme.bundled.first { $0.id == legacy }
+        let legacyTheme = ContentTheme.bundled.first { $0.id == legacy.map(ContentTheme.currentIdentifier) }
         contentAppearance = try container.decodeIfPresent(ContentAppearance.self, forKey: .contentAppearance)
             ?? (legacyTheme?.appearance == .light ? .light : defaults.contentAppearance)
-        lightContentTheme = try container.decodeIfPresent(String.self, forKey: .lightContentTheme)
+        let savedLightTheme = try container.decodeIfPresent(String.self, forKey: .lightContentTheme)
             ?? (legacyTheme?.appearance == .light ? legacyTheme?.id : nil)
             ?? defaults.lightContentTheme
-        darkContentTheme = try container.decodeIfPresent(String.self, forKey: .darkContentTheme)
+        let savedDarkTheme = try container.decodeIfPresent(String.self, forKey: .darkContentTheme)
             ?? (legacyTheme?.appearance == .dark ? legacyTheme?.id : nil)
             ?? defaults.darkContentTheme
+        lightContentTheme = ContentTheme.currentIdentifier(savedLightTheme)
+        darkContentTheme = ContentTheme.currentIdentifier(savedDarkTheme)
         contentWidth = try container.decodeIfPresent(ContentWidth.self, forKey: .contentWidth)
             ?? defaults.contentWidth
         // Genuinely optional: absent and "no proxy" are the same thing.

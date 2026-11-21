@@ -1,0 +1,54 @@
+/*
+@name Nord
+@appearance light
+@author Acidus
+@description A clean icy wash of snow-white, blue, and violet with cool slate text. Adapted by Acidus as a light version inspired by Nord and the community OneNord Light palette.
+@source https://github.com/rmehri01/onenord.nvim/blob/main/lua/onenord/colors/onenordlight.lua
+*/
+
+/* 1. PALETTE — the main colors of this theme. */
+:root {
+  --background: #eceff4;
+  --text: #2e3440;
+  --secondary-text: #646a76;
+  --link: #3879c5;
+  --accent: #5e81ac;
+}
+
+/* 2. CONTENT COLORS — mappings, mixes, and additional colors chosen for this theme.
+   Text mixes tune accent brightness and keep small supporting text readable. */
+:root {
+  --body-text: var(--text);
+  --heading-text: color-mix(in srgb, var(--accent) 80%, #000000);
+  --bold-text: color-mix(in srgb, #9f4aca 90%, #000000);
+  --italic-text: color-mix(in srgb, #ba793e 75%, #000000);
+  --underline-text: var(--text);
+  --link-text: color-mix(in srgb, var(--link) 85%, #000000);
+  --link-hover-text: color-mix(in srgb, var(--link-text) 80%, var(--text));
+  --quote-text: var(--text);
+  --caption-text: color-mix(in srgb, var(--secondary-text) 95%, var(--text));
+  --list-marker: var(--accent);
+  --quote-border: var(--accent);
+  --quote-background: var(--pre-background);
+  --pre-text: var(--text);
+  --pre-background: #e5e9f0;
+  --inline-code-text: color-mix(in srgb, #3ea1ad 65%, #000000);
+  --inline-code-background: var(--pre-background);
+  --selection-background: color-mix(in srgb, var(--accent) 20%, var(--background));
+  --selection-text: var(--text);
+  --focus-ring: var(--link-text);
+  --danger-text: color-mix(in srgb, #c53b40 95%, #000000);
+}
+
+/* 3. ELEMENT OVERRIDES — optional changes to typography, spacing, and decoration. */
+main {
+  h1 { /* First-level heading overrides. */ }
+  h2 { /* Second-level heading overrides. */ }
+  h3 { /* Third-level heading overrides. */ }
+  a { /* Link overrides. */ }
+  strong { /* Bold text overrides. */ }
+  em { /* Italic text overrides. */ }
+  blockquote { /* Quotation overrides. */ }
+  summary { /* Preformatted description overrides. */ }
+  pre { /* Preformatted content overrides. */ }
+}

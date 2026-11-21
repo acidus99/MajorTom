@@ -27,17 +27,20 @@ coalesce observation-heavy writes without losing explicit user intent.
 
 ## Data ownership and remote scope
 
-| Data | Remote behavior |
-| --- | --- |
-| Bookmarks, folders, order, latest bookmark favicon observation | Account-scoped CloudKit records |
-| Homepage, search provider/custom endpoint, all Quality of Life settings | iCloud Key-Value Store |
-| Client identity descriptors and capsule/path assignments | Account-scoped CloudKit records |
-| Actual certificate/private key | Keychain; iCloud Keychain only when requested |
-| Open-tab URL/title/favicon summaries | Replaceable CloudKit summary per Mac |
-| Server trust, history, input drafts, windows/tabs/Back–Forward, response bytes | Local only |
-| All Appearance and Networking settings, Favorites-bar visibility, custom themes | Local only |
-| Default browser registration | Per-Mac macOS state, owned by UI |
-| Downloads and explicitly saved exports | User-selected destinations, outside app sync |
+- Bookmarks, folders, order, latest bookmark favicon observation: Account-scoped
+  CloudKit records
+- Homepage, search provider/custom endpoint, all Quality of Life settings: iCloud
+  Key-Value Store
+- Client identity descriptors and capsule/path assignments: Account-scoped CloudKit
+  records
+- Actual certificate/private key: Keychain; iCloud Keychain only when requested
+- Open-tab URL/title/favicon summaries: Replaceable CloudKit summary per Mac
+- Server trust, history, input drafts, windows/tabs/Back–Forward, response bytes: Local
+  only
+- All Appearance and Networking settings, Favorites-bar visibility, custom themes: Local
+  only
+- Default browser registration: Per-Mac macOS state, owned by UI
+- Downloads and explicitly saved exports: User-selected destinations, outside app sync
 
 Keep durable user data, session/visit snapshots, and disposable responses in separate
 stores. Persist domain records and exact source, never views, WebKit objects, network

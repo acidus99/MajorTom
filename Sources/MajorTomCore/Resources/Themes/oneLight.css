@@ -1,0 +1,54 @@
+/*
+@name One
+@appearance light
+@author GitHub (Atom)
+@description A clean pale canvas with ink-gray text and lively blue, violet, and ochre details. Adapted by Acidus from the popular One Light template.
+@source https://github.com/atom/one-light-syntax
+*/
+
+/* 1. PALETTE — the main colors of this theme. */
+:root {
+  --background: #fafafa;
+  --text: #383a42;
+  --secondary-text: #696c77;
+  --link: #4078f2;
+  --accent: #a626a4;
+}
+
+/* 2. CONTENT COLORS — mappings, mixes, and additional colors chosen for this theme.
+   Text mixes tune accent brightness and keep small supporting text readable. */
+:root {
+  --body-text: var(--text);
+  --heading-text: var(--accent);
+  --bold-text: #986801;
+  --italic-text: color-mix(in srgb, #50a14f 75%, #000000);
+  --underline-text: var(--text);
+  --link-text: color-mix(in srgb, var(--link) 85%, #000000);
+  --link-hover-text: color-mix(in srgb, var(--link-text) 80%, var(--text));
+  --quote-text: var(--text);
+  --caption-text: color-mix(in srgb, var(--secondary-text) 95%, var(--text));
+  --list-marker: var(--accent);
+  --quote-border: var(--accent);
+  --quote-background: var(--pre-background);
+  --pre-text: var(--text);
+  --pre-background: #f0f0f1;
+  --inline-code-text: color-mix(in srgb, #0184bc 85%, #000000);
+  --inline-code-background: var(--pre-background);
+  --selection-background: color-mix(in srgb, var(--accent) 20%, var(--background));
+  --selection-text: var(--text);
+  --focus-ring: var(--link-text);
+  --danger-text: color-mix(in srgb, #e45649 85%, #000000);
+}
+
+/* 3. ELEMENT OVERRIDES — optional changes to typography, spacing, and decoration. */
+main {
+  h1 { /* First-level heading overrides. */ }
+  h2 { /* Second-level heading overrides. */ }
+  h3 { /* Third-level heading overrides. */ }
+  a { /* Link overrides. */ }
+  strong { /* Bold text overrides. */ }
+  em { /* Italic text overrides. */ }
+  blockquote { /* Quotation overrides. */ }
+  summary { /* Preformatted description overrides. */ }
+  pre { /* Preformatted content overrides. */ }
+}

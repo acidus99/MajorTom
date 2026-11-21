@@ -42,6 +42,7 @@ native Mac quality, faithful content, privacy, and responsiveness are correctnes
 Keep each fact in one document and link to its owner. Document intent, guarantees,
 and non-obvious decisions, not method inventories or implementation walkthroughs.
 Update the owning document when agreed behavior or architecture changes.
+Use prose or lists instead of Markdown tables in design docs for editor compatibility.
 
 ## Working rules
 

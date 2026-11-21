@@ -6,11 +6,87 @@ import XCTest
 
 final class ContentThemeResolverTests: XCTestCase {
     @MainActor
+    func testEmptyCatalogUsesReadableSystemColorsForBothAppearances() async throws {
+        // Removing every CSS file must still produce a usable document rather than crash.
+        for appearance in [ContentAppearance.light, .dark] {
+            let selection = ContentTheme.selected(in: [], preferences: BrowserPreferences(contentAppearance: appearance), systemIsDark: false)
+            let resolved = try await ContentThemeResolver().resolve(selection.theme, appearance: selection.appearance)
+            XCTAssertGreaterThanOrEqual(resolved.palette.foreground.contrastRatio(against: resolved.palette.background), 4.5)
+            XCTAssertGreaterThanOrEqual(resolved.palette.codeForeground.contrastRatio(against: resolved.palette.codeBackground), 4.5)
+        }
+    }
+
+    @MainActor
+    func testStarterPaletteChangesPropagateAndSimpleElementOverridesWin() async throws {
+        // Changing Section 1 must reach text, emphasis, and mixed surfaces without regeneration.
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for appearance in [ContentThemeAppearance.light, .dark] {
+            let url = try ContentThemeAuthoring.create(in: directory, name: "Starter \(appearance.label)", appearance: appearance)
+            let css = try String(contentsOf: url, encoding: .utf8)
+            let theme = try ContentTheme(id: "custom/starter.css", css: css)
+            let before = try await ContentThemeResolver().resolve(theme, appearance: appearance)
+            for role in ["foreground", "heading", "strong", "emphasis", "muted"] {
+                XCTAssertGreaterThanOrEqual(try XCTUnwrap(before.colors[role]).contrastRatio(against: before.palette.background), 4.5)
+            }
+            let changed = try ContentTheme(id: theme.id, css: css + "\n:root { --text: #c3d4e5; --accent: #b28462; }")
+            let after = try await ContentThemeResolver().resolve(changed, appearance: appearance)
+            XCTAssertNotEqual(before.palette.foreground, after.palette.foreground)
+            XCTAssertNotEqual(before.palette.codeBackground, after.palette.codeBackground)
+            XCTAssertEqual(before.palette.background, after.palette.background)
+            XCTAssertEqual(after.colors["strong"], ContentThemeColor(red: 178, green: 132, blue: 98))
+            let overridden = try ContentTheme(id: theme.id, css: changed.css + "\nmain { strong { color: #123456; } pre { color: #654321; } }")
+            let styled = try await ContentThemeResolver().resolve(overridden, appearance: appearance)
+            XCTAssertEqual(styled.colors["strong"], ContentThemeColor(red: 18, green: 52, blue: 86))
+            XCTAssertEqual(styled.palette.codeForeground, ContentThemeColor(red: 101, green: 67, blue: 33))
+            let mainOverride = try ContentTheme(id: theme.id, css: css + "\nmain { color: #123456; }")
+            let mainStyled = try await ContentThemeResolver().resolve(mainOverride, appearance: appearance)
+            XCTAssertEqual(mainStyled.palette.foreground, ContentThemeColor(red: 18, green: 52, blue: 86))
+        }
+    }
+
+    @MainActor
+    func testCopyingBundledThemesPreservesTheirComputedAppearance() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        for original in ContentTheme.bundled {
+            let url = try ContentThemeAuthoring.create(in: directory, name: "\(original.name) Copy", appearance: .light, copying: original)
+            let copy = try ContentTheme(id: "custom/" + url.lastPathComponent, css: String(contentsOf: url, encoding: .utf8))
+            let before = try await ContentThemeResolver().resolve(original, appearance: original.appearance)
+            let after = try await ContentThemeResolver().resolve(copy, appearance: copy.appearance)
+            XCTAssertEqual(before.colors, after.colors, original.name)
+        }
+    }
+
+    @MainActor
+    func testPickerSpecimenUsesNativeStructureAndPreservesPreformattedText() async throws {
+        let theme = ContentTheme.bundled[0]
+        let resolved = try await ContentThemeResolver().resolve(theme, appearance: theme.appearance)
+        let document = ThemeTestDocument()
+        try await document.load(ContentThemePreviewDocument.render(theme: theme, appearance: theme.appearance, palette: resolved.palette))
+        let result = try await document.view.evaluateJavaScript("""
+        (() => ({
+          singleMain: document.querySelectorAll('main').length === 1,
+          headings: ['h1', 'h2', 'h3'].every(tag => !!document.querySelector('main > ' + tag)),
+          inline: ['strong', 'em', 'u', 'code'].every(tag => !!document.querySelector('main ' + tag)),
+          underline: [...document.querySelectorAll('main u')].some(element => getComputedStyle(element).textDecorationLine.includes('underline')),
+          grouping: ['ul > li', 'blockquote > p', 'details > summary', 'details > pre', 'figure > figcaption'].every(selector => !!document.querySelector(selector)),
+          links: [...document.querySelectorAll('main > a')].every(a => !!a.href),
+          image: document.querySelector('figure img').src.startsWith('data:'),
+          whitespace: document.querySelector('pre').textContent.startsWith('       *'),
+          noWrappers: !document.querySelector('main div')
+        }))()
+        """) as? [String: Bool]
+        XCTAssertTrue(try XCTUnwrap(result).values.allSatisfy { $0 })
+    }
+
+    @MainActor
     func testBundledCSSResolvesAndANSIArtRemainsReadable() async throws {
         for theme in ContentTheme.bundled {
             let resolved = try await ContentThemeResolver().resolve(theme, appearance: theme.appearance)
             let palette = resolved.palette
             XCTAssertGreaterThanOrEqual(palette.foreground.contrastRatio(against: palette.background), 4.5, theme.name)
+            XCTAssertGreaterThanOrEqual(palette.codeForeground.contrastRatio(against: palette.codeBackground), 4.5, "\(theme.name): preformatted text")
             for background in [palette.background, palette.codeBackground] {
                 for index in 0...255 {
                     for bold in [false, true] {
@@ -38,7 +114,7 @@ final class ContentThemeResolverTests: XCTestCase {
 
     @MainActor
     func testBothAppearancesUseTheAppChoiceAndResolveFullCSSCascade() async throws {
-        let theme = try ContentTheme(id: "custom:test.css", css: """
+        let theme = try ContentTheme(id: "custom/test.css", css: """
         /*
         @name Both
         @appearance both
@@ -64,7 +140,7 @@ final class ContentThemeResolverTests: XCTestCase {
     @MainActor
     func testEditingOnlyCSSChangesTheResolvedPalette() async throws {
         let header = "/*\n@name Editable\n@appearance dark\n*/\n"
-        let first = try ContentTheme(id: "custom:editable.css", css: header + "body { background: navy; color: white; }")
+        let first = try ContentTheme(id: "custom/editable.css", css: header + "body { background: navy; color: white; }")
         let edited = try ContentTheme(id: first.id, css: header + "body { background: maroon; color: white; }")
         let before = try await ContentThemeResolver().resolve(first, appearance: .dark)
         let after = try await ContentThemeResolver().resolve(edited, appearance: .dark)
@@ -83,8 +159,8 @@ final class ContentThemeResolverTests: XCTestCase {
         try await document.load(html)
         let result = try await document.view.evaluateJavaScript("""
         (() => {
-          const anchor = document.querySelector('.link-line > a');
-          const row = anchor.parentElement.getBoundingClientRect();
+          const anchor = document.querySelector('main > a');
+          const row = document.querySelector('main').getBoundingClientRect();
           const bounds = anchor.getBoundingClientRect();
           const target = document.elementFromPoint(row.right - 5, bounds.y + bounds.height / 2);
           return [bounds.width, row.width, !!target?.closest('a')];
@@ -98,7 +174,7 @@ final class ContentThemeResolverTests: XCTestCase {
     @MainActor
     func testClassicDraculaHasDistinctHeadingEmphasisAndCodeColors() async throws {
         // Prevents a review export silently substituting the older plain Dracula variant.
-        let theme = try XCTUnwrap(ContentTheme.bundled.first { $0.id == "draculaClassic" })
+        let theme = try XCTUnwrap(ContentTheme.bundled.first { $0.id == "system/draculaClassic.css" })
         let resolved = try await ContentThemeResolver().resolve(theme, appearance: .dark)
         for role in ["heading", "strong", "emphasis", "code", "link"] {
             XCTAssertNotEqual(resolved.colors[role], resolved.colors["foreground"], role)
@@ -334,7 +410,7 @@ final class ContentThemeResolverTests: XCTestCase {
                 (() => {
                   const pre = document.querySelector('pre');
                   const main = document.querySelector('main').getBoundingClientRect();
-                  const link = document.querySelector('.link-line > a').getBoundingClientRect();
+                  const link = document.querySelector('main > a').getBoundingClientRect();
                   return [document.documentElement.scrollWidth - document.documentElement.clientWidth,
                           pre.scrollWidth - pre.clientWidth, link.right - main.right];
                 })()

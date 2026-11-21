@@ -7,6 +7,10 @@
     --surface: #f2f2f2;
     --caption: #444444;
     --quote-border: #777777;
+    --body-text: #000000;
+    --caption-text: #444444;
+    --pre-background: #f2f2f2;
+    --inline-code-background: #f2f2f2;
     color-scheme: light;
     font-size: 11pt;
     zoom: 1 !important;
@@ -27,7 +31,7 @@
   }
 
   /* Headings, emphasis, links, and code remain dark on paper. */
-  h1, h2, h3, a, strong, em, code, pre, blockquote {
+  h1, h2, h3, a, strong, em, u, code, pre, blockquote {
     color: var(--foreground) !important;
   }
 
@@ -59,17 +63,17 @@
   }
 
   /* Captions, source line numbers, and decorative link hints use supporting ink. */
-  figcaption, .source-lines > li::marker, .link-hint {
+  figcaption, .source-page ol > li::marker, .link-hint {
     color: var(--caption) !important;
   }
 
   /* Preformatted disclosure captions are unnecessary when all text is printed. */
-  .preformatted > summary {
+  details > summary {
     display: none !important;
   }
 
   /* Collapsed preformatted text is included in the printed document. */
-  .preformatted:not([open]) > pre {
+  details:not([open]) > pre {
     display: block !important;
   }
 
@@ -84,12 +88,12 @@
   }
 
   /* A wrapped source line stays on one printed page. */
-  .source-lines > li {
+  .source-page ol > li {
     break-inside: avoid-page;
   }
 
   /* Source hover highlighting has no printed meaning. */
-  .source-lines > li:hover {
+  .source-page ol > li:hover {
     background: transparent !important;
   }
 

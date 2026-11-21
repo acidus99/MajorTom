@@ -1,0 +1,63 @@
+/*
+@name Custom Theme
+@appearance dark
+@description A personal reading theme.
+*/
+
+/* 1. PALETTE — change these five colors to make this theme your own.
+   You can add @author Your Name to the metadata above. */
+:root {
+  --background: #202326;
+  --text: #e8e6e1;
+  --secondary-text: #9ca3ab;
+  --link: #e5ad7c;
+  --accent: #e5ad7c;
+}
+
+/* 2. CONTENT COLORS — CSS automatically derives these from your palette.
+   Replace any mapping or mix with a specific color if you prefer. */
+:root {
+  --body-text: var(--text);
+  --heading-text: var(--text);
+  --bold-text: var(--accent);
+  --italic-text: var(--text);
+  --underline-text: var(--text);
+  --link-text: var(--link);
+  --link-hover-text: color-mix(in srgb, var(--link) 80%, var(--text));
+  --quote-text: var(--text);
+  --caption-text: var(--secondary-text);
+  --list-marker: var(--accent);
+  --quote-border: var(--accent);
+  --quote-background: transparent;
+  --pre-text: var(--text);
+  --pre-background: color-mix(in srgb, var(--text) 8%, var(--background));
+  --inline-code-text: var(--text);
+  --inline-code-background: var(--pre-background);
+  --selection-background: color-mix(in srgb, var(--accent) 25%, var(--background));
+  --selection-text: var(--text);
+  --focus-ring: var(--accent);
+  --danger-text: var(--accent);
+}
+
+/* 3. ELEMENT OVERRIDES — optional typography, spacing, and decoration.
+   The standard layout is already provided; empty rules change nothing. */
+main {
+  h1 { /* First-level heading overrides. */ }
+  h2 { /* Second-level heading overrides. */ }
+  h3 { /* Third-level heading overrides. */ }
+  p { /* Ordinary text overrides. */ }
+  a { /* Link overrides; .image-link targets image links. */ }
+  strong { /* Bold text overrides. */ }
+  em { /* Italic text overrides. */ }
+  u { /* Underlined text overrides. */ }
+  code { /* Inline code overrides. */ }
+  ul { /* List overrides; li::marker targets bullets. */ }
+  blockquote { /* Quotation overrides. */ }
+  details { /* Whole preformatted block overrides. */ }
+  summary { /* Preformatted description overrides. */ }
+  pre { /* Preformatted content overrides. */ }
+  .link-hint { /* Decorative link hint overrides. */ }
+  figure { /* Image figure overrides. */ }
+  figcaption { /* Image caption overrides. */ }
+}
+

@@ -10,15 +10,14 @@ capsule checkout; the same paths are public on
 `gemini://gemi.dev/`. Keep generated HTML, images, logs, and measurements in
 `/tmp/MajorTom/reading-review`, not `Build/`.
 
-| Capsule path | Coverage |
-| --- | --- |
-| `tests/gemtext.gmi` | Headings, paragraphs, formatting, lists, quotations, art, links |
-| `gemlog/2023-06-30-tables-in-gemtext.gmi` | Mixed prose, quotations, tables, and an image |
-| `gemlog/2023-08-08-more-guppy-feedback.gmi` | Long prose and protocol examples |
-| `apple-ii-history/12.gmi` | Long article, many images, international characters |
-| `apple-ii-history/21.gmi` | Long article, images, supporting notes |
-| `tests/unicode.gmi` | Unicode and font fallback |
-| `tests/links.gmi` | Link labels and targets |
+- `tests/gemtext.gmi`: Headings, paragraphs, formatting, lists, quotations, art, links
+- `gemlog/2023-06-30-tables-in-gemtext.gmi`: Mixed prose, quotations, tables, and an
+  image
+- `gemlog/2023-08-08-more-guppy-feedback.gmi`: Long prose and protocol examples
+- `apple-ii-history/12.gmi`: Long article, many images, international characters
+- `apple-ii-history/21.gmi`: Long article, images, supporting notes
+- `tests/unicode.gmi`: Unicode and font fallback
+- `tests/links.gmi`: Link labels and targets
 
 Also use a self-contained synthetic fixture for blank-line counts, escaped markup,
 ANSI art, and adjacent compact blocks. Preformatted game grids and Braille art are

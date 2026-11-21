@@ -1,0 +1,54 @@
+/*
+@name Monokai
+@appearance light
+@author Acidus
+@description A warm ivory canvas with raspberry, ochre, and leafy green accents. Adapted by Acidus as a light version inspired by Monokai and the warm neutrals of Monokai Pro Light.
+@source https://monokai.pro/
+*/
+
+/* 1. PALETTE — the main colors of this theme. */
+:root {
+  --background: #faf6ef;
+  --text: #2e2b25;
+  --secondary-text: #766c67;
+  --link: #11758a;
+  --accent: #bb1b5c;
+}
+
+/* 2. CONTENT COLORS — mappings, mixes, and additional colors chosen for this theme.
+   Text mixes tune accent brightness and keep small supporting text readable. */
+:root {
+  --body-text: var(--text);
+  --heading-text: var(--accent);
+  --bold-text: #b04e20;
+  --italic-text: #8c6500;
+  --underline-text: var(--text);
+  --link-text: var(--link);
+  --link-hover-text: color-mix(in srgb, var(--link-text) 80%, var(--text));
+  --quote-text: var(--text);
+  --caption-text: color-mix(in srgb, var(--secondary-text) 90%, var(--text));
+  --list-marker: var(--accent);
+  --quote-border: var(--accent);
+  --quote-background: var(--pre-background);
+  --pre-text: var(--text);
+  --pre-background: #f0e9df;
+  --inline-code-text: color-mix(in srgb, #47752c 95%, #000000);
+  --inline-code-background: var(--pre-background);
+  --selection-background: color-mix(in srgb, var(--accent) 20%, var(--background));
+  --selection-text: var(--text);
+  --focus-ring: var(--link-text);
+  --danger-text: #bc2847;
+}
+
+/* 3. ELEMENT OVERRIDES — optional changes to typography, spacing, and decoration. */
+main {
+  h1 { /* First-level heading overrides. */ }
+  h2 { /* Second-level heading overrides. */ }
+  h3 { /* Third-level heading overrides. */ }
+  a { /* Link overrides. */ }
+  strong { /* Bold text overrides. */ }
+  em { /* Italic text overrides. */ }
+  blockquote { /* Quotation overrides. */ }
+  summary { /* Preformatted description overrides. */ }
+  pre { /* Preformatted content overrides. */ }
+}

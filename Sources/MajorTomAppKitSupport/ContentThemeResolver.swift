@@ -134,7 +134,7 @@ public final class ContentThemeResolver: NSObject, WKNavigationDelegate {
       };
       const colors = {
         background: sample('body', 'backgroundColor'),
-        foreground: sample('body', 'color'),
+        foreground: sample('main', 'color'),
         codeBackground: sample('pre', 'backgroundColor'),
         codeForeground: sample('pre', 'color'),
         heading: sample('h1', 'color'), link: sample('a', 'color'),

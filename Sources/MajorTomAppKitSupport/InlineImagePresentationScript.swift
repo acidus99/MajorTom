@@ -53,7 +53,7 @@ public enum InlineImagePresentationScript {
             line.classList.toggle('is-image-pending', state === 'pending');
             line.classList.toggle('is-loading', state === 'requesting');
             line.setAttribute('aria-busy', String(state === 'requesting'));
-            const anchor = line.querySelector(':scope > a');
+            const anchor = line;
             if (!anchor) { return; }
             if (state === 'idle') {
               anchor.removeAttribute('title');
@@ -87,7 +87,7 @@ public enum InlineImagePresentationScript {
           };
           const send = (line, action) => {
             if (action === 'load' && automaticLoadingStopped) { return; }
-            const anchor = line.querySelector(':scope > a');
+            const anchor = line;
             if (!anchor) { return; }
             submitted.add(line.id);
             observer?.unobserve(line);
@@ -133,7 +133,7 @@ public enum InlineImagePresentationScript {
           document.addEventListener('click', (event) => {
             if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || event.button !== 0) { return; }
             const element = event.target instanceof Element ? event.target : event.target?.parentElement;
-            const line = element?.closest('a[href]')?.closest('.link-line[data-mt-expandable]');
+            const line = element?.closest('a[href]')?.closest('a[data-mt-expandable]');
             if (!line) { return; }
             // Once automatically displayed, the original link remains ordinary navigation.
             if (line.dataset.mtImageAuto && line.dataset.mtImageLoaded === 'true') { return; }
@@ -172,8 +172,8 @@ public enum InlineImagePresentationScript {
           document.addEventListener('load', (event) => enhance(event.target), true);
           const discoverTree = (node) => {
             if (!(node instanceof Element)) { return; }
-            if (node.matches('.link-line[data-mt-expandable]')) { discover(node); }
-            node.querySelectorAll('.link-line[data-mt-expandable]').forEach(discover);
+            if (node.matches('a[data-mt-expandable]')) { discover(node); }
+            node.querySelectorAll('a[data-mt-expandable]').forEach(discover);
             if (node.matches('[data-mt-inline-image]')) { enhance(node); }
             node.querySelectorAll('[data-mt-inline-image]').forEach(enhance);
           };
