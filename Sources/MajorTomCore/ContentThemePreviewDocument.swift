@@ -16,13 +16,9 @@ public enum ContentThemePreviewDocument {
             .heading(level: 2, text: "Tonight’s Observations")
         ]
         for event in introduction { document.append(renderer.render(event, baseURL: url)) }
-        // Demonstrate the underline color role while Gemtext underline recognition is still pending.
-        let inlineSample = "<p>"
-            + HTMLDocumentStreamRenderer.renderInline("A paragraph with **bold text**, *italic text*, ")
-            + "<u>underlined text</u>"
-            + HTMLDocumentStreamRenderer.renderInline(", and `inline code` keeps the author’s original markers.")
-            + "</p>"
-        document.append(Data(inlineSample.utf8))
+        document.append(renderer.render(.text(
+            "A paragraph with **bold text**, *italic text*, and `inline code` keeps the author’s original markers."
+        ), baseURL: url))
         let events: [GemtextEvent] = [
             .link(destination: "notes.gmi", label: "Read the observing notes"),
             .link(destination: "gemini://neighbor.invalid/", label: "Visit a neighboring capsule"),

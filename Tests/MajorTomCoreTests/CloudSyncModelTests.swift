@@ -238,6 +238,7 @@ final class CloudSyncModelTests: XCTestCase {
         remote.renderingOptions.recognizesEmphasis.toggle()
         remote.renderingOptions.recognizesStrongEmphasis.toggle()
         remote.renderingOptions.recognizesInlineCode.toggle()
+        remote.renderingOptions.recognizesUnderscoreEmphasis.toggle()
         remote.renderingOptions.collapsesConsecutiveQuotes.toggle()
         remote.renderingOptions.showsLinkHints.toggle()
         remote.renderingOptions.rendersANSIColors.toggle()

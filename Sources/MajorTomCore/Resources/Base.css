@@ -29,7 +29,6 @@
   --heading-text: var(--heading);
   --bold-text: var(--strong);
   --italic-text: var(--emphasis);
-  --underline-text: var(--text);
   --link-text: var(--link);
   --link-hover-text: var(--link-hover);
   --quote-text: var(--blockquote);
@@ -160,14 +159,6 @@ strong {
 /* Italic emphasis uses the theme's emphasis color. */
 em {
   color: var(--italic-text);
-}
-
-/* Underlined text uses the theme's text color, with a matching underline. */
-u {
-  color: var(--underline-text);
-  text-decoration-line: underline;
-  text-decoration-color: currentColor;
-  text-underline-offset: 0.15em;
 }
 
 /* Inline code has a monospace face and a small tinted background. */

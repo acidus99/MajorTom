@@ -52,7 +52,7 @@ appearance, with empty folders omitted and unclassified themes outside the folde
 Family previews have Light and Dark tabs, regardless of Content Appearance.
 
 Show the theme's author, description, and usable source link when supplied. The
-sample covers headings, prose, inline styles including underline, links, lists,
+sample covers headings, prose, inline formatting, links, lists,
 quotations, preformatted content, and images. Previewing changes only the preview;
 Use Theme or Use Family applies the choice, and Cancel preserves the saved choice.
 Previews must not navigate or fetch remote content.

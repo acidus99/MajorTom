@@ -254,22 +254,26 @@ struct BrowserSettingsView: View {
 
     private var qualityOfLife: some View {
         Form {
-            Section("Inline Emphasis") {
-                Text("Apply Markdown-style italics, bold, and monospace formatting. Asterisks and backticks remain visible, so the original content is unchanged.")
+            Section("Inline Formatting") {
+                Text("Recognize commonly inline formatting conventions in text. Formatting characters remain visible, so none of the original text is altered, only its presentation.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
-                Toggle(
-                    "Italicize text between *single asterisks*",
-                    isOn: store.binding(\.renderingOptions.recognizesEmphasis)
-                )
-                Toggle(
-                    "Bold text between **double asterisks**",
-                    isOn: store.binding(\.renderingOptions.recognizesStrongEmphasis)
-                )
-                Toggle(
-                    "Monospace text between `backtick characters`",
-                    isOn: store.binding(\.renderingOptions.recognizesInlineCode)
-                )
+                Toggle(isOn: store.binding(\.renderingOptions.recognizesEmphasis)) {
+                    inlineFormattingLabel("Italicize text between single asterisks",
+                                          marker: "*", example: Text("text").italic())
+                }
+                Toggle(isOn: store.binding(\.renderingOptions.recognizesUnderscoreEmphasis)) {
+                    inlineFormattingLabel("Italicize text between underscore characters",
+                                          marker: "_", example: Text("text").italic())
+                }
+                Toggle(isOn: store.binding(\.renderingOptions.recognizesStrongEmphasis)) {
+                    inlineFormattingLabel("Bold text between double asterisks",
+                                          marker: "**", example: Text("text").bold())
+                }
+                Toggle(isOn: store.binding(\.renderingOptions.recognizesInlineCode)) {
+                    inlineFormattingLabel("Monospace text between backticks",
+                                          marker: "`", example: Text("text").monospaced())
+                }
             }
             Section("Images") {
                 Picker("Automatically Load Same-Capsule Images", selection: store.binding(\.sameCapsuleImageLoading)) {
@@ -327,6 +331,20 @@ struct BrowserSettingsView: View {
             }
         }
         .formStyle(.grouped)
+    }
+
+    private func inlineFormattingLabel(_ title: String, marker: String, example: Text) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(title)
+            Text("e.g. \(marker)\(example)\(marker)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize()
+        }
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+        .accessibilityHint(Text("Example: \(marker)\(example)\(marker)"))
     }
 
     private var proxyEnabled: Binding<Bool> {

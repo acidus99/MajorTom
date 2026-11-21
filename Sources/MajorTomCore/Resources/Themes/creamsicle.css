@@ -20,7 +20,6 @@
   --heading-text: #c2410c;
   --bold-text: #a83a0b;
   --italic-text: #7c4a03;
-  --underline-text: var(--text);
   --link-text: var(--link);
   --link-hover-text: #9a3412;
   --quote-text: var(--text);

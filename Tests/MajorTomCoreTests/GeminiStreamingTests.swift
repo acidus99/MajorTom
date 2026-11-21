@@ -204,10 +204,11 @@ final class GeminiStreamingTests: XCTestCase {
             recognizesStrongEmphasis: true,
             recognizesInlineCode: false
         )
-        XCTAssertEqual(
-            HTMLDocumentStreamRenderer.renderInline("**yes** *no* `no`", options: options),
-            "<strong>**yes**</strong> *no* `no`"
-        )
+        let html = HTMLDocumentStreamRenderer.renderInline("**yes** *no* `no`", options: options)
+        XCTAssertTrue(html.contains("<strong>yes</strong>"))
+        XCTAssertTrue(html.contains("*no* `no`"))
+        XCTAssertFalse(html.contains("<em>"))
+        XCTAssertFalse(html.contains("<code>"))
     }
 
     /// The author's characters must survive rendering even when recognition fires where

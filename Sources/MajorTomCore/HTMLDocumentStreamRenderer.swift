@@ -4,6 +4,7 @@ public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
     public var recognizesEmphasis: Bool
     public var recognizesStrongEmphasis: Bool
     public var recognizesInlineCode: Bool
+    public var recognizesUnderscoreEmphasis: Bool
     /// Renders a run of consecutive quote lines as one continuous quotation rather
     /// than as separate blocks with whitespace between them.
     public var collapsesConsecutiveQuotes: Bool
@@ -24,6 +25,7 @@ public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
         recognizesEmphasis: Bool = true,
         recognizesStrongEmphasis: Bool = true,
         recognizesInlineCode: Bool = true,
+        recognizesUnderscoreEmphasis: Bool = true,
         collapsesConsecutiveQuotes: Bool = true,
         showsLinkHints: Bool = true,
         rendersANSIColors: Bool = true,
@@ -32,6 +34,7 @@ public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
         self.recognizesEmphasis = recognizesEmphasis
         self.recognizesStrongEmphasis = recognizesStrongEmphasis
         self.recognizesInlineCode = recognizesInlineCode
+        self.recognizesUnderscoreEmphasis = recognizesUnderscoreEmphasis
         self.collapsesConsecutiveQuotes = collapsesConsecutiveQuotes
         self.showsLinkHints = showsLinkHints
         self.rendersANSIColors = rendersANSIColors
@@ -48,6 +51,7 @@ public struct HTMLRenderingOptions: Equatable, Codable, Sendable {
         recognizesEmphasis = try container.decodeIfPresent(Bool.self, forKey: .recognizesEmphasis) ?? true
         recognizesStrongEmphasis = try container.decodeIfPresent(Bool.self, forKey: .recognizesStrongEmphasis) ?? true
         recognizesInlineCode = try container.decodeIfPresent(Bool.self, forKey: .recognizesInlineCode) ?? true
+        recognizesUnderscoreEmphasis = try container.decodeIfPresent(Bool.self, forKey: .recognizesUnderscoreEmphasis) ?? true
         collapsesConsecutiveQuotes = try container.decodeIfPresent(Bool.self, forKey: .collapsesConsecutiveQuotes) ?? true
         showsLinkHints = try container.decodeIfPresent(Bool.self, forKey: .showsLinkHints) ?? true
         rendersANSIColors = try container.decodeIfPresent(Bool.self, forKey: .rendersANSIColors) ?? true
@@ -393,7 +397,8 @@ public final class HTMLDocumentStreamRenderer {
             let candidates: [(range: Range<Substring.Index>, marker: String, tag: String)] = [
                 options.recognizesStrongEmphasis ? paired("**", in: remainder).map { ($0, "**", "strong") } : nil,
                 options.recognizesEmphasis ? paired("*", in: remainder, excludingDouble: true).map { ($0, "*", "em") } : nil,
-                options.recognizesInlineCode ? paired("`", in: remainder).map { ($0, "`", "code") } : nil
+                options.recognizesInlineCode ? paired("`", in: remainder).map { ($0, "`", "code") } : nil,
+                options.recognizesUnderscoreEmphasis ? paired("_", in: remainder).map { ($0, "_", "em") } : nil
             ].compactMap { $0 }
 
             guard let candidate = candidates.min(by: { $0.range.lowerBound < $1.range.lowerBound }) else {
@@ -402,9 +407,12 @@ public final class HTMLDocumentStreamRenderer {
             }
 
             output += escape(String(remainder[..<candidate.range.lowerBound]))
-            output += "<\(candidate.tag)>"
-                + escape(String(remainder[candidate.range]))
+            let contentStart = remainder.index(candidate.range.lowerBound, offsetBy: candidate.marker.count)
+            let contentEnd = remainder.index(candidate.range.upperBound, offsetBy: -candidate.marker.count)
+            output += escape(candidate.marker) + "<\(candidate.tag)>"
+                + escape(String(remainder[contentStart..<contentEnd]))
                 + "</\(candidate.tag)>"
+                + escape(candidate.marker)
             remainder = remainder[candidate.range.upperBound...]
         }
         return output

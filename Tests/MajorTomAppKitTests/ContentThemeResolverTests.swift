@@ -68,8 +68,8 @@ final class ContentThemeResolverTests: XCTestCase {
         (() => ({
           singleMain: document.querySelectorAll('main').length === 1,
           headings: ['h1', 'h2', 'h3'].every(tag => !!document.querySelector('main > ' + tag)),
-          inline: ['strong', 'em', 'u', 'code'].every(tag => !!document.querySelector('main ' + tag)),
-          underline: [...document.querySelectorAll('main u')].some(element => getComputedStyle(element).textDecorationLine.includes('underline')),
+          inline: ['strong', 'em', 'code'].every(tag => !!document.querySelector('main ' + tag)),
+          noUnderline: !document.querySelector('main u'),
           grouping: ['ul > li', 'blockquote > p', 'details > summary', 'details > pre', 'figure > figcaption'].every(selector => !!document.querySelector(selector)),
           links: [...document.querySelectorAll('main > a')].every(a => !!a.href),
           image: document.querySelector('figure img').src.startsWith('data:'),

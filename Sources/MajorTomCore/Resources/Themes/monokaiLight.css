@@ -23,7 +23,6 @@
   --heading-text: var(--accent);
   --bold-text: #b04e20;
   --italic-text: #8c6500;
-  --underline-text: var(--text);
   --link-text: var(--link);
   --link-hover-text: color-mix(in srgb, var(--link-text) 80%, var(--text));
   --quote-text: var(--text);
