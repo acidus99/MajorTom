@@ -132,8 +132,7 @@ struct PageInfoView: View {
     }
 
     private var byteSummary: String {
-        let formatted = information.byteCount.formatted(.number)
-        return information.byteCount == 1 ? "1 byte" : "\(formatted) bytes"
+        BrowserByteCount.formatted(information.byteCount)
     }
 
     private var deliverySummary: String? {

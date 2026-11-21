@@ -4,6 +4,22 @@ import XCTest
 @testable import MajorTomCore
 
 final class BrowserSessionTests: XCTestCase {
+    /// Live responses and retained history must use the same size rule as Page Info.
+    @MainActor
+    func testLoadedAndCachedStatusUseSharedByteFormatting() async {
+        let fixture = SessionFixture()
+        defer { fixture.close() }
+        let bytes = Data(repeating: 0x41, count: 10_234)
+        await fixture.load(fixture.a, mime: "text/plain", bytes: bytes)
+        XCTAssertEqual(fixture.session.statusText, "Loaded \(BrowserByteCount.formatted(bytes.count))")
+        await fixture.load(fixture.b, mime: "text/plain", bytes: Data([0x42]))
+        XCTAssertEqual(fixture.session.statusText, "Loaded \(BrowserByteCount.formatted(1))")
+        fixture.session.goBack()
+        await fixture.wait { fixture.session.committedURL == fixture.a && !fixture.session.isLoading }
+        XCTAssertEqual(fixture.session.statusText, "Cached • \(BrowserByteCount.formatted(bytes.count))")
+        XCTAssertEqual(fixture.session.sourceBytes, bytes)
+    }
+
     @MainActor
     func testDocumentReplacementCannotReviveOldHoverWhenModifiersChange() async throws {
         let fixture = SessionFixture()

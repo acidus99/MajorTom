@@ -419,7 +419,7 @@ public final class BrowserSession: ObservableObject {
             documentTitle: documentTitle
         ))
         recordSuccessfulVisit(url, title: documentTitle ?? title, disposition: disposition)
-        statusText = "Local file • \(data.count) bytes"
+        statusText = "Local file • \(BrowserByteCount.formatted(data.count))"
     }
 
     public static func mimeType(forPathExtension pathExtension: String) -> String {
@@ -1161,8 +1161,8 @@ public final class BrowserSession: ObservableObject {
                         )
                     }
                     statusText = responseIsCached
-                        ? "Cached • \(sourceBytes.count) bytes"
-                        : "Loaded \(sourceBytes.count) bytes"
+                        ? "Cached • \(BrowserByteCount.formatted(sourceBytes.count))"
+                        : "Loaded \(BrowserByteCount.formatted(sourceBytes.count))"
                     // Only now, once the reader has actually landed on this capsule: the
                     // RFC forbids probing for a favicon any earlier.
                     scheduleFaviconRefresh(for: target.url)
@@ -1278,7 +1278,7 @@ public final class BrowserSession: ObservableObject {
             disposition: disposition
         )
         recordSuccessfulVisit(url, title: title, disposition: disposition)
-        statusText = "Inline image • \(formattedByteCount(decoded.data.count))"
+        statusText = "Inline image • \(BrowserByteCount.formatted(decoded.data.count))"
     }
 
     private func openExternalURL(_ url: URL) {
@@ -1455,7 +1455,7 @@ public final class BrowserSession: ObservableObject {
         }
         applyZoom()
         statusText = cached.completion == .complete
-            ? "Cached • \(cached.body.count) bytes"
+            ? "Cached • \(BrowserByteCount.formatted(cached.body.count))"
             : "Cached \(cached.completion.rawValue) response"
         scheduleFaviconRefresh(for: cached.url)
     }
