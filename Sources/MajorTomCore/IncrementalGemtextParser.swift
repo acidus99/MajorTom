@@ -110,9 +110,10 @@ public struct IncrementalGemtextParser: Sendable {
 
     private func parseHeading(_ line: String) -> GemtextEvent? {
         for level in stride(from: 3, through: 1, by: -1) {
-            let marker = String(repeating: "#", count: level) + " "
+            let marker = String(repeating: "#", count: level)
             if line.hasPrefix(marker) {
-                return .heading(level: level, text: String(line.dropFirst(marker.count)))
+                let text = line.dropFirst(marker.count).drop(while: { $0 == " " || $0 == "\t" })
+                return .heading(level: level, text: String(text))
             }
         }
         return nil

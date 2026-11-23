@@ -29,6 +29,25 @@ final class BrowserResponseBodyTests: XCTestCase {
         XCTAssertEqual(BrowserResponseBody.events(for: bytes, kind: .gemtext), expected)
     }
 
+    func testHeadingsWithoutSpacesStreamAndClaimTheDocumentTitleAtEveryByteSplit() {
+        // Compact heading markers must work for rendering and document titles, even
+        // when a chunk ends within a marker or a multibyte character.
+        let bytes = Data("#Café 🚀\r\n##Section\n###Detail".utf8)
+        let expected: [BrowserBodyEvent] = [
+            .gemtext(.heading(level: 1, text: "Café 🚀")),
+            .gemtext(.heading(level: 2, text: "Section")),
+            .gemtext(.heading(level: 3, text: "Detail"))
+        ]
+        for split in 0...bytes.count {
+            var body = BrowserResponseBody(kind: .gemtext)
+            let actual = body.receive(bytes.prefix(split)) + body.receive(bytes.dropFirst(split)) + body.finish()
+            XCTAssertEqual(actual, expected, "Split \(split)")
+            var title = GemtextTitleClaim()
+            for case .gemtext(let event) in actual { _ = title.receive(event) }
+            XCTAssertEqual(title.title, "Café 🚀", "Split \(split)")
+        }
+    }
+
     func testPlainTextKeepsWhitespaceAndCompletesTruncatedUTF8Once() {
         let bytes = Data("\n  Café\r\n".utf8) + Data([0xF0, 0x9F])
         for split in 0...bytes.count {

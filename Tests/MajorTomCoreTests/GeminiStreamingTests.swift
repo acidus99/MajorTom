@@ -57,6 +57,32 @@ final class GeminiStreamingTests: XCTestCase {
         ])
     }
 
+    func testGemtextHeadingsAllowOptionalSpacesAndTabs() {
+        // Headings without a space after the marker used to render as ordinary text.
+        for level in 1...3 {
+            for separator in ["", " ", "\t", " \t  "] {
+                var parser = IncrementalGemtextParser()
+                let source = String(repeating: "#", count: level) + separator + "Café 🚀  \n"
+                XCTAssertEqual(parser.receive(source) + parser.finish(), [
+                    .heading(level: level, text: "Café 🚀  ")
+                ], source.debugDescription)
+            }
+        }
+    }
+
+    func testGemtextHeadingMarkersRemainLiteralInPreformattedAndIndentedLines() {
+        var parser = IncrementalGemtextParser()
+        let source = " #Indented\n```\n#Literal\n##Literal\n###Literal\n```\n"
+        XCTAssertEqual(parser.receive(source) + parser.finish(), [
+            .text(" #Indented"),
+            .beginPreformatted(altText: nil),
+            .preformattedLine("#Literal"),
+            .preformattedLine("##Literal"),
+            .preformattedLine("###Literal"),
+            .endPreformatted
+        ])
+    }
+
     func testGemtextParserAcceptsCRAndCRLFLineEndingsAcrossChunks() {
         let variants = ["\r", "\r\n"]
         for ending in variants {
