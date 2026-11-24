@@ -25,24 +25,32 @@ public enum InlineImagePresentationScript {
         """
     }
 
+    public static func failureUpdateScript(identifier: String, message: String) -> String {
+        "window.majorTomSetImageFailure?.(\(literal(identifier)), \(literal(message)));"
+    }
+
     private static func literal<Value: Encodable>(_ value: Value) -> String {
         String(decoding: try! JSONEncoder().encode(value), as: UTF8.self)
     }
 
     /// A system symbol used as a CSS mask so it follows the link's semantic color.
-    public static let pendingIconCSS: String = {
-        guard let image = NSImage(systemSymbolName: "clock", accessibilityDescription: nil)?
+    public static let pendingIconCSS = symbolCSS("clock")
+    public static let failureIconCSS = symbolCSS("exclamationmark.triangle")
+
+    private static func symbolCSS(_ name: String) -> String {
+        guard let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
                 .withSymbolConfiguration(.init(pointSize: 32, weight: .regular)),
               let tiff = image.tiffRepresentation,
               let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
         else { return "none" }
         return "url(\"data:image/png;base64,\(png.base64EncodedString())\")"
-    }()
+    }
 
     public static let userScript = WKUserScript(
         source: """
         (() => {
           const states = new Map();
+          const failures = new Map();
           const submitted = new Set();
           const observed = new Set();
           let observer;
@@ -52,10 +60,14 @@ public enum InlineImagePresentationScript {
             const state = states.get(line.id) || 'idle';
             line.classList.toggle('is-image-pending', state === 'pending');
             line.classList.toggle('is-loading', state === 'requesting');
+            line.classList.toggle('is-image-failed', failures.has(line.id));
             line.setAttribute('aria-busy', String(state === 'requesting'));
             const anchor = line;
             if (!anchor) { return; }
-            if (state === 'idle') {
+            if (failures.has(line.id)) {
+              anchor.title = failures.get(line.id);
+              anchor.setAttribute('aria-description', failures.get(line.id));
+            } else if (state === 'idle') {
               anchor.removeAttribute('title');
               anchor.removeAttribute('aria-description');
             } else {
@@ -66,8 +78,16 @@ public enum InlineImagePresentationScript {
             }
           };
           window.majorTomSetImageState = (identifier, state) => {
+            if (state !== 'idle') { failures.delete(identifier); }
             if (state === 'idle') { states.delete(identifier); }
             else { states.set(identifier, state); }
+            const line = document.getElementById(identifier);
+            if (line) { updateLine(line); }
+          };
+          window.majorTomSetImageFailure = (identifier, message) => {
+            states.delete(identifier);
+            if (message) { failures.set(identifier, message); }
+            else { failures.delete(identifier); }
             const line = document.getElementById(identifier);
             if (line) { updateLine(line); }
           };
@@ -80,6 +100,7 @@ public enum InlineImagePresentationScript {
               const line = document.getElementById(identifier);
               if (!line) { continue; }
               updateLine(line);
+              delete line._majorTomPendingImage;
               delete line.dataset.mtImageLoaded;
               const figure = line.nextElementSibling;
               if (figure?.classList.contains('inline-image')) { figure.remove(); }
@@ -135,8 +156,8 @@ public enum InlineImagePresentationScript {
             const element = event.target instanceof Element ? event.target : event.target?.parentElement;
             const line = element?.closest('a[href]')?.closest('a[data-mt-expandable]');
             if (!line) { return; }
-            // Once automatically displayed, the original link remains ordinary navigation.
-            if (line.dataset.mtImageAuto && line.dataset.mtImageLoaded === 'true') { return; }
+            // Automatic loading must never trap a failed destination in inline retries.
+            if (line.dataset.mtImageAuto && (line.dataset.mtImageLoaded === 'true' || failures.has(line.id))) { return; }
             event.preventDefault();
             event.stopPropagation();
             send(line, 'click');

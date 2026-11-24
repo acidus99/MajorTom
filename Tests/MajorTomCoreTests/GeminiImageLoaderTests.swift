@@ -218,7 +218,9 @@ final class GeminiImageLoaderTests: XCTestCase {
         do {
             _ = try await otherLoader.image(for: url, interval: 1, pageStartedAt: opened, authorize: authorize)
             XCTFail("An automatic inline image must not redirect to another capsule")
-        } catch {}
+        } catch let error as GeminiImageError {
+            XCTAssertEqual(error, .redirectOutsideCapsule)
+        }
         let otherStarts = await crossCapsule.starts
         XCTAssertEqual(otherStarts.count, 1)
     }

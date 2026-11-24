@@ -274,13 +274,32 @@ extension BrowserDocumentScript {
 
     public static func insertImage(lineIdentifier: String, figure: String) -> String {
         """
-        (() => {
-          const line = document.getElementById(\(jsLiteral(lineIdentifier)));
-          if (!line) { return; }
-          if (!line.nextElementSibling?.classList.contains('inline-image')) {
-            line.insertAdjacentHTML('afterend', \(jsLiteral(figure)));
-          }
-        })();
+        const line = document.getElementById(\(jsLiteral(lineIdentifier)));
+        if (!line) { return false; }
+        const container = document.createElement('div');
+        container.innerHTML = \(jsLiteral(figure));
+        const figure = container.querySelector('figure');
+        const image = figure?.querySelector('img[data-mt-inline-image]');
+        if (!image) { return false; }
+        // Keep the figure detached: neither a caption nor layout space is visible
+        // until WebKit confirms that the complete response is a usable image.
+        // Only app-generated figure markup is parsed here. Response bytes stay
+        // behind the img src, including SVG; never parse them as document markup.
+        line._majorTomPendingImage = figure;
+        try {
+          await image.decode();
+          if (!image.naturalWidth || !image.naturalHeight) { return false; }
+          if (!line.isConnected || line._majorTomPendingImage !== figure) { return false; }
+          if (!line.nextElementSibling?.classList.contains('inline-image')) { line.after(figure); }
+          line.dataset.mtImageLoaded = 'true';
+          window.majorTomSetImageFailure?.(line.id, null);
+          window.majorTomEnhanceInlineImage?.(image);
+          return true;
+        } catch {
+          return false;
+        } finally {
+          if (line._majorTomPendingImage === figure) { delete line._majorTomPendingImage; }
+        }
         """
     }
 
@@ -289,24 +308,11 @@ extension BrowserDocumentScript {
         (() => {
           const line = document.getElementById(\(jsLiteral(lineIdentifier)));
           if (!line) { return; }
+          delete line._majorTomPendingImage;
+          delete line.dataset.mtImageLoaded;
           line.classList.remove('is-loading');
           const figure = line.nextElementSibling;
           if (figure?.classList.contains('inline-image')) { figure.remove(); }
-        })();
-        """
-    }
-
-    public static func imageMetadata(figureIdentifier: String, mimeType: String, size: String) -> String {
-        """
-        (() => {
-          const image = document.getElementById(\(jsLiteral(figureIdentifier)))
-            ?.querySelector('img[data-mt-inline-image]');
-          if (!image) { return; }
-          image.dataset.mtMime = \(jsLiteral(mimeType));
-          image.dataset.mtSize = \(jsLiteral(size));
-          const line = image.closest('figure')?.previousElementSibling;
-          if (line?.matches('a[data-mt-expandable]')) { line.dataset.mtImageLoaded = 'true'; }
-          window.majorTomEnhanceInlineImage?.(image);
         })();
         """
     }

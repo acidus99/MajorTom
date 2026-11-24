@@ -375,6 +375,93 @@ final class BrowserSessionTests: XCTestCase {
     }
 
     @MainActor
+    func testAutoloadDoesNotCreateAnImageUntilTheResponseCompletes() async throws {
+        // Queued and partial responses previously inserted an empty figure and filename.
+        let fixture = SessionFixture(loadsImages: true)
+        defer { fixture.close() }
+        let bytes = Data("=> image.png Photograph\n".utf8)
+        await fixture.load(fixture.a, mime: "text/gemini", bytes: bytes)
+        let document = try XCTUnwrap(fixture.session.activeWebDocumentURL)
+        let image = URL(string: "image.png", relativeTo: fixture.a)!.absoluteURL
+        fixture.session.handleInlineImageMessage(lineIdentifier: "mt-link-1", url: image, action: "load", documentURL: document)
+        await fixture.source.waitForRequests(2)
+        XCTAssertTrue(fixture.surface.insertedImages.isEmpty)
+        XCTAssertTrue(fixture.surface.imageResponses.isEmpty)
+        fixture.source.send(1, status: 20, meta: "image/png", chunks: [Data([1])], completes: false)
+        XCTAssertTrue(fixture.surface.insertedImages.isEmpty)
+        fixture.source.complete(1)
+        await fulfillment(of: [fixture.surface.imageFinished], timeout: 2)
+        XCTAssertEqual(fixture.surface.insertedImages.count, 1)
+        XCTAssertEqual(fixture.surface.imageResponses.first?.body, Data([1]))
+        XCTAssertEqual(fixture.session.sourceBytes, bytes)
+        XCTAssertEqual(fixture.session.inlineImageIsExpanded(line: "mt-link-1", url: image), true)
+    }
+
+    @MainActor
+    func testAutoloadFailuresLeaveNoFigureOrPersistedExpansion() async throws {
+        // Failures must preserve navigation and source, rather than silently leave
+        // an expanded/broken image that history restoration tries to load again.
+        let failures: [(Int?, String, GeminiTransportError?)] = [
+            (30, "gemini://other.invalid/image.png", nil),
+            (20, "text/gemini", nil),
+            (10, "Enter input", nil),
+            (60, "Certificate required", nil),
+            (51, "Not found", nil),
+            (nil, "", .connectionFailed(.dnsRecordNotFound)),
+            (nil, "", .connectionFailed(.connectionRefused)),
+            (nil, "", .connectionFailed(.tlsHandshakeFailed)),
+            (nil, "", .trustDeclined),
+            (nil, "", .responseTimedOut)
+        ]
+        for (status, meta, error) in failures {
+            let fixture = SessionFixture(loadsImages: true)
+            defer { fixture.close() }
+            let bytes = Data("=> image.png Photograph\n".utf8)
+            await fixture.load(fixture.a, mime: "text/gemini", bytes: bytes)
+            let document = try XCTUnwrap(fixture.session.activeWebDocumentURL)
+            let image = URL(string: "image.png", relativeTo: fixture.a)!.absoluteURL
+            // Manual expansion is persisted before retrieval, so failure must clear it too.
+            fixture.session.toggleInlineImage(lineIdentifier: "mt-link-1", url: image, documentURL: document)
+            await fixture.source.waitForRequests(2)
+            if let error { fixture.source.fail(1, error) }
+            else if let status { fixture.source.send(1, status: status, meta: meta) }
+            await fulfillment(of: [fixture.surface.imageFinished], timeout: 2)
+            XCTAssertTrue(fixture.surface.insertedImages.isEmpty)
+            XCTAssertTrue(fixture.surface.imageResponses.isEmpty)
+            XCTAssertEqual(fixture.source.requestCount, 2, "A cross-capsule redirect must not be contacted")
+            XCTAssertEqual(fixture.session.sourceBytes, bytes)
+            XCTAssertEqual(fixture.session.inlineImageIsExpanded(line: "mt-link-1", url: image), false)
+            XCTAssertTrue(fixture.session.restorationState.entries.last!.presentation.expandedImages.isEmpty)
+            let message = try XCTUnwrap(fixture.surface.imageFailures.last)
+            XCTAssertTrue(message.contains("Open the link"))
+            if let status, status != 20 && status != 30 { XCTAssertTrue(message.contains(String(status))) }
+        }
+    }
+
+    @MainActor
+    func testDecodingFailureClearsExpansionAndStopIgnoresLateResponse() async throws {
+        let fixture = SessionFixture(loadsImages: true)
+        defer { fixture.close() }
+        fixture.surface.decodesImages = false
+        await fixture.load(fixture.a, mime: "text/gemini", bytes: Data("=> image.png Image\n".utf8))
+        let document = try XCTUnwrap(fixture.session.activeWebDocumentURL)
+        let image = URL(string: "image.png", relativeTo: fixture.a)!.absoluteURL
+        fixture.session.toggleInlineImage(lineIdentifier: "mt-link-1", url: image, documentURL: document)
+        await fixture.source.waitForRequests(2)
+        fixture.source.send(1, status: 20, meta: "image/png", chunks: [Data([1, 2])])
+        await fulfillment(of: [fixture.surface.imageFinished], timeout: 2)
+        XCTAssertTrue(fixture.surface.imageFailures.last?.contains("decoded") == true)
+        XCTAssertEqual(fixture.session.inlineImageIsExpanded(line: "mt-link-1", url: image), false)
+        fixture.session.toggleInlineImage(lineIdentifier: "mt-link-1", url: image, documentURL: document)
+        await fixture.source.waitForRequests(3)
+        fixture.session.stop()
+        await fixture.source.waitForTermination(2)
+        fixture.source.send(2, status: 20, meta: "image/png", chunks: [Data([1])])
+        XCTAssertEqual(fixture.surface.insertedImages.count, 1, "Stopped requests cannot reach presentation")
+        XCTAssertEqual(fixture.surface.imageFailures.count, 1, "Cancellation must not become a failure")
+    }
+
+    @MainActor
     func testHistoryPreviewHasIndependentSurfaceAndCommitsOnlyOnAcceptance() async throws {
         let fixture = SessionFixture()
         defer { fixture.close() }
@@ -448,7 +535,7 @@ private final class SessionFixture {
     let session: BrowserSession
     var visits: [(URL, String?)] = []
 
-    init(restoredState: RestoredTabState? = nil) {
+    init(restoredState: RestoredTabState? = nil, loadsImages: Bool = false) {
         let source = source
         let retriever = GeminiResourceRetriever<ClientTLSIdentity>(
             transportEvents: { target, identity, _, _ in
@@ -456,7 +543,14 @@ private final class SessionFixture {
                 return source.events(target)
             }, cache: nil, resolveIdentity: { _ in nil }, authorizeTrust: { _, _ in true }
         )
-        var services = BrowserSessionServices(preferences: { BrowserPreferences() }, retriever: retriever)
+        var services = BrowserSessionServices(preferences: {
+            BrowserPreferences(sameCapsuleImageLoading: loadsImages ? .whenVisible : .off)
+        }, retriever: retriever)
+        if loadsImages {
+            services.imageLoader = GeminiImageLoader(cache: nil, transportEvents: { target, _, _, _ in
+                source.events(target)
+            }, clock: GeminiImageClock(now: { .now }, sleep: { _ in try Task.checkCancellation() }))
+        }
         var record: ((URL, String?) -> Void)?
         services.recordVisit = { record?($0, $1) }
         session = BrowserSession(services: services, presentation: surface, restoredState: restoredState)
@@ -495,6 +589,11 @@ private final class SessionPresentationSurface: BrowserPresentationSink {
     var documents: [URL: Data] = [:]
     var previews: [Data] = []
     var restoredOffsets: [Double] = []
+    var insertedImages: [String] = []
+    var imageResponses: [ContentResponse] = []
+    var imageFailures: [String] = []
+    var decodesImages = true
+    let imageFinished = XCTestExpectation(description: "Image reached terminal presentation state")
     var holdsLoadCompletion = false
     private var loadGates: [URL: AsyncStream<Void>.Continuation] = [:]
     private var heldLoads: Set<URL> = []
@@ -523,9 +622,21 @@ private final class SessionPresentationSurface: BrowserPresentationSink {
     }
     func updateDocument(_ update: BrowserDocumentUpdate, at url: URL) async {
         if case .restoreScroll(let offset) = update { restoredOffsets.append(offset) }
+        if case .imageFailure(_, let message) = update {
+            imageFailures.append(message)
+            imageFinished.fulfill()
+        }
     }
     func createImageResource() -> BrowserPresentationResource {
-        BrowserPresentationResource(url: URL(string: "fixture-resource://image/\(UUID())")!, finish: { _ in })
+        BrowserPresentationResource(url: URL(string: "fixture-resource://image/\(UUID())")!, finish: { [weak self] result in
+            if case .success(let response) = result { self?.imageResponses.append(response) }
+        })
+    }
+    func insertImage(_ figure: String, after line: String, at url: URL) async -> Bool {
+        XCTAssertFalse(imageResponses.isEmpty, "Bytes must be available before decoding starts")
+        insertedImages.append(figure)
+        if decodesImages { imageFinished.fulfill() }
+        return decodesImages
     }
     func showHistoryPreview(_ data: Data, entry: BackForwardEntry) async throws { previews.append(data) }
     func discardHistoryPreview() { previews.removeAll() }
@@ -587,6 +698,11 @@ private final class SessionEventSource: @unchecked Sendable {
         continuation.yield(.responseHeader(try! GeminiResponseHeader(status: status, meta: meta)))
         for chunk in chunks { continuation.yield(.body(chunk)) }
         if completes { continuation.yield(.completed); continuation.finish() }
+    }
+    func complete(_ index: Int) {
+        let continuation = lock.withLock { requests[index].1 }
+        continuation.yield(.completed)
+        continuation.finish()
     }
     func sendBody(_ index: Int, _ bytes: Data) { lock.withLock { requests[index].1 }.yield(.body(bytes)) }
     func identity(_ index: Int, _ identity: PresentedServerIdentity) { lock.withLock { requests[index].1 }.yield(.serverIdentity(identity)) }

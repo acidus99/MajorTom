@@ -216,7 +216,8 @@ main > a:has(> .link-hint) {
 }
 
 /* A queued image uses the system clock symbol, tinted with the link's color. */
-a.is-image-pending::after {
+a.is-image-pending::after,
+a.is-image-failed::after {
   content: "";
   display: inline-block;
   width: 0.85em;
@@ -225,6 +226,10 @@ a.is-image-pending::after {
   background-color: currentColor;
   mask: var(--mt-image-pending-icon) center / contain no-repeat;
   vertical-align: -0.1em;
+}
+
+a.is-image-failed::after {
+  mask-image: var(--mt-image-failed-icon);
 }
 
 /* Only an active network request spins. */

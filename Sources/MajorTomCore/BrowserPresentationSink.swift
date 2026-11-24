@@ -30,10 +30,9 @@ public enum BrowserDocumentUpdate {
     case correctScrollAfterImages(Double)
     case imageViewport(Double)
     case stopImages([String])
-    case insertImage(line: String, figure: String)
     case removeImage(line: String)
     case imageState(line: String, state: GeminiImageLoader.State)
-    case imageMetadata(figure: String, mimeType: String, size: String)
+    case imageFailure(line: String, message: String)
 }
 
 /// A resource has an opaque address and accepts only approved response bytes.
@@ -56,6 +55,8 @@ public protocol BrowserPresentationSink: AnyObject {
     func invalidateDocument()
     func loadDocument(at url: URL) async throws
     func updateDocument(_ update: BrowserDocumentUpdate, at url: URL) async
+    /// Decode approved resource bytes before inserting any visible image or caption.
+    func insertImage(_ figure: String, after line: String, at url: URL) async -> Bool
     func createImageResource() -> BrowserPresentationResource
     func showHistoryPreview(_ data: Data, entry: BackForwardEntry) async throws
     func discardHistoryPreview()

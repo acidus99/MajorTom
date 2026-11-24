@@ -267,7 +267,7 @@ public struct GeminiResourceRetriever<Credential: Sendable>: Sendable {
                                 throw GeminiRetrievalRedirectError.invalid(source: target.url, meta: header.meta)
                             }
                             if purpose == .inlineImage, !GemtextLinkHint.isSameCapsule(next.url, initialTarget.url) {
-                                throw GeminiRetrievalRedirectError.invalid(source: target.url, meta: header.meta)
+                                throw GeminiImageError.redirectOutsideCapsule
                             }
                             redirectTarget = next
                             continuation.yield(.redirect(next))

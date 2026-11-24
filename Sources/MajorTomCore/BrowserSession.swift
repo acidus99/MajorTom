@@ -8,7 +8,6 @@ private let browserNavigationLogger = Logger(subsystem: "dev.gemi.major-tom", ca
 @MainActor
 public final class BrowserSession: ObservableObject {
     public enum HistoryDisposition: Equatable { case new, reload, traversal }
-    private struct LoadedInlineImage { let mimeType: String; let byteCount: Int }
     public struct InputPrompt: Identifiable {
         public let id = UUID()
         public let target: GeminiRequestTarget
@@ -1945,22 +1944,44 @@ public final class BrowserSession: ObservableObject {
     private func expandInlineImage(lineIdentifier: String, url: URL,
                                    completesScrollRestoration: Bool = false, prioritize: Bool = false) async {
         guard let documentURL = activeWebDocumentURL else { return }
-        let figure = "mt-inline-\(lineIdentifier)"
-        let name = inlineImageFileName(for: url, fallback: nil)
-        let resource = presentation.createImageResource()
-        let html = documentRenderer.inlineImage(resourceURL: resource.url, linkURL: url,
-            figureIdentifier: figure, fileName: name)
-        await presentation.updateDocument(.insertImage(line: lineIdentifier, figure: html), at: documentURL)
-        let metadata = await loadInlineImage(url, lineIdentifier: lineIdentifier, prioritize: prioritize, resource: resource)
-        guard !Task.isCancelled, activeWebDocumentURL == documentURL else { return }
-        if let metadata {
-            await presentation.updateDocument(.imageMetadata(figure: figure, mimeType: metadata.mimeType,
-                size: formattedByteCount(metadata.byteCount)), at: documentURL)
-        } else {
+        do {
+            let response = try await loadInlineImage(url, lineIdentifier: lineIdentifier, prioritize: prioritize)
+            guard !Task.isCancelled, activeWebDocumentURL == documentURL else { return }
+            let resource = presentation.createImageResource()
+            resource.finish(.success(response))
+            let html = documentRenderer.inlineImage(resourceURL: resource.url, linkURL: url,
+                figureIdentifier: "mt-inline-\(lineIdentifier)", fileName: inlineImageFileName(for: url, fallback: nil),
+                mimeType: response.mimeType ?? "image/unknown", sizeDescription: formattedByteCount(response.body.count))
+            let displayed = await presentation.insertImage(html, after: lineIdentifier, at: documentURL)
+            guard !Task.isCancelled, activeWebDocumentURL == documentURL else { return }
+            if !displayed { throw GeminiImageError.decodingFailed }
+        } catch {
+            guard !Task.isCancelled, activeWebDocumentURL == documentURL else { return }
             expandedInlineImages.remove(lineIdentifier)
+            navigation.setImage(url, expanded: false)
+            scheduleBackForwardPersistence()
             await presentation.updateDocument(.removeImage(line: lineIdentifier), at: documentURL)
+            await presentation.updateDocument(.imageFailure(line: lineIdentifier,
+                message: inlineImageFailureDescription(error)), at: documentURL)
         }
         if completesScrollRestoration { await restoredInlineImageDidFinishLoading() }
+    }
+
+    private func inlineImageFailureDescription(_ error: any Error) -> String {
+        let reason: String
+        if let error = error as? GeminiImageError {
+            switch error {
+            case .nonImageResponse(let mimeType):
+                reason = "The capsule returned \(mimeType ?? "an unknown content type") instead of an image."
+            case .redirectOutsideCapsule:
+                reason = "The image redirects to another capsule. Automatic redirects stay within the original capsule."
+            case .decodingFailed:
+                reason = "The response could not be decoded as an image."
+            }
+        } else {
+            reason = friendly(error)
+        }
+        return "Image unavailable. \(reason) Open the link to view the response."
     }
 
     private func removeInlineImage(lineIdentifier: String) async {
@@ -1968,13 +1989,11 @@ public final class BrowserSession: ObservableObject {
         await presentation.updateDocument(.removeImage(line: lineIdentifier), at: documentURL)
     }
 
-    private func loadInlineImage(_ url: URL, lineIdentifier: String, prioritize: Bool,
-                                 resource: BrowserPresentationResource) async -> LoadedInlineImage? {
+    private func loadInlineImage(_ url: URL, lineIdentifier: String, prioritize: Bool) async throws -> ContentResponse {
         guard let documentURL = activeWebDocumentURL, let loader = services.imageLoader else {
-            resource.finish(.failure(URLError(.unsupportedURL))); return nil
+            throw URLError(.unsupportedURL)
         }
         let activity = AsyncStream<GeminiImageLoader.State>.makeStream()
-        defer { activity.continuation.finish() }
         let activityTask = Task { [weak self, presentation] in
             for await state in activity.stream {
                 guard !Task.isCancelled, self?.activeWebDocumentURL == documentURL else { return }
@@ -1988,13 +2007,17 @@ public final class BrowserSession: ObservableObject {
                     pageStartedAt: imagePageStartedAt, prioritize: prioritize,
                     stateChanged: { activity.continuation.yield($0) }, authorize: authorize)
             } onCancel: { activityTask.cancel() }
+            activity.continuation.finish()
+            await activityTask.value
             try Task.checkCancellation()
-            resource.finish(.success(response))
-            return LoadedInlineImage(mimeType: response.mimeType ?? "image/unknown", byteCount: response.body.count)
+            return response
         } catch {
             if Task.isCancelled { activityTask.cancel() }
-            resource.finish(.failure(error))
-            return nil
+            activity.continuation.finish()
+            // Drain progress before publishing a terminal result so a late idle
+            // update cannot erase failure feedback or affect a manual retry.
+            await activityTask.value
+            throw error
         }
     }
 

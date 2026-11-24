@@ -1,5 +1,11 @@
 import Foundation
 
+public enum GeminiImageError: Error, Equatable, Sendable {
+    case nonImageResponse(mimeType: String?)
+    case redirectOutsideCapsule
+    case decodingFailed
+}
+
 /// Monotonic scheduling time is supplied independently from response receipt time.
 struct GeminiImageClock: Sendable {
     let now: @Sendable () -> ContinuousClock.Instant
@@ -201,7 +207,7 @@ public actor GeminiImageLoader {
         )
         let response = try await retriever.response(for: request.target, purpose: .inlineImage)
         guard response.mimeType?.hasPrefix("image/") == true else {
-            throw URLError(.cannotDecodeContentData)
+            throw GeminiImageError.nonImageResponse(mimeType: response.mimeType)
         }
         return response
     }

@@ -140,9 +140,11 @@ public final class BrowserDocumentRenderer {
         return data
     }
 
-    public func inlineImage(resourceURL: URL, linkURL: URL, figureIdentifier: String, fileName: String) -> String {
+    public func inlineImage(resourceURL: URL, linkURL: URL, figureIdentifier: String, fileName: String,
+                            mimeType: String, sizeDescription: String) -> String {
         String(decoding: html.renderInlineImage(resourceURL: resourceURL, linkURL: linkURL, altText: fileName,
-            figureIdentifier: figureIdentifier, fileName: fileName, figureClass: "inline-image"), as: UTF8.self)
+            figureIdentifier: figureIdentifier, fileName: fileName, mimeType: mimeType,
+            sizeDescription: sizeDescription, figureClass: "inline-image"), as: UTF8.self)
     }
 }
 

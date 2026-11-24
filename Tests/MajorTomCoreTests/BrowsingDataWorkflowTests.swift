@@ -157,6 +157,7 @@ private final class ClearingPresentation: BrowserPresentationSink {
     func invalidateDocument() {}
     func loadDocument(at url: URL) async throws {}
     func updateDocument(_ update: BrowserDocumentUpdate, at url: URL) async {}
+    func insertImage(_ figure: String, after line: String, at url: URL) async -> Bool { true }
     func createImageResource() -> BrowserPresentationResource {
         BrowserPresentationResource(url: URL(string: "fixture-resource://unused")!, finish: { _ in })
     }

@@ -70,10 +70,9 @@ public final class BrowserWebPresentation: ObservableObject, BrowserPresentation
         case .correctScrollAfterImages(let offset): source = BrowserDocumentScript.correctScrollAfterImages(offset: offset); world = .page
         case .imageViewport(let inset): source = BrowserDocumentScript.imageViewport(topInset: inset); world = .defaultClient
         case .stopImages(let identifiers): source = InlineImagePresentationScript.stopScript(identifiers: identifiers, documentURL: url); world = .defaultClient
-        case .insertImage(let line, let figure): source = BrowserDocumentScript.insertImage(lineIdentifier: line, figure: figure); world = .defaultClient
         case .removeImage(let line): source = BrowserDocumentScript.removeImage(lineIdentifier: line); world = .defaultClient
         case .imageState(let line, let state): source = InlineImagePresentationScript.stateUpdateScript(identifier: line, state: state, documentURL: url); world = .defaultClient
-        case .imageMetadata(let figure, let mime, let size): source = BrowserDocumentScript.imageMetadata(figureIdentifier: figure, mimeType: mime, size: size); world = .defaultClient
+        case .imageFailure(let line, let message): source = InlineImagePresentationScript.failureUpdateScript(identifier: line, message: message); world = .defaultClient
         }
         do {
             _ = try await page.callJavaScript(BrowserDocumentScript.scoped(source, to: url), contentWorld: world)
@@ -82,6 +81,13 @@ public final class BrowserWebPresentation: ObservableObject, BrowserPresentation
                 _ = try? await page.callJavaScript(BrowserDocumentScript.scoped(BrowserDocumentScript.revealDocument, to: url))
             }
         }
+    }
+
+    public func insertImage(_ figure: String, after line: String, at url: URL) async -> Bool {
+        guard activeDocumentURL == url, !Task.isCancelled else { return false }
+        let source = BrowserDocumentScript.insertImage(lineIdentifier: line, figure: figure)
+        let result = try? await page.callJavaScript(BrowserDocumentScript.scoped(source, to: url), contentWorld: .defaultClient)
+        return activeDocumentURL == url && !Task.isCancelled && (result as? Bool == true)
     }
 
     public func createImageResource() -> BrowserPresentationResource {

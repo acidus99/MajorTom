@@ -91,6 +91,143 @@ final class InlineImagePresentationTests: XCTestCase {
     }
 
     @MainActor
+    func testImageAndCaptionAppearOnlyAfterSuccessfulDecode() async throws {
+        // The old insertion path exposed a filename and empty space before the
+        // response arrived, and accepted broken image bytes as a completed image.
+        let document = ImageTestDocument()
+        try await document.load(document.html(mode: .whenVisible, count: 1))
+        let image = NSImage(size: NSSize(width: 8, height: 8), flipped: false) { rect in
+            NSColor.systemBlue.setFill(); rect.fill(); return true
+        }
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+        let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+        let source = URL(string: "data:image/png;base64,\(png.base64EncodedString())")!
+        _ = try await document.js("""
+        window.originalImageDecode = HTMLImageElement.prototype.decode;
+        HTMLImageElement.prototype.decode = function() {
+          return new Promise((resolve, reject) => {
+            window.finishImageDecode = () => window.originalImageDecode.call(this).then(resolve, reject);
+          });
+        };
+        undefined;
+        """)
+        let insertion = Task { try await document.insertImage(source: source) }
+        try await document.waitForJS("typeof window.finishImageDecode === 'function'")
+        let before = try await document.js("document.querySelectorAll('figure, figcaption').length") as? Int
+        XCTAssertEqual(before, 0, "Decoding must not reserve layout space or expose a caption")
+        _ = try await document.js("window.finishImageDecode(); undefined")
+        let inserted = try await insertion.value
+        XCTAssertTrue(inserted)
+        let loaded = try await document.js("""
+        (() => {
+          const image = document.querySelector('figure img');
+          const line = document.getElementById('image-0');
+          return image.naturalWidth === 8 && image.naturalHeight === 8 &&
+            line.dataset.mtImageLoaded === 'true' &&
+            document.querySelector('figcaption').textContent.includes('8 x 8');
+        })()
+        """) as? Bool
+        XCTAssertEqual(loaded, true)
+        _ = try await document.js(BrowserDocumentScript.removeImage(lineIdentifier: "image-0"))
+        _ = try await document.js("HTMLImageElement.prototype.decode = window.originalImageDecode; undefined")
+        let invalid = try await document.insertImage(source: URL(string: "data:image/png;base64,AQID")!)
+        XCTAssertFalse(invalid)
+        let after = try await document.js("document.querySelectorAll('figure, figcaption').length") as? Int
+        XCTAssertEqual(after, 0, "Invalid image bytes must leave the original link alone")
+    }
+
+    @MainActor
+    func testStopDuringDecodePreventsLateInsertion() async throws {
+        let document = ImageTestDocument()
+        try await document.load(document.html(mode: .whenVisible, count: 1))
+        _ = try await document.js("""
+        HTMLImageElement.prototype.decode = function() {
+          Object.defineProperty(this, 'naturalWidth', { value: 1 });
+          Object.defineProperty(this, 'naturalHeight', { value: 1 });
+          return new Promise(resolve => { window.finishImageDecode = resolve; });
+        };
+        undefined;
+        """)
+        let insertion = Task { try await document.insertImage(source: URL(string: "data:image/png;base64,AQID")!) }
+        try await document.waitForJS("typeof window.finishImageDecode === 'function'")
+        _ = try await document.js("window.majorTomStopImages(['image-0']); window.finishImageDecode(); undefined")
+        let inserted = try await insertion.value
+        XCTAssertFalse(inserted)
+        let count = try await document.js("document.querySelectorAll('figure').length") as? Int
+        XCTAssertEqual(count, 0)
+    }
+
+    @MainActor
+    func testFailureIsAccessibleAndAutomaticLinkResumesOrdinaryNavigationInBothAppearances() async throws {
+        for theme in ContentTheme.bundled.filter({ ["system/alucardClassic.css", "system/draculaClassic.css"].contains($0.id) }) {
+            let document = ImageTestDocument()
+            try await document.load(document.html(mode: .whenVisible, count: 1, theme: theme))
+            try await document.renderFrame()
+            try await document.wait { document.messages.count == 1 }
+            let message = "Image unavailable. The capsule returned Gemini status 51: <missing>. Open the link to view the response."
+            _ = try await document.js(InlineImagePresentationScript.failureUpdateScript(identifier: "image-0", message: message))
+            // An idle callback must not erase terminal feedback.
+            _ = try await document.js("window.majorTomSetImageState('image-0', 'idle')")
+            let result = try await document.js("""
+            (() => {
+              const line = document.getElementById('image-0');
+              line.focus();
+              return { title: line.title, description: line.getAttribute('aria-description'),
+                busy: line.getAttribute('aria-busy'), mask: getComputedStyle(line, '::after').maskImage,
+                focused: document.activeElement === line, text: line.textContent, href: line.href,
+                navigates: line.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 })) };
+            })()
+            """) as? [String: Any]
+            let values = try XCTUnwrap(result)
+            XCTAssertEqual(values["title"] as? String, message)
+            XCTAssertEqual(values["description"] as? String, message)
+            XCTAssertEqual(values["busy"] as? String, "false")
+            XCTAssertNotEqual(values["mask"] as? String, "none")
+            XCTAssertEqual(values["focused"] as? Bool, true)
+            XCTAssertEqual(values["navigates"] as? Bool, true)
+            XCTAssertEqual(values["href"] as? String, "gemini://example.invalid/image-0.png")
+            XCTAssertEqual(document.messages.count, 1, "A failed autoload must not intercept a click to retry")
+            _ = try await document.js("window.majorTomSetImageState('image-0', 'pending')")
+            let failed = try await document.js("document.getElementById('image-0').classList.contains('is-image-failed')") as? Bool
+            XCTAssertEqual(failed, false, "An explicit context-menu retry must clear failure feedback")
+        }
+    }
+
+    @MainActor
+    func testSVGImageCannotRunScriptsOrFetchNestedResources() async throws {
+        // A .png link can return image/svg+xml: extension hints are not a security boundary.
+        let document = ImageTestDocument()
+        try await document.load(document.html(mode: .whenVisible, count: 1))
+        let svg = """
+        <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"
+          onload="window.webkit.messageHandlers.svgProbe.postMessage('onload')">
+          <script>window.webkit.messageHandlers.svgProbe.postMessage('script')</script>
+          <script href="majortom-resource://probe/script.js"/>
+          <style>@import url('majortom-resource://probe/style.css');
+            @font-face { font-family: probe; src: url('majortom-resource://probe/font.woff'); }
+            text { font-family: probe; }
+          </style>
+          <rect width="32" height="32" fill="blue"/>
+          <image href="majortom-resource://probe/nested.png" width="1" height="1"/>
+          <foreignObject width="1" height="1"><div xmlns="http://www.w3.org/1999/xhtml">
+            <script>window.webkit.messageHandlers.svgProbe.postMessage('html-script')</script>
+            <img src="majortom-resource://probe/foreign.png" onerror="window.webkit.messageHandlers.svgProbe.postMessage('error')"/>
+          </div></foreignObject>
+          <text y="20">Test</text>
+        </svg>
+        """
+        document.resources.svg = Data(svg.utf8)
+        let inserted = try await document.insertImage(source: URL(string: "majortom-resource://image/payload.png")!)
+        XCTAssertTrue(inserted, "SVG is rendered strictly in image mode")
+        try await document.renderFrame()
+        XCTAssertEqual(document.resources.requests.map(\.host), ["image"], "SVG must not fetch nested images, scripts, CSS or fonts")
+        XCTAssertTrue(document.resources.scriptMessages.isEmpty, "SVG script and event handlers must never execute")
+        let embeddedDocuments = try await document.js("document.querySelectorAll('svg, script, iframe, object, embed').length") as? Int
+        XCTAssertEqual(embeddedDocuments, 0, "Fetched bytes must never become page markup or an embedded document")
+        XCTAssertEqual(document.messages.filter { $0["action"] == "click" }.count, 0)
+    }
+
+    @MainActor
     func testRestoringScrollDoesNotLoadLinksFromTheHiddenInitialViewport() async throws {
         // History restoration hides the document until its saved offset is applied.
         // Geometry alone must not submit images from the page's temporary top position.
@@ -193,12 +330,15 @@ final class InlineImagePresentationTests: XCTestCase {
 @MainActor
 private final class ImageTestDocument: NSObject, WKNavigationDelegate {
     let view: WKWebView
+    let resources = ImageTestResources()
     var messages: [[String: String]] = []
     private var continuation: CheckedContinuation<Void, any Error>?
 
     init(hidden: Bool = false) {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .nonPersistent()
+        config.setURLSchemeHandler(resources, forURLScheme: "majortom-resource")
+        config.userContentController.add(resources, name: "svgProbe")
         config.defaultWebpagePreferences.allowsContentJavaScript = false
         // Control tab visibility independently of the headless test runner's windows.
         config.userContentController.addUserScript(WKUserScript(source: "window.testHidden = \(hidden); Object.defineProperty(document, 'hidden', {get: () => window.testHidden});", injectionTime: .atDocumentStart, forMainFrameOnly: true, in: .defaultClient))
@@ -214,7 +354,7 @@ private final class ImageTestDocument: NSObject, WKNavigationDelegate {
     func html(mode: SameCapsuleImageLoading, count: Int, spacer: Int = 0, theme: ContentTheme? = nil, extraCSS: String = "") -> String {
         let renderer = HTMLDocumentStreamRenderer()
         let css = (theme.map { $0.stylesheet(for: $0.appearance) } ?? ContentThemeStylesheets.base) + "\n" + extraCSS
-            + "\n:root { --mt-image-pending-icon: \(InlineImagePresentationScript.pendingIconCSS); }"
+            + "\n:root { --mt-image-pending-icon: \(InlineImagePresentationScript.pendingIconCSS); --mt-image-failed-icon: \(InlineImagePresentationScript.failureIconCSS); }"
         var data = renderer.documentStart(themeCSS: css, baseURL: URL(string: "gemini://example.invalid/")!)
         for index in 0..<count {
             if index > 0, spacer > 0 { data.append(Data("<div style=\"height:\(spacer)px\"></div>".utf8)) }
@@ -225,6 +365,20 @@ private final class ImageTestDocument: NSObject, WKNavigationDelegate {
         return String(decoding: data, as: UTF8.self)
     }
 
+    func insertImage(source: URL) async throws -> Bool {
+        let figure = String(decoding: HTMLDocumentStreamRenderer().renderInlineImage(resourceURL: source,
+            linkURL: URL(string: "gemini://example.invalid/image-0.png")!, altText: "Image", figureIdentifier: "figure-0",
+            fileName: "image-0.png", mimeType: "image/png", sizeDescription: "small", figureClass: "inline-image"), as: UTF8.self)
+        return try await view.callAsyncJavaScript(BrowserDocumentScript.insertImage(lineIdentifier: "image-0", figure: figure),
+            in: nil, contentWorld: .defaultClient) as? Bool == true
+    }
+    func waitForJS(_ expression: String) async throws {
+        for _ in 0..<200 {
+            if try await js(expression) as? Bool == true { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Timed out waiting for image decoding")
+    }
     func js(_ script: String) async throws -> Any? { try await view.evaluateJavaScript(script, contentWorld: .defaultClient) }
     func renderFrame() async throws {
         // Flush layout without requesting a screenshot. WebKit snapshots of a hidden
@@ -266,5 +420,23 @@ private final class ImageMessageReceiver: NSObject, WKScriptMessageHandler {
     weak var document: ImageTestDocument?
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         if let body = message.body as? [String: String] { document?.messages.append(body) }
+    }
+}
+
+@MainActor
+private final class ImageTestResources: NSObject, WKURLSchemeHandler, WKScriptMessageHandler {
+    var svg = Data()
+    var requests: [URL] = []
+    var scriptMessages: [String] = []
+    func webView(_ webView: WKWebView, start urlSchemeTask: any WKURLSchemeTask) {
+        guard let url = urlSchemeTask.request.url else { return }
+        requests.append(url)
+        urlSchemeTask.didReceive(URLResponse(url: url, mimeType: "image/svg+xml", expectedContentLength: svg.count, textEncodingName: nil))
+        urlSchemeTask.didReceive(svg)
+        urlSchemeTask.didFinish()
+    }
+    func webView(_ webView: WKWebView, stop urlSchemeTask: any WKURLSchemeTask) {}
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        scriptMessages.append(String(describing: message.body))
     }
 }

@@ -744,7 +744,7 @@ final class BrowserModel: ObservableObject {
             """
         }
         theme += "\n" + preferences.contentWidth.css
-        theme += "\n:root { --mt-content-top-inset: \(inset)px; --mt-image-pending-icon: \(InlineImagePresentationScript.pendingIconCSS); }"
+        theme += "\n:root { --mt-content-top-inset: \(inset)px; --mt-image-pending-icon: \(InlineImagePresentationScript.pendingIconCSS); --mt-image-failed-icon: \(InlineImagePresentationScript.failureIconCSS); }"
         // Screen-only zoom survives navigation without overriding print's 100% scale.
         theme += """
 
