@@ -137,6 +137,44 @@ final class InlineImagePresentationTests: XCTestCase {
     }
 
     @MainActor
+    func testLoadedImageLinksToggleInBothLoadingModesWithoutRestartingAutoload() async throws {
+        // Successfully autoloaded images used to bypass the toggle and navigate
+        // instead, so the original link could not collapse them with a plain click.
+        for mode in [SameCapsuleImageLoading.off, .whenVisible] {
+            let document = ImageTestDocument()
+            try await document.load(document.html(mode: mode, count: 1))
+            try await document.renderFrame()
+            if mode == .whenVisible { try await document.wait { document.messages.count == 1 } }
+            document.resources.svg = Data("""
+            <svg xmlns="http://www.w3.org/2000/svg" width="8" height="8">
+              <rect width="8" height="8" fill="blue"/>
+            </svg>
+            """.utf8)
+            let inserted = try await document.insertImage(source: URL(string: "majortom-resource://image/test.png")!)
+            XCTAssertTrue(inserted)
+            let before = document.messages.count
+            // HTMLElement.click() also exercises the click path used by keyboard activation.
+            _ = try await document.js("document.getElementById('image-0').focus(); document.getElementById('image-0').click()")
+            try await document.wait { document.messages.count == before + 1 }
+            XCTAssertEqual(document.messages.last?["action"], "click")
+            XCTAssertEqual(document.messages.last?["id"], "image-0")
+
+            // Apply the browser's collapse update and rediscover the moved link.
+            // A deliberate collapse must not immediately trigger another autoload.
+            _ = try await document.js(BrowserDocumentScript.removeImage(lineIdentifier: "image-0"))
+            _ = try await document.js("document.body.append(document.querySelector('main'))")
+            try await document.renderFrame()
+            let remaining = try await document.js("document.querySelectorAll('figure').length") as? Int
+            XCTAssertEqual(remaining, 0)
+            XCTAssertEqual(document.messages.count, before + 1)
+
+            _ = try await document.js("document.getElementById('image-0').click()")
+            try await document.wait { document.messages.count == before + 2 }
+            XCTAssertEqual(document.messages.last?["action"], "click", "The collapsed link must allow manual expansion again")
+        }
+    }
+
+    @MainActor
     func testStopDuringDecodePreventsLateInsertion() async throws {
         let document = ImageTestDocument()
         try await document.load(document.html(mode: .whenVisible, count: 1))

@@ -157,7 +157,7 @@ public enum InlineImagePresentationScript {
             const line = element?.closest('a[href]')?.closest('a[data-mt-expandable]');
             if (!line) { return; }
             // Automatic loading must never trap a failed destination in inline retries.
-            if (line.dataset.mtImageAuto && (line.dataset.mtImageLoaded === 'true' || failures.has(line.id))) { return; }
+            if (line.dataset.mtImageAuto && failures.has(line.id)) { return; }
             event.preventDefault();
             event.stopPropagation();
             send(line, 'click');
