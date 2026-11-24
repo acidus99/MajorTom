@@ -18,7 +18,9 @@ Major Tom aims to be the best client for browsing [Geminispace](https://geminipr
 ### Content
 
 * Beautiful, native typography with full Unicode and color-emoji support 🎨🌮!
-* Content themes and reading widths settings
+* CSS-based theming lets you customize anything about how content is rendered.
+* 20 themes (10 dark, 10 light) ported from some of the most popular color schemes, including [Dracula](https://draculatheme.com/), [Nord](https://www.nordtheme.com/), [Solarized](https://ethanschoonover.com/solarized/), and [Catppuccin](https://catppuccin.com/).
+* Reading width settings.
 * Inline rendering of images
 * Rendering of inline Markdown-like styles including **\*\*bold\*\***, *\*italics\**, and ``monospace``.
 * ANSI colors and text styles for capsule ASCII art, adjusted for readability on your content theme.
@@ -43,12 +45,9 @@ Video demoing the many features:
 
 https://github.com/user-attachments/assets/7967524a-e630-4578-9ad8-218c08f817d9
 
-Native text rendering and Apple's Emoji:
-![Screen shot of Major Tom browser](Assets/GitHub/emoji.png)
+CSS-based theming lets you customize anything about how content is rendered. Choose from 20 themes (10 dark, 10 light) ported from some of the most popular color schemes, including [Dracula](https://draculatheme.com/), [Nord](https://www.nordtheme.com/), [Solarized](https://ethanschoonover.com/solarized/), and [Catppuccin](https://catppuccin.com/).
 
-Language translation that never leaves your machine using macOS's built in capabilities:
-
-![Screen recording of native translation of French text](Assets/GitHub/native-translate.gif)
+![Light and dark previews of Major Tom's 10 theme families](Assets/GitHub/major-tom-theme-families.webp)
 
 ## Getting Major Tom
 
