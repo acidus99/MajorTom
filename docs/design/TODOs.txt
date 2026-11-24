@@ -3,6 +3,8 @@ agents may suggest Features or Bugs. Unverified reports need reproduction.
 
 ## Features
 
+- Release Build Optimization - Optimize release builds for size, preserve matching debug symbols for crash diagnosis, and ensure the test suite runs in release configuration.
+- Report a Problem - Add Help > Report a Problem… to collect app/system information and relevant logs, let the user review the collected information, and export a diagnostic bundle without browsing content or secrets.
 - Reading Improvements - Improve plain-text presentation and actions for unsupported non-text content; agree on examples first.
 - Local Translation - Explore macOS APIs and Always Translate. Test: gemini://ploum.net/2026-08-03-offpunk_manifesto.gmi
 - Theme Management - Import CSS themes through the picker.
