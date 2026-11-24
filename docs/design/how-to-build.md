@@ -191,6 +191,12 @@ Normal releases increment minor; small corrections can increment patch; major is
 an explicit product or compatibility decision. This is a desktop-app numbering
 convention, not a claim of strict API-based Semantic Versioning.
 
+Before reporting success, the command reads the release back from GitHub and
+verifies that it is a draft with both completed uploads, matching local file sizes
+and the SHA-256 digests when supplied by GitHub. It prints the draft's direct URL.
+Drafts appear on the Releases page for signed-in users with repository write access;
+the Tags page lists the source tags and does not show draft release details.
+
 If the same candidate version already has a draft, preparation first finishes the
 replacement build and verifies that neither the source nor GitHub state changed.
 It then deletes and recreates that draft, replaces its assets, and moves its tag to
@@ -217,9 +223,12 @@ namespace, and CloudKit Development environment. Packaging rejects a signed buil
 whose CloudKit environment does not match its development or production channel.
 
 The five historical releases are retrospectively named `1.0`, `1.1`, `1.1.1`, `1.2`,
-and `1.3`, in publication order. Their original date tags, downloads, publication
-dates, and binary metadata remain intact. Their release titles own the retrospective
-version; future tags and titles agree. The next minor release after `1.3` is `1.4`.
+and `1.3`, in publication order. Their date tags have been converted to `v1.0.0`,
+`v1.1.0`, `v1.1.1`, `v1.2.0`, and `v1.3.0` at the original source commits. Publication
+dates, original tag dates, asset contents and filenames, and binary metadata remain
+intact. Release and download URLs now use the new tags; the old date tags are
+removed. Release-note links between historical versions use the converted tags.
+The next minor release after `1.3` is `1.4`.
 
 ### Content theme resources
 

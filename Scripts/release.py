@@ -44,8 +44,8 @@ def increment_version(version, bump):
 
 
 def release_version(release):
-    # Historical date tags and binaries stay intact; their renamed titles own
-    # the retrospective version. New releases use matching three-part tags.
+    # Canonical tags use three components; displayed titles omit a zero patch.
+    # Older date-tagged releases can still be read through their numbered titles.
     tag = release["tag_name"]
     title = re.fullmatch(r"Major Tom v?(" + VERSION_PATTERN + r")", release["name"] or "")
     title_version = parse_version(title.group(1)) if title else None
@@ -88,6 +88,26 @@ def minimum_build_number(releases):
     numbers = [int(match.group(1)) for item in releases
                for match in re.finditer(BUILD_MARKER, item.get("body") or "")]
     return max(numbers, default=0)
+
+
+def verified_draft(releases, version, tag, files):
+    draft = replacement_draft(releases, version, tag)
+    if not draft:
+        raise ValueError(f"GitHub did not return a draft release for {tag}")
+    for path in files:
+        matches = [asset for asset in draft["assets"] if asset["name"] == path.name]
+        if len(matches) != 1:
+            raise ValueError(f"Draft {tag} is missing its uploaded {path.name}")
+        asset = matches[0]
+        if asset["state"] != "uploaded" or asset["size"] != path.stat().st_size:
+            raise ValueError(f"Draft {tag} has an incomplete upload: {path.name}")
+        if asset.get("digest"):
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if asset["digest"] != f"sha256:{digest}":
+                raise ValueError(f"Draft {tag} has an incorrect upload: {path.name}")
+    if not draft.get("html_url"):
+        raise ValueError(f"GitHub did not return a link to draft {tag}")
+    return draft
 
 
 def run(*arguments, capture=True, env=None):
@@ -184,8 +204,10 @@ def prepare_release(bump):
         "origin", f"refs/tags/{tag}", capture=False)
     run("gh", "release", "create", tag, str(archive), str(checksum), "--repo", repository,
         "--title", f"Major Tom {display_version(version)}", "--notes-file", str(notes_path),
-        "--draft", "--verify-tag", capture=False)
+        "--draft", "--verify-tag")
+    uploaded = verified_draft(read_releases(repository), version, tag, (archive, checksum))
     print(f"Draft {display_version(version)}, build {build}, is ready to test and publish.")
+    print(f"Draft: {uploaded['html_url']}")
 
 
 def main():
