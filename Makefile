@@ -1,22 +1,29 @@
 .DEFAULT_GOAL := dev
 
-# Override when preparing another release on the same day, for example:
-#   make release VERSION=v2026.08.30-2
-VERSION ?= v$(shell git log -1 --format=%cd --date=format:%Y.%m.%d)
-BRANCH := $(shell git branch --show-current)
-RELEASE_ARCHIVE := Build/Release/MajorTom-$(VERSION)-macos.zip
-RELEASE_CHECKSUM := $(RELEASE_ARCHIVE).sha256
+# Make treats words after "release" as additional goals. Accept exactly one
+# version increment and reject other goals before executing any recipe.
+ifneq ($(filter release,$(MAKECMDGOALS)),)
+override RELEASE_BUMP := $(filter major minor patch,$(MAKECMDGOALS))
+ifneq ($(words $(MAKECMDGOALS)),2)
+$(error Usage: make release major|minor|patch)
+endif
+ifneq ($(words $(RELEASE_BUMP)),1)
+$(error Usage: make release major|minor|patch)
+endif
+ifneq ($(strip $(VERSION)$(BUMP)),)
+$(error Use make release major|minor|patch without VERSION or BUMP)
+endif
+endif
 APP_VIDEOS := $(wildcard Assets/App/*.mov)
 APP_VIDEO_RESOURCES := $(patsubst Assets/App/%.mov,Resources/%.mp4,$(APP_VIDEOS))
 
-.PHONY: dev test videos prod check-release release
+.PHONY: dev test videos release
 
 dev:
-	@$(MAKE) test
-	Scripts/build-app.sh
+	@python3 -B Scripts/develop.py dev
 
 test:
-	Scripts/run-tests.sh
+	@python3 -B Scripts/develop.py test
 
 videos: $(APP_VIDEO_RESOURCES)
 
@@ -34,33 +41,11 @@ Resources/%.mp4: Assets/App/%.mov
 		-movflags +faststart \
 		"$@"
 
-prod:
-	@$(MAKE) test
-	Scripts/notarize-app.sh "$(VERSION)"
-
-check-release:
-	@test -n "$(BRANCH)" || { echo "Release from a named branch, not a detached HEAD." >&2; exit 1; }
-	@git diff --quiet || { echo "Commit or stash tracked changes before releasing." >&2; exit 1; }
-	@git diff --cached --quiet || { echo "Commit or unstage staged changes before releasing." >&2; exit 1; }
-	@test -z "$$(git ls-files --others --exclude-standard)" || { echo "Commit, ignore, or remove untracked files before releasing." >&2; exit 1; }
-	@if git rev-parse --verify --quiet "refs/tags/$(VERSION)" >/dev/null; then \
-		echo "Tag $(VERSION) already exists locally." >&2; exit 1; \
-	fi
-	@if git ls-remote --exit-code --tags origin "refs/tags/$(VERSION)" >/dev/null 2>&1; then \
-		echo "Tag $(VERSION) already exists on origin." >&2; exit 1; \
-	fi
-	@gh auth status
-
 release:
-	@$(MAKE) check-release VERSION="$(VERSION)"
-	@$(MAKE) prod VERSION="$(VERSION)"
-	git tag -a "$(VERSION)" -m "Major Tom $(VERSION)"
-	git push origin HEAD:refs/heads/$(BRANCH)
-	git push origin "$(VERSION)"
-	gh release create "$(VERSION)" \
-		"$(RELEASE_ARCHIVE)" \
-		"$(RELEASE_CHECKSUM)" \
-		--title "Major Tom $(VERSION)" \
-		--generate-notes \
-		--draft \
-		--verify-tag
+	@python3 -B Scripts/release.py $(RELEASE_BUMP)
+
+ifneq ($(filter release,$(MAKECMDGOALS)),)
+.PHONY: major minor patch
+major minor patch:
+	@:
+endif

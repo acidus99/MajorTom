@@ -48,7 +48,7 @@ Use prose or lists instead of Markdown tables in design docs for editor compatib
 
 - Run `make test` after code changes. Build the app with `Scripts/build-app.sh`
   or `make dev` for app-target, resource, or packaging changes.
-- `make prod` and `make release` are human-run only.
+- `make release` and its notarization helper are human-run only.
 - Put temporary plans, logs, exports, and review artifacts in `/tmp/MajorTom`.
   Lasting project documents belong under `docs/`.
 - Practice good operational security. Keep secrets and real personal, account,

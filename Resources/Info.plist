@@ -18,7 +18,7 @@
     <string>Major Tom</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
-    <!-- Version values are stamped from git by Scripts/build-app.sh. The literals here
+    <!-- Version values are stamped by Scripts/build-app.sh. The literals here
          are only a fallback for a build that bypasses the script. -->
     <key>CFBundleShortVersionString</key>
     <string>0.0.0</string>
@@ -26,6 +26,8 @@
     <string>0</string>
     <key>MTBuildInfo</key>
     <string>local development build</string>
+    <key>MTBuildChannel</key>
+    <string>development</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>

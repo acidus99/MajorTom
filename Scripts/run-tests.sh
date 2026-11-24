@@ -75,7 +75,8 @@ fi
 
 # The compile is gated on its own because this is the step whose failure `swift test`
 # reports as success. `swift build --build-tests` returns nonzero for exactly that case,
-# and leaves the products `swift test` then reuses, so this is not a second full build.
+# and leaves the products for `swift test --skip-build` to execute. Only XCTest is
+# used in this repository; disable the empty Swift Testing runner and its footer.
 test_arguments=("$@")
 build_arguments=()
 # Selection belongs to the test runner; keep shared build options on both commands.
@@ -90,4 +91,4 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 swift build --build-tests "${swift_flags[@]}" ${build_arguments[@]+"${build_arguments[@]}"}
-swift test "${swift_flags[@]}" ${test_arguments[@]+"${test_arguments[@]}"}
+swift test --skip-build --disable-swift-testing "${swift_flags[@]}" ${test_arguments[@]+"${test_arguments[@]}"}

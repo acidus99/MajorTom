@@ -10,19 +10,19 @@ whichever machine did not write it.
 
 ## Development
 
-Run the test suite from the repository root:
+Build the development app from the repository root:
 
 ```bash
-make test
+make dev
+open "Build/Development/Major Tom.app"
 ```
 
-Use `make test` rather than `swift test`. XCTest is part of Xcode and absent from the
-Command Line Tools, and `swift test` exits 0 when a test target fails to compile — so
-with `xcode-select` pointed at the CLT the suite reports success while executing no
-tests at all. `Scripts/run-tests.sh` gates the compile on `swift build --build-tests`,
-whose exit code is honest, and falls back to any installed Xcode (located by bundle
-identifier) when the selected toolchain has no XCTest. Set `DEVELOPER_DIR` to choose a
-specific one.
+`make dev` and `make release major|minor|patch` run their required checks internally;
+there is no separate test step for either workflow. The `make test` target remains
+an engineering convenience. `Scripts/run-tests.sh` gates compilation on
+`swift build --build-tests`, whose exit code is reliable, and falls back to an
+installed Xcode (located by bundle identifier) when the selected toolchain has no
+XCTest. Set `DEVELOPER_DIR` to choose a specific one.
 
 Run the development executable directly:
 
@@ -36,6 +36,30 @@ Or build an ad-hoc-signed application bundle:
 Scripts/build-app.sh
 open "Build/Development/Major Tom.app"
 ```
+
+`make dev` runs the tests and packages the development app. It uses the orange
+DEVELOPMENT icon and displays `Development Build N` in About. Every packaged build
+gets a new number, including builds of uncommitted changes. Detailed diagnostics
+remain in bundle metadata: packaging time in UTC, commit, branch, and modified state.
+About shows only the development build number. `swift run`
+has no stamped app bundle and reports Local Development Build instead.
+
+`make dev` and `make test` show stage progress and a combined test summary. Complete
+compiler, test, and packaging output is retained in a private log under
+`/tmp/MajorTom`; the command prints its path. Failures stop the command, show error
+details, and point to the full log. For raw test output or test filters, run
+`Scripts/run-tests.sh` directly. The runner compiles once, then executes the built
+XCTest suites; the unused Swift Testing runner is disabled.
+
+Build counters live outside the checkout and disposable build output, in
+`~/Library/Application Support/Major Tom Builds`. Development and production have
+separate counters shared by this Mac's checkouts. Counter allocation is locked and
+atomic; failed packaging may leave gaps. The historical commit count is only a
+minimum when allocating a number, not the build identity. Set
+`MAJOR_TOM_BUILD_STATE_DIRECTORY` to use a different persistent directory, for
+example a temporary directory during packaging tests. Copying a built app to another
+Mac preserves its build number; independently building development apps on different
+Macs does not coordinate their counters.
 
 The ad-hoc build intentionally excludes iCloud entitlements. To exercise CloudKit and iCloud Keychain, provide an Apple Development identity and provisioning profile authorized for `iCloud.dev.gemi.major-tom`:
 
@@ -111,7 +135,10 @@ MAJOR_TOM_LIVE_TEST=1 swift test --disable-index-store --filter GeminiTransportI
 
 ## Notarized release
 
-Distribution happens locally; this repository does not use GitHub Actions. `make prod` builds, signs, notarizes, staples, and zips the app. `make release` additionally creates a draft GitHub Release for human review.
+Distribution happens locally; this repository does not use GitHub Actions. There
+are two app workflows: `make dev` for personal development, and
+`make release major|minor|patch` for production candidates. Release preparation needs
+Python 3 and an authenticated GitHub CLI in addition to the signing setup below.
 
 One-time setup:
 
@@ -135,32 +162,64 @@ One-time setup:
    MAJOR_TOM_NOTARY_ISSUER_ID="YOUR_ISSUER_ID"
    ```
 
-The first production build stores the notary credential in the login keychain as `major-tom-notary`. You can then remove the three `MAJOR_TOM_NOTARY_*` variables from the local file if desired.
+The first production build stores the notary credential in the login keychain as
+`major-tom-notary`. You can then remove the three `MAJOR_TOM_NOTARY_*` variables from
+the local file if desired.
 
-Build and test a release:
-
-```bash
-make prod VERSION=v2026.08.30
-```
-
-The ZIP and checksum are written to `Build/Release/`. Test the unzipped app before release.
-
-When the release is ready for review, authenticate the GitHub CLI and create a draft:
+Commit the intended source changes and use a clean, named branch. Authenticate the
+GitHub CLI with `gh auth login`, then choose exactly one version increment:
 
 ```bash
-gh auth login
-make release VERSION=v2026.08.30
+make release major
+make release minor
+make release patch
 ```
 
-For a second release on the same day, append a numeric suffix to the GitHub tag:
+These are alternatives, not three steps. There is no default increment and no
+manually maintained version file. The greatest numbered published full release on
+GitHub supplies the current version; drafts and prereleases do not advance it.
+From `1.8.2`, major produces `2.0`, minor produces `1.9`, and patch produces `1.8.3`.
+Numbers are integer components: `1.9` advances to `1.10`. Unknown public version
+formats and GitHub lookup failures stop preparation instead of guessing.
 
-```bash
-make release VERSION=v2026.08.30-2
-```
+The command runs tests, builds, signs, notarizes, staples, and creates the ZIP and
+checksum in `Build/Release/`. It pushes the source commit to the current branch on
+`origin`, creates the version tag, and uploads a draft GitHub Release. Public titles
+and About omit a zero patch component (`1.4`); tags and the app's
+`CFBundleShortVersionString` always use three components (`v1.4.0` and `1.4.0`).
+Normal releases increment minor; small corrections can increment patch; major is
+an explicit product or compatibility decision. This is a desktop-app numbering
+convention, not a claim of strict API-based Semantic Versioning.
 
-The app continues to use `2026.8.30` as its marketing version; its monotonically increasing build number distinguishes the builds.
+If the same candidate version already has a draft, preparation first finishes the
+replacement build and verifies that neither the source nor GitHub state changed.
+It then deletes and recreates that draft, replaces its assets, and moves its tag to
+the new source commit. Every rebuilt candidate gets a higher production build
+number, even when the public version stays the same. Published releases are never
+replaced. Tags without a matching draft require manual resolution. Build, signing,
+notarization, and pre-upload validation failures leave the existing draft intact;
+network failures during the final replacement can require inspecting GitHub and
+resolving a leftover tag before retrying.
 
-Review the generated notes and assets in GitHub, then publish the draft manually.
+Production build numbers continue increasing across public versions. A hidden
+`major-tom-build` comment in generated release notes records the number so another
+Mac, or a Mac with missing local state, can allocate above existing public and draft
+builds. Preserve that comment when editing notes. About shows only the public
+version; the build number remains in bundle diagnostics. Future Mac App Store
+distribution must also consult App Store Connect's build floor and coordinate the
+same public version across channels; uploading and sandbox compatibility are not
+part of the current GitHub release workflow.
+
+Review the draft's notes and test its downloadable app, then publish manually on
+GitHub. A draft contains the production app and uses production local and cloud
+data. Personal development builds retain their separate local stores, Keychain
+namespace, and CloudKit Development environment. Packaging rejects a signed build
+whose CloudKit environment does not match its development or production channel.
+
+The five historical releases are retrospectively named `1.0`, `1.1`, `1.1.1`, `1.2`,
+and `1.3`, in publication order. Their original date tags, downloads, publication
+dates, and binary metadata remain intact. Their release titles own the retrospective
+version; future tags and titles agree. The next minor release after `1.3` is `1.4`.
 
 ### Content theme resources
 
@@ -196,7 +255,7 @@ into the editable Application Support Themes directory.
   `swift build`, `swift test`, and `swift run`; never write `.build` to that share.
   Remove a poisoned network `.build` before rebuilding. `make test` handles this
   automatically through its runner.
-- `make prod` and `make release` sign/notarize/publish and are human-run only.
+- `make release` and its notarization helper sign/notarize/publish and are human-run only.
 
 The [UI design](subsystems/ui.md) records the native-control constraints that must
 survive changes. The [Data Persistence design](subsystems/data-persistence.md) owns

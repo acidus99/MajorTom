@@ -113,19 +113,11 @@ struct AboutView: View {
             .accessibilityLabel("Major Tom logo")
             .accessibilityValue(isLogoPressed ? "Pressed" : "Not pressed")
 
-            Text("Major Tom")
+            Text(AppVersion.isDevelopment ? "Major Tom Development" : "Major Tom")
                 .font(.system(size: 28, weight: .semibold))
 
-            VStack(spacing: 5) {
-                Text("Version \(AppVersion.short) (\(AppVersion.build))")
-                    .font(.system(size: 15))
-                Text(AppVersion.buildInfo)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .multilineTextAlignment(.center)
-            }
-            .accessibilityElement(children: .combine)
+            Text(AppVersion.label)
+                .font(.system(size: 15))
 
             Text("A native macOS browser for Gemini.")
                 .font(.callout)
